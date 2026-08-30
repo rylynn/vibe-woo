@@ -4,5 +4,6 @@
   "version": "0.1.0",
   "scripts": {
     "build": "node -e \"console.log('edge functions deploy: no build needed')\""
-  }
+  },
+  "type": "module"
 }
