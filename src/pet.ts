@@ -1,0 +1,704 @@
+import { breatheScale } from "./anim/breathe";
+import {
+  frameIntervalMs,
+  shouldRender,
+  type PetActivity,
+} from "./anim/frame-budget";
+import { MicroExpression, type EyeFrame } from "./anim/expression";
+import { Behavior, type Motion, type RoamScope } from "./anim/behavior";
+import {
+  createDragState,
+  onPointerDown,
+  onPointerMove,
+  onPointerUp,
+  type DragState,
+} from "./interact/drag";
+import { isInsideBox, type Box } from "./interact/hit-test";
+import { appearanceFor, type Appearance } from "./appearance";
+import { DEFAULT_STATE, type PetState } from "./state";
+import { drawEyes } from "./render/eyes";
+
+/** 像素艺术必须整数倍缩放，否则糊。基础格 48px。 */
+const BASE_CELL = 48;
+
+/**
+ * 可选的整数倍档位 → 48 / 96 / 144 / 192 px。
+ *
+ * 只能是整数倍：设计文档 5.2 明确牺牲滑块自由度来换像素锐利。
+ * 因此「比 144 小一半」（72px）不是合法取值 —— 96px 是最接近的合法档位。
+ */
+export const SIZE_STEPS = [1, 2, 3, 4] as const;
+
+/** 默认 2x = 96px。 */
+const DEFAULT_SIZE_INDEX = 1;
+
+/**
+ * 呼吸幅度。
+ *
+ * 刻意做得很含蓄（0.02）：宠物的生命感来自微表情 —— 眨眼节奏、眼神游走，
+ * 而非身体的缩放。幅度大了会变成廉价的「闪烁感」，看两天就腻。
+ *
+ * ⚠️ M3 换精灵图时必须废弃这套「代码缩放呼吸」。连续缩放会让实际渲染
+ * 边长在约 95% 的帧里不是 BASE_CELL 的整数倍。当前身体是纯色 fillRect，
+ * 无视觉影响；一旦改成 drawImage(spriteSheet, ...)，每帧重采样会让精灵
+ * 持续抖动。正确做法是把呼吸交给美术，在 idle 动画的 2–4 帧里让身体
+ * 高度差 1–2 个艺术像素，代码只负责按整数倍放大播放。
+ */
+const BREATHE_AMPLITUDE = 0.02;
+const POKE_FEEDBACK_MS = 400;
+
+/** 鼠标进入此范围（相对身体边长的倍数）时，宠物会看向它。 */
+const GAZE_RANGE = 3.2;
+
+/** 今日特效奖励（认真休息所得，隔天失效）。 */
+export type RewardEffect = "tomato" | "bubbles" | "sparkle";
+
+const BODY_COLOR = "#7cf5c4";
+const GLOW_COLOR = "#7cf5c4";
+const EYE_COLOR = "#0b1020";
+/** 眼睛高光，让眼神有生气。 */
+const CATCHLIGHT_COLOR = "#e8fff6";
+/** FLOW 状态的身体色，比常态更亮。 */
+const FOCUSED_COLOR = "#9dffd8";
+/** 睡眠时的身体色，压暗以示安静。 */
+const DIM_COLOR = "#4a8f78";
+/** 深夜黑眼圈颜色。 */
+const TIRED_COLOR = "#4a5a7a";
+
+/** dither 辉光的圈数。 */
+const GLOW_RINGS = 2;
+
+/** 整数 → 0..1 的确定性伪随机。星星特效的位置由它决定，无需维护状态。 */
+function pseudoRandom(seed: number): number {
+  // Math.imul 保证 32 位乘法不丢精度（seed 来自 nowMs，可能超出 2^32）
+  let x = Math.imul(seed | 0, 2654435761);
+  x ^= x >>> 13;
+  x = Math.imul(x, 1274126177);
+  x ^= x >>> 16;
+  return (x >>> 0) / 4294967296;
+}
+
+export class Pet {
+  private x = 200;
+  private y = 200;
+  /** SIZE_STEPS 的下标，而非倍数本身。 */
+  private sizeIndex = DEFAULT_SIZE_INDEX;
+  private activity: PetActivity = "idle";
+  private drag: DragState = createDragState();
+  private lastRenderMs = 0;
+  /** 不在家（串门中）：不绘制、不可点。 */
+  private hidden = false;
+  private lastTickMs = 0;
+  private pokeUntilMs = 0;
+  /** 本帧是否是刚刚被点击（用于触发惊讶表情）。 */
+  private pokeEdge = false;
+  private currentSide = BASE_CELL * SIZE_STEPS[DEFAULT_SIZE_INDEX];
+  /** 上一帧实际画过的区域，用于脏矩形清除。null 表示需整屏清除。 */
+  private dirty: Box | null = null;
+  /** 由 Rust 传感器推送的状态推导出的外观。 */
+  private look: Appearance = appearanceFor(DEFAULT_STATE);
+  private readonly expr = new MicroExpression();
+  private readonly behavior: Behavior;
+  private motion: Motion = "idle";
+  private facing: -1 | 1 = 1;
+  /** 待机动作进度 0..1，驱动形变。 */
+  private actPhase = 0;
+  /** 活动范围。默认只在附近晃，不打扰是第一原则。 */
+  private scope: RoamScope = "nearby";
+  private eye: EyeFrame = {
+    shape: "round",
+    lid: 0,
+    gazeX: 0,
+    gazeY: 0,
+  };
+  /** 最近已知的鼠标位置，用于视线跟随。 */
+  private cursor: { x: number; y: number } | null = null;
+  /** 今日特效奖励（吃番茄/吐泡泡/星星闪）。 */
+  private effects: Set<RewardEffect> = new Set();
+  private readonly startMs = performance.now();
+
+  constructor(
+    private readonly canvas: HTMLCanvasElement,
+    private readonly ctx: CanvasRenderingContext2D,
+  ) {
+    this.behavior = new Behavior(this.x, this.y);
+  }
+
+  /**
+   * 把宠物安置到初始位置（屏幕偏右下，避开常用的编辑器主区域）。
+   *
+   * 首次 resize 后调用。不做下落动画 —— 宠物是桌面上的伙伴，
+   * 出场就该在那儿待着，而不是从天上砸下来。
+   */
+  private placeInitial(): void {
+    const w = this.canvas.width;
+    const h = this.canvas.height;
+    if (w <= 0 || h <= 0) return;
+    this.x = Math.round(w * 0.78);
+    this.y = Math.round(h * 0.72);
+    this.behavior.placeAt(this.x, this.y);
+    this.dirty = null;
+  }
+
+  /** 基准边长，恒为 BASE_CELL 的整数倍。 */
+  private get side(): number {
+    return BASE_CELL * SIZE_STEPS[this.sizeIndex];
+  }
+
+  get body(): Box {
+    return { x: this.x, y: this.y, w: this.side, h: this.side };
+  }
+
+  /**
+   * 上一帧实际绘制的边长（含呼吸形变），与基准边长 body.w 不同。
+   *
+   * 存在的意义是让测试能断言真正画出去的尺寸 —— 只断言 body.w
+   * 会漏掉一切发生在呼吸环节的回归。
+   */
+  get renderedSide(): number {
+    return this.currentSide;
+  }
+
+  /** 仅供测试断言活跃度未被交互污染。 */
+  get activityForTest(): PetActivity {
+    return this.activity;
+  }
+
+  /** 当前眼睛状态，供测试与调试。 */
+  get eyeFrame(): EyeFrame {
+    return this.eye;
+  }
+
+  /** 当前动作，供测试与调试。 */
+  get currentMotion(): Motion {
+    return this.motion;
+  }
+
+  /** 设置活动范围。 */
+  setScope(s: RoamScope): void {
+    this.scope = s;
+  }
+
+  get scopeValue(): RoamScope {
+    return this.scope;
+  }
+
+  /** 命令宠物走向某点（速记仪式感用），不受范围限制。 */
+  summonTo(x: number): void {
+    const maxX = Math.max(0, this.canvas.width - this.side);
+    this.behavior.goto(x - this.side / 2, maxX);
+  }
+
+  /** 仪式结束，回到待机。 */
+  finishSummon(): void {
+    this.behavior.finishGoto();
+  }
+
+  /** 是否正在被召唤前往速记窗。 */
+  get summoned(): boolean {
+    return this.behavior.isSummoned;
+  }
+
+  /**
+   * 拖动中必须锁住鼠标接管权。
+   *
+   * 快速拖动时光标会甩到包围盒之外，若此刻 Rust 恢复穿透，pointermove
+   * 就会丢失，宠物「脱手」黏在半路。因此拖动期间要求 Rust 保持接管。
+   */
+  get isDragging(): boolean {
+    return this.drag.dragging;
+  }
+
+  private get poked(): boolean {
+    return performance.now() < this.pokeUntilMs;
+  }
+
+  /** 返回是否命中宠物身体，未命中则不拦截该次点击。 */
+  pointerDown(px: number, py: number): boolean {
+    if (!isInsideBox(px, py, this.body)) return false;
+    this.drag = onPointerDown(this.drag, { px, py }, this.body);
+    this.pokeUntilMs = performance.now() + POKE_FEEDBACK_MS;
+    this.pokeEdge = true;
+    return true;
+  }
+
+  /** 纯查询，不产生副作用。用于右键菜单等需要先判定再决定行为的场景。 */
+  hitTest(px: number, py: number): boolean {
+    return !this.hidden && isInsideBox(px, py, this.body);
+  }
+
+  pointerMove(px: number, py: number): void {
+    this.cursor = { x: px, y: py };
+    const pos = onPointerMove(this.drag, { px, py });
+    if (!pos) return;
+    this.x = pos.x;
+    this.y = pos.y;
+    // 拖动直接改位置，需同步给行为引擎，否则松手会从旧位置继续掉落
+    this.behavior.placeAt(this.x, this.y);
+  }
+
+  pointerUp(): void {
+    this.drag = onPointerUp(this.drag);
+  }
+
+  /** 由 rAF 驱动；返回本次是否真的绘制了（便于观察 CPU 占用）。 */
+  tick(nowMs: number): boolean {
+    if (this.hidden) return false; // 不在家：不画不推进，零开销
+    this.stepBehavior(nowMs);
+    const activity = this.effectiveActivity();
+    if (!shouldRender(nowMs, this.lastRenderMs, activity)) return false;
+    this.lastRenderMs = nowMs;
+    this.draw(nowMs);
+    return true;
+  }
+
+  /**
+   * 离家/回家（去好友家串门）。
+   *
+   * 离家时隐藏本体并清空画布；回家后强制重绘（lastRenderMs 归零）。
+   * hitTest/body 在隐藏时返回空，右键菜单与拖动自然失效 ——
+   * 基础功能（速记/设置/菜单栏）不依赖宠物本体，仍可用。
+   */
+  setHidden(h: boolean): void {
+    if (this.hidden === h) return;
+    this.hidden = h;
+    if (h) {
+      this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+      this.drag = onPointerUp(this.drag);
+    } else {
+      this.lastRenderMs = 0;
+    }
+  }
+
+  get isHidden(): boolean {
+    return this.hidden;
+  }
+
+  /**
+   * 推进自主行为。
+   *
+   * 与渲染分离：行为必须按真实时间步进，否则低帧率下宠物会走得像慢动作。
+   * 走动期间需要提帧，而提帧的判断又依赖 motion —— 所以先算行为再判帧率。
+   */
+  private stepBehavior(nowMs: number): void {
+    const dt = this.lastTickMs === 0 ? 0 : (nowMs - this.lastTickMs) / 1000;
+    this.lastTickMs = nowMs;
+    // 切窗口/休眠回来时 dt 可能极大，钳制避免宠物瞬移或穿透地面
+    const safeDt = Math.min(dt, 0.05);
+    if (safeDt <= 0) return;
+
+    const s = this.behavior.update({
+      dt: safeDt,
+      bounds: { width: this.canvas.width, height: this.canvas.height },
+      side: this.side,
+      held: this.drag.dragging,
+      asleep: this.look.asleep,
+      scope: this.scope,
+    });
+
+    this.motion = s.motion;
+    this.facing = s.facing;
+    this.actPhase = s.actPhase;
+    if (!this.drag.dragging) {
+      this.x = s.x;
+      this.y = s.y;
+    }
+  }
+
+  /**
+   * 交互期间临时提到 active，保证拖动、点击反馈与眨眼动画不掉帧。
+   *
+   * 关键：不写回 this.activity。否则拖一下睡着的宠物，松手后它会
+   * 「忘记」自己本该在睡觉 —— 传感器驱动下这会变成真 bug。
+   */
+  private effectiveActivity(): PetActivity {
+    if (this.poked || this.drag.dragging) return "active";
+    // 任何移动或形变中的动作都必须提帧，否则会一顿一顿的
+    if (this.motion !== "idle" && this.motion !== "sleep") return "active";
+    // 眨眼只有约 180ms，睡眠态 4fps 下会被跳过导致「跳帧眨眼」。
+    // 眨眼期间临时提帧，眨完自动回落。
+    if (this.eye.lid > 0 && this.eye.shape !== "closed") return "active";
+    return this.activity;
+  }
+
+  private draw(nowMs: number): void {
+    const { ctx } = this;
+
+    // 「不动」意味着视觉上完全静止：位置与尺寸都不变。
+    //
+    // 呼吸缩放会让整个身体轮廓伸缩，这是余光最容易察觉的那种「动」——
+    // 保留它就谈不上不动。眨眼与眼神保留：那只是眼睛区域几个像素的
+    // 局部变化，不改变轮廓，不会干扰你，但宠物不会变成一张死图片。
+    const amp = this.scope === "still" ? 0 : BREATHE_AMPLITUDE;
+    const scale = breatheScale(
+      nowMs - this.startMs,
+      this.look.breathePeriodMs,
+      amp,
+    );
+    const side = Math.round(this.side * scale);
+    this.currentSide = side;
+
+    // 挤压/拉伸形变：动作的可读性主要来自这个，不是位移本身
+    const { w, h } = this.squash(side);
+    this.currentSide = w;
+
+    // 水平居中、底部对齐 —— 形变时脚不能离地，否则像在飘
+    const px = Math.round(this.x + (this.side - w) / 2);
+    const bob = this.motion === "walk" ? this.walkBob(nowMs, side) : 0;
+    const py = Math.round(this.y + (this.side - h) - bob);
+
+    this.eye = this.expr.update(nowMs, {
+      asleep: this.look.asleep,
+      stuck: this.look.peeking,
+      flow: this.look.tint === "focused",
+      tired: this.look.tired,
+      poked: this.pokeEdge,
+      mood: this.look.mood === "content" || this.look.mood === "frustrated" || this.look.mood === "bored"
+        ? this.look.mood
+        : null,
+      gazeTarget: this.gazeTarget(px, py, w, h),
+    });
+    this.pokeEdge = false;
+
+    // 脏矩形清除：只擦上一帧画过的区域，不整屏 clearRect。
+    // 全屏清除（1440×900 ≈ 130 万像素）会让 GPU 每帧重新合成整个透明层。
+    this.clearDirty();
+
+    // 辉光只在「进入状态」时出现 —— 它是语义信号（你来劲了），
+    // 不是常驻装饰。常亮的辉光就是廉价的闪烁感。
+    if (this.look.tint === "focused") {
+      this.drawDitherGlow(px, py, w, h);
+    }
+
+    ctx.fillStyle = this.bodyColor();
+    ctx.fillRect(px, py, w, h);
+
+    drawEyes(
+      ctx,
+      { bodyX: px, bodyY: py, w, h },
+      this.eye,
+      {
+        iris: EYE_COLOR,
+        catchlight: CATCHLIGHT_COLOR,
+        eyebag: this.look.tired ? TIRED_COLOR : null,
+      },
+    );
+
+    if (this.effects.size > 0) {
+      this.drawEffects(ctx, px, py, w, h, nowMs);
+    }
+
+    this.dirty = this.glowBounds(px, py, w, h);
+  }
+
+  /**
+   * 今日特效：吃番茄 / 吐泡泡 / 星星闪。
+   *
+   * 全部无状态、由 nowMs 确定性驱动 —— 没有粒子系统，没有缓冲区，
+   * 每帧直接按相位画。像素风容错高，12fps 的 idle 档也够顺。
+   */
+  private drawEffects(
+    ctx: CanvasRenderingContext2D,
+    px: number,
+    py: number,
+    w: number,
+    h: number,
+    nowMs: number,
+  ): void {
+    const cell = Math.max(2, Math.round(w / 24));
+
+    if (this.effects.has("tomato")) {
+      // 咀嚼节奏：4 秒一循环，前 1.6 秒叼着番茄
+      const phase = (nowMs % 4000) / 4000;
+      if (phase < 0.4) {
+        const size = cell * 3;
+        const tx = Math.round(px + w / 2 + this.facing * w * 0.22 - size / 2);
+        const ty = Math.round(py + h * 0.68);
+        ctx.fillStyle = "#ff5c47";
+        ctx.fillRect(tx, ty, size, size);
+        // 番茄蒂：顶上一小块绿
+        ctx.fillStyle = "#5ccc6a";
+        ctx.fillRect(tx + cell, ty - cell, cell, cell);
+        // 咀嚼起伏：第二阶段往下蹭一个像素
+        if (phase > 0.2) ctx.fillRect(tx, ty + 1, size, 0);
+      }
+    }
+
+    if (this.effects.has("bubbles")) {
+      // 两个泡泡错相位上浮：2.6 秒一轮，飘到头顶约 0.55 倍边长处消散。
+      // 不用透明度渐隐 —— 与辉光同一硬约束：绝不产生半透明像素，
+      // 消散感用「升到高处就消失」表达，够像素风了。
+      const rise = h * 0.55;
+      for (const off of [0, 0.5]) {
+        const p = ((nowMs / 2600 + off) % 1 + 1) % 1;
+        if (p > 0.75) continue; // 后段消散
+        const bx = Math.round(px + w * (0.62 - 0.24 * p));
+        const by = Math.round(py - cell - p * rise);
+        const size = Math.max(2, cell - 1);
+        ctx.fillStyle = "#bfe9ff";
+        ctx.fillRect(bx, by, size, size);
+        ctx.fillStyle = "#e8f7ff";
+        ctx.fillRect(bx, by, Math.max(1, size - 2), Math.max(1, size - 2));
+      }
+    }
+
+    if (this.effects.has("sparkle")) {
+      // 1.8 秒闪一颗：位置由轮次伪随机决定，前 0.25 段可见。
+      // 同样不做透明度 —— 一闪而过本身就是闪烁感。
+      const round = Math.floor(nowMs / 1800);
+      const p = (nowMs % 1800) / 1800;
+      if (p < 0.25) {
+        const r = pseudoRandom(round);
+        const sx = Math.round(px + w * (0.1 + 0.8 * r));
+        const sy = Math.round(py + h * (0.1 + 0.8 * pseudoRandom(round + 1)));
+        const size = cell;
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(sx - size, sy, size, size);
+        ctx.fillRect(sx + size, sy, size, size);
+        ctx.fillRect(sx, sy - size, size, size);
+        ctx.fillRect(sx, sy + size, size, size);
+      }
+    }
+  }
+
+  /**
+   * 挤压/拉伸形变（squash & stretch）。
+   *
+   * 这是动画的基本功，也是待机动作可读性的主要来源 —— 位移本身很小，
+   * 观众感知到的是形状变化。体积近似守恒（宽变窄则高变高）。
+   *
+   * 量化到整数像素：像素艺术里亚像素尺寸会让边缘看起来在抖。
+   */
+  private squash(side: number): { w: number; h: number } {
+    let sx = 1;
+    let sy = 1;
+
+    switch (this.motion) {
+      case "hop":
+        // 腾空时略微拉长，符合物理直觉
+        sx = 0.9;
+        sy = 1.12;
+        break;
+      case "stretch": {
+        // 伸懒腰：先压扁蓄力，再往上抻长
+        const t = this.actPhase;
+        const wave = Math.sin(t * Math.PI);
+        if (t < 0.35) {
+          sx = 1 + 0.14 * wave;
+          sy = 1 - 0.12 * wave;
+        } else {
+          sx = 1 - 0.1 * wave;
+          sy = 1 + 0.18 * wave;
+        }
+        break;
+      }
+      case "lookaround":
+        // 张望只转头，身体几乎不变
+        sx = 1;
+        sy = 1;
+        break;
+      default:
+        break;
+    }
+
+    return {
+      w: Math.max(4, Math.round(side * sx)),
+      h: Math.max(4, Math.round(side * sy)),
+    };
+  }
+
+  /**
+   * 走动时的上下起伏。
+   *
+   * 量化到整数像素：像素艺术里连续的亚像素位移会让边缘看起来在抖。
+   * 幅度只有 1–2 个渲染像素，足够读出「在走」，又不显得夸张。
+   */
+  private walkBob(nowMs: number, side: number): number {
+    const cell = Math.max(1, Math.round(side / 24));
+    const phase = Math.sin((nowMs / 150) * Math.PI);
+    return phase > 0.35 ? cell : 0;
+  }
+
+  /**
+   * 鼠标在附近时返回方向向量（-1..1），否则 null（转为随机扫视）。
+   *
+   * 让宠物看向你的光标是「被注视」感的来源，成本极低但效果明显。
+   */
+  private gazeTarget(
+    px: number,
+    py: number,
+    w: number,
+    h: number,
+  ): { x: number; y: number } | null {
+    if (this.cursor) {
+      const cx = px + w / 2;
+      const cy = py + h / 2;
+      const range = this.side * GAZE_RANGE;
+      const dx = this.cursor.x - cx;
+      const dy = this.cursor.y - cy;
+      if (Math.abs(dx) <= range && Math.abs(dy) <= range) {
+        return { x: dx / range, y: dy / range };
+      }
+    }
+    // 走动或张望时看向朝向 —— 边走边盯着别处会显得很怪
+    if (this.motion === "walk" || this.motion === "lookaround") {
+      return { x: this.facing * 0.85, y: 0 };
+    }
+    return null;
+  }
+
+  private bodyColor(): string {
+    switch (this.look.tint) {
+      case "focused":
+        return FOCUSED_COLOR;
+      case "dim":
+        return DIM_COLOR;
+      default:
+        return BODY_COLOR;
+    }
+  }
+
+  /** 擦除上一帧的脏矩形；首帧或 resize 后为整屏。 */
+  private clearDirty(): void {
+    const d = this.dirty;
+    if (!d) {
+      this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+      return;
+    }
+    this.ctx.clearRect(d.x, d.y, d.w, d.h);
+  }
+
+  /**
+   * 宠物加上辉光与特效后的实际占用范围。
+   *
+   * 容差要盖住形变、走动起伏与移动位移，否则移动时会留下残影。
+   * 特效（泡泡上浮、星星闪烁）会画到身体之外，也要算进来。
+   */
+  private glowBounds(px: number, py: number, w: number, h: number): Box {
+    const moving = this.motion !== "idle" && this.motion !== "sleep";
+    const base = Math.max(w, h);
+    let pad = this.glowInset(base) + (moving ? Math.max(10, base * 0.25) : 3);
+    if (this.effects.size > 0) {
+      pad = Math.max(pad, base * 0.65);
+    }
+    return {
+      x: px - pad,
+      y: py - pad,
+      w: w + pad * 2,
+      h: h + pad * 2,
+    };
+  }
+
+  /** 辉光向外延伸的距离，与 drawDitherGlow 的最外圈保持一致。 */
+  private glowInset(side: number): number {
+    return this.glowCell(side) * GLOW_RINGS;
+  }
+
+  private glowCell(side: number): number {
+    return Math.max(2, Math.round(side / 24));
+  }
+
+  /**
+   * dithering 辉光：棋盘点阵，每个像素 alpha 只有 0 或 1。
+   *
+   * 不用 shadowBlur / CSS bloom：那会产生大片低 alpha 像素，且比点阵
+   * 昂贵得多。点阵发光也更贴合像素美术。详见设计文档 3.1.4。
+   */
+  private drawDitherGlow(px: number, py: number, bw: number, bh: number): void {
+    const { ctx } = this;
+    const cell = this.glowCell(Math.max(bw, bh));
+    ctx.fillStyle = GLOW_COLOR;
+
+    for (let ring = 1; ring <= GLOW_RINGS; ring++) {
+      const inset = ring * cell;
+      const x0 = px - inset;
+      const y0 = py - inset;
+      const w = bw + inset * 2;
+      const h = bh + inset * 2;
+
+      for (let i = 0; i < w; i += cell) {
+        for (let j = 0; j < h; j += cell) {
+          const onEdge = i < cell || j < cell || i >= w - cell || j >= h - cell;
+          if (!onEdge) continue;
+          // 棋盘取点：ring 越外，点阵越稀
+          if ((i / cell + j / cell + ring) % (ring + 1) !== 0) continue;
+          ctx.fillRect(x0 + i, y0 + j, cell, cell);
+        }
+      }
+    }
+  }
+
+  resize(w: number, h: number): void {
+    const first = this.canvas.width === 0 || this.canvas.height === 0;
+    this.canvas.width = w;
+    this.canvas.height = h;
+    // 尺寸变化会清空画布内容，强制下一帧立即重绘
+    this.lastRenderMs = 0;
+    // 画布已被清空，上一帧的脏矩形失效
+    this.dirty = null;
+
+    if (first) {
+      this.placeInitial();
+      return;
+    }
+    // 屏幕变小后宠物可能落在可视区之外，拉回来
+    this.x = Math.min(this.x, Math.max(0, w - this.side));
+    this.y = Math.min(this.y, Math.max(0, h - this.side));
+    this.behavior.placeAt(this.x, this.y);
+  }
+
+  cycleSize(): void {
+    this.sizeIndex = (this.sizeIndex + 1) % SIZE_STEPS.length;
+    // 尺寸变化后旧脏矩形范围不足以覆盖新尺寸，会留下残影
+    this.dirty = null;
+  }
+
+  /** 设置尺寸档位。越界会让宠物直接消失，故做钳制。 */
+  setSizeIndex(i: number): void {
+    const next = Math.min(SIZE_STEPS.length - 1, Math.max(0, Math.floor(i)));
+    if (next === this.sizeIndex) return;
+    this.sizeIndex = next;
+    this.dirty = null;
+  }
+
+  get sizeIndexValue(): number {
+    return this.sizeIndex;
+  }
+
+  /** 设置今日特效（Rust 奖励事件驱动）。空数组即清除。 */
+  setEffects(list: RewardEffect[]): void {
+    const next = new Set(list);
+    if (next.size === this.effects.size && [...next].every((e) => this.effects.has(e))) {
+      return;
+    }
+    this.effects = next;
+    // 特效范围与身体不同（泡泡往上飘），脏矩形策略要跟着变
+    this.dirty = null;
+    this.lastRenderMs = 0;
+  }
+
+  /** 当前生效的特效（供测试断言）。 */
+  get activeEffects(): Set<RewardEffect> {
+    return this.effects;
+  }
+
+  /** 接收 Rust 传感器推送的状态。 */
+  applyState(s: PetState): void {
+    this.look = appearanceFor(s);
+    this.activity = this.look.activity;
+    // 表情与配色已变，立即重绘而非等下一个帧率周期
+    this.lastRenderMs = 0;
+  }
+
+  get appearance(): Appearance {
+    return this.look;
+  }
+
+  setActivity(a: PetActivity): void {
+    this.activity = a;
+  }
+
+  get debugIntervalMs(): number {
+    return frameIntervalMs(this.effectiveActivity());
+  }
+}

@@ -1,0 +1,13 @@
+name = "vibe-pet-sync"
+main = "src/index.js"
+compatibility_date = "2024-12-01"
+
+# KV 命名空间需先创建：
+#   npx wrangler kv namespace create SYNC
+# 然后把输出的 id 填到下面并取消注释
+# [[kv_namespaces]]
+# binding = "SYNC"
+# id = "<填入你的 namespace id>"
+
+# 管理密钥（签发注册邀请码），部署后设置：
+#   npx wrangler secret put ADMIN_TOKEN

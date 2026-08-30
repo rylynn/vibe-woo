@@ -1,0 +1,33 @@
+[package]
+name = "vibe-pet"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# macos-private-api 是 macOS 透明窗口的必需项，漏了窗口会是白底
+tauri = { version = "2", features = ["macos-private-api", "tray-icon", "image-png"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libc = "0.2"
+rand = "0.8"
+reqwest = { version = "0.12", features = ["json", "stream"] }
+futures-util = "0.3"
+tokio = { version = "1", features = ["rt"] }
+
+# 安全兜底：全局快捷键提供不依赖 UI 的强制退出通道；
+# 单实例锁避免多开导致多层全屏透明窗叠加。
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-single-instance = "2"
+
+# 仅 macOS：把窗口转成 nonactivating NSPanel，实现「置顶但不抢焦点」。
+# 注意 objc2 必须与 tauri-nspanel 使用同一版本，否则 Message trait
+# 跨大版本不兼容会导致编译失败（tauri-nspanel 2.1 用 objc2 0.6）。
+[target.'cfg(target_os = "macos")'.dependencies]
+tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", branch = "v2.1" }
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSWorkspace", "NSRunningApplication"] }
+objc2-foundation = { version = "0.3", features = ["NSDate", "NSCalendar", "NSString"] }

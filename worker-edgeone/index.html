@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Vibe Pet 同步服务</title>
+    <style>
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        background: #0d1117;
+        color: #e8ecf4;
+        font: 14px/1.7 ui-sans-serif, -apple-system, system-ui, sans-serif;
+      }
+      main { max-width: 560px; padding: 32px; }
+      h1 { color: #7cf5c4; font-size: 20px; }
+      code {
+        background: #161b26;
+        padding: 2px 6px;
+        border-radius: 4px;
+        color: #7cf5c4;
+      }
+      li { margin: 6px 0; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Vibe Pet 同步服务已部署</h1>
+      <p>把这个地址填进宠物设置的「好友 → 服务器」即可。</p>
+      <p>支持的端点：</p>
+      <ul>
+        <li><code>POST /api/register</code> — 注册，获取 pet_id 与邀请码</li>
+        <li><code>POST /api/state</code> — 上报粗粒度状态</li>
+        <li><code>POST /api/befriend</code> — 用邀请码添加好友</li>
+        <li><code>GET /api/friends</code> — 拉好友列表</li>
+        <li><code>POST /api/event</code> — 投递串门/互动事件</li>
+        <li><code>GET /api/events</code> — 拉取并清空事件队列</li>
+      </ul>
+      <p>隐私：本服务只存宠物过滤后的粗粒度状态（写代码/闲着/离开），
+      不接触任何应用名、窗口标题或输入内容。</p>
+    </main>
+  </body>
+</html>

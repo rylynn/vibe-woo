@@ -1,0 +1,730 @@
+<!doctype html>
+<html lang="zh">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Vibe Pet</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        background: transparent;
+        overflow: hidden;
+        user-select: none;
+        -webkit-user-select: none;
+      }
+
+      /*
+       * pointer-events: none 是第二道穿透防线。
+       *
+       * canvas 铺满全屏，WKWebView 的 hit-test 只看元素矩形、不看绘制内容的
+       * alpha —— 若不禁用它的指针事件，webview 层就会先吞掉所有点击，
+       * 窗口层的 ignoreCursorEvents 再正确也没用。
+       *
+       * 宠物本体的点击由窗口层（Rust 按包围盒切换接管）负责，
+       * canvas 只负责画，不负责收事件。
+       */
+      #pet-canvas {
+        position: fixed;
+        inset: 0;
+        image-rendering: pixelated;
+        pointer-events: none;
+      }
+
+      /* 菜单必须能接收点击 —— 它是主要的退出入口 */
+      .pet-menu {
+        position: fixed;
+        z-index: 10;
+        /* 给右上角 × 留位 */
+        padding-top: 22px;
+        pointer-events: auto;
+        min-width: 132px;
+        padding: 4px;
+        border-radius: 8px;
+        background: rgba(18, 22, 34, 0.96);
+        border: 1px solid rgba(124, 245, 196, 0.35);
+        box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+        font: 12px/1.4 ui-sans-serif, -apple-system, system-ui, sans-serif;
+      }
+
+      .pet-menu-item {
+        display: block;
+        width: 100%;
+        padding: 7px 10px;
+        border: 0;
+        border-radius: 5px;
+        background: transparent;
+        color: #e8ecf4;
+        text-align: left;
+        cursor: pointer;
+        font: inherit;
+      }
+
+      .pet-menu-item:hover {
+        background: rgba(124, 245, 196, 0.16);
+        color: #7cf5c4;
+      }
+
+      .pet-menu-close {
+        position: absolute;
+        top: 4px;
+        right: 6px;
+        border: 0;
+        background: transparent;
+        color: #8b93a7;
+        font-size: 15px;
+        line-height: 1;
+        cursor: default;
+        padding: 0;
+      }
+
+      .pet-menu-close:hover {
+        color: #fff;
+      }
+
+      /* 设置面板同样必须能接收点击与键盘输入 */
+      .pet-settings {
+        position: fixed;
+        z-index: 20;
+        pointer-events: auto;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        width: 336px;
+        padding: 0 0 10px;
+        border-radius: 12px;
+        background: rgba(16, 20, 30, 0.97);
+        border: 1px solid rgba(124, 245, 196, 0.3);
+        box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+        color: #e8ecf4;
+        font: 12px/1.5 ui-sans-serif, -apple-system, system-ui, sans-serif;
+      }
+
+      .pet-settings-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 11px 14px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        font-weight: 600;
+        color: #7cf5c4;
+        cursor: grab; /* 标题栏是拖动把手 */
+      }
+
+      .pet-settings-head:active {
+        cursor: grabbing;
+      }
+
+      /* hover 高亮所在行，明确「点下去会落在哪」 */
+      .pet-settings-row:hover {
+        background: rgba(124, 245, 196, 0.06);
+        border-radius: 6px;
+      }
+
+      .pet-settings-row select,
+      .pet-settings-row input {
+        cursor: pointer;
+      }
+
+      .pet-reminder-row:hover,
+      .pet-friend-row:hover,
+      .pet-today-row:hover {
+        background: rgba(255, 255, 255, 0.04);
+      }
+
+      .pet-settings-close {
+        border: 0;
+        background: transparent;
+        color: #8b93a7;
+        font-size: 17px;
+        line-height: 1;
+        cursor: default;
+        padding: 0 2px;
+      }
+
+      .pet-settings-close:hover {
+        color: #fff;
+      }
+
+      .pet-settings-divider {
+        margin: 8px 14px 4px;
+        padding-top: 8px;
+        border-top: 1px solid rgba(255, 255, 255, 0.08);
+        color: #8b93a7;
+        font-size: 11px;
+      }
+
+      .pet-settings-row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 6px 14px;
+      }
+
+      .pet-settings-row label {
+        flex: 0 0 74px;
+        color: #a8b0c2;
+      }
+
+      .pet-settings-row select,
+      .pet-settings-row input[type="text"],
+      .pet-settings-row input[type="password"] {
+        flex: 1;
+        min-width: 0;
+        padding: 5px 7px;
+        border-radius: 6px;
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        background: rgba(255, 255, 255, 0.06);
+        color: #e8ecf4;
+        font: inherit;
+      }
+
+      .pet-settings-row select:focus,
+      .pet-settings-row input:focus {
+        outline: none;
+        border-color: rgba(124, 245, 196, 0.55);
+      }
+
+      .pet-settings-slider {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .pet-settings-slider input {
+        flex: 1;
+        accent-color: #7cf5c4;
+      }
+
+      .pet-settings-slider span {
+        flex: 0 0 34px;
+        color: #7cf5c4;
+      }
+
+      .pet-settings-hint {
+        padding: 0 14px 4px 84px;
+        color: #6d768c;
+        font-size: 11px;
+      }
+
+      .pet-settings-foot {
+        margin-top: 8px;
+        padding: 8px 14px 0;
+        border-top: 1px solid rgba(255, 255, 255, 0.08);
+        color: #6d768c;
+        font-size: 11px;
+      }
+
+      /* 速记输入条：必须能接收点击与键盘输入 */
+      .pet-quicknote {
+        position: fixed;
+        z-index: 30;
+        pointer-events: auto;
+        display: flex;
+        align-items: center;
+        height: 46px;
+        padding: 0 14px;
+        border-radius: 12px;
+        background: rgba(16, 20, 30, 0.98);
+        border: 1px solid rgba(124, 245, 196, 0.4);
+        box-shadow: 0 10px 32px rgba(0, 0, 0, 0.6);
+        font: 15px/1.4 ui-sans-serif, -apple-system, system-ui, sans-serif;
+      }
+
+      .pet-quicknote input {
+        flex: 1;
+        min-width: 0;
+        border: 0;
+        background: transparent;
+        color: #eef2fa;
+        font: inherit;
+        outline: none;
+      }
+
+      .pet-quicknote input::placeholder,
+      .pet-quicknote textarea {
+        color: #6d768c;
+      }
+
+      .pet-quicknote textarea {
+        flex: 1;
+        min-width: 0;
+        height: 24px;
+        border: 0;
+        background: transparent;
+        color: #eef2fa;
+        font: inherit;
+        outline: none;
+        resize: none;
+        line-height: 1.5;
+      }
+
+      .pet-quicknote textarea::placeholder {
+        color: #6d768c;
+      }
+
+      /* 单行高度时用 flex 居中 */
+      .pet-quicknote {
+        align-items: flex-start;
+        height: auto;
+        min-height: 46px;
+        padding: 11px 14px;
+      }
+
+      .pet-quicknote-close {
+        flex: 0 0 auto;
+        margin-left: 8px;
+        border: 0;
+        background: transparent;
+        color: #8b93a7;
+        font-size: 17px;
+        line-height: 1;
+        cursor: default;
+        padding: 0 2px;
+      }
+
+      .pet-quicknote-close:hover {
+        color: #fff;
+      }
+
+      /* 好友行 */
+      .pet-friend-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 14px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+      }
+
+      .pet-friend-dot {
+        flex: 0 0 8px;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+      }
+
+      .pet-friend-nick {
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: #c6cddd;
+      }
+
+      .pet-friend-state {
+        flex: 0 0 auto;
+        font-size: 11px;
+      }
+
+      .pet-friend-aff {
+        flex: 0 0 auto;
+        color: #ff8fa3;
+        font-size: 11px;
+        font-variant-numeric: tabular-nums;
+      }
+
+      /* 提醒列表行 */
+      .pet-reminder-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 14px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+      }
+
+      .pet-reminder-time {
+        flex: 0 0 44px;
+        color: #7cf5c4;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .pet-reminder-text {
+        flex: 1;
+        min-width: 0;
+        color: #c6cddd;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .pet-reminder-del {
+        flex: 0 0 auto;
+        padding: 2px 8px;
+        border: 1px solid rgba(255, 150, 130, 0.4);
+        background: transparent;
+        color: #ffab9d;
+        font-size: 11px;
+        cursor: pointer;
+      }
+
+      .pet-reminder-del:hover {
+        background: rgba(255, 150, 130, 0.15);
+      }
+
+      /* 宠物气泡 */
+      .pet-bubble {
+        position: fixed;
+        z-index: 28;
+        pointer-events: auto;
+        max-width: 240px;
+        padding: 9px 12px;
+        background: #10141e;
+        border: 2px solid #7cf5c4;
+        color: #e8ecf4;
+        font: 13px/1.5 ui-sans-serif, -apple-system, system-ui, sans-serif;
+      }
+
+      .pet-bubble-text {
+        word-break: break-all;
+      }
+
+      /* LLM 来源徽章：气泡文本前的小标签 */
+      .pet-bubble-ai {
+        display: none;
+        margin-right: 4px;
+        padding: 1px 4px;
+        border: 1px solid rgba(168, 192, 255, 0.7);
+        border-radius: 3px;
+        background: rgba(168, 192, 255, 0.12);
+        color: #a8c0ff;
+        font: 10px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+        vertical-align: 1px;
+      }
+
+      .pet-bubble-actions {
+        margin-top: 6px;
+        text-align: right;
+      }
+
+      .pet-bubble-confirm {
+        padding: 3px 12px;
+        border: 1px solid rgba(124, 245, 196, 0.6);
+        background: rgba(124, 245, 196, 0.12);
+        color: #7cf5c4;
+        font: 12px/1.4 ui-sans-serif, -apple-system, sans-serif;
+        cursor: pointer;
+      }
+
+      .pet-bubble-confirm:hover {
+        background: rgba(124, 245, 196, 0.25);
+      }
+
+      /* 气泡尾巴：CSS 三角形，水平位置由 --pet-tail-x 控制 */
+      .pet-bubble::after {
+        content: "";
+        position: absolute;
+        bottom: -10px;
+        left: var(--pet-tail-x, 50%);
+        margin-left: -6px;
+        border: 6px solid transparent;
+        border-top-color: #7cf5c4;
+        border-bottom: 0;
+      }
+
+      /* 右上角通知条 */
+      .pet-banner {
+        position: fixed;
+        z-index: 40;
+        pointer-events: auto;
+        top: 12px;
+        right: 12px;
+        width: 264px;
+        padding: 11px 14px;
+        background: #10141e;
+        border: 2px solid #ffe066;
+        color: #e8ecf4;
+        font: 13px/1.5 ui-sans-serif, -apple-system, system-ui, sans-serif;
+        cursor: default;
+        animation: pet-banner-in 0.25s ease-out;
+      }
+
+      @keyframes pet-banner-in {
+        from {
+          transform: translateX(24px);
+          opacity: 0;
+        }
+        to {
+          transform: translateX(0);
+          opacity: 1;
+        }
+      }
+
+      /* 提醒大卡片：更大、更醒目（用户需求） */
+      .pet-banner.pet-banner-reminder,
+      .pet-banner.pet-banner-important {
+        width: 340px;
+        padding: 16px 18px;
+        font-size: 14px;
+        box-shadow: 0 10px 36px rgba(0, 0, 0, 0.55);
+        animation: pet-banner-in 0.25s ease-out, pet-banner-pulse 2.4s ease-in-out 0.3s 3;
+      }
+
+      @keyframes pet-banner-pulse {
+        0%, 100% { box-shadow: 0 10px 36px rgba(0, 0, 0, 0.55); }
+        50% { box-shadow: 0 10px 36px rgba(255, 224, 102, 0.35); }
+      }
+
+      .pet-banner-reminder {
+        border-color: rgba(124, 245, 196, 0.85);
+      }
+
+      .pet-banner-important {
+        border-color: #ff8f7a;
+      }
+
+      .pet-banner-head {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 6px;
+      }
+
+      .pet-banner-icon {
+        font-size: 22px;
+        line-height: 1;
+      }
+
+      .pet-banner-tag {
+        font-size: 11px;
+        color: #8b93a7;
+        letter-spacing: 1px;
+      }
+
+      .pet-banner-reminder .pet-banner-tag {
+        color: #7cf5c4;
+      }
+
+      .pet-banner-important .pet-banner-tag {
+        color: #ff8f7a;
+      }
+
+      .pet-banner-time {
+        margin-left: auto;
+        font-size: 13px;
+        font-weight: 600;
+        color: #ffe066;
+      }
+
+      .pet-banner-reminder .pet-banner-text,
+      .pet-banner-important .pet-banner-text {
+        font-size: 18px;
+        line-height: 1.45;
+        margin: 2px 0 12px;
+      }
+
+      .pet-banner-actions {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+
+      .pet-banner-btn {
+        padding: 5px 12px;
+        border: 1px solid rgba(139, 147, 167, 0.55);
+        background: rgba(139, 147, 167, 0.1);
+        color: #c6cddd;
+        font: 12px/1.4 ui-sans-serif, -apple-system, sans-serif;
+        cursor: pointer;
+      }
+
+      .pet-banner-btn:hover {
+        background: rgba(139, 147, 167, 0.25);
+      }
+
+      .pet-banner-btn.danger {
+        border-color: rgba(255, 143, 122, 0.6);
+        color: #ffab9d;
+      }
+
+      .pet-banner-btn.danger:hover {
+        background: rgba(255, 143, 122, 0.18);
+      }
+
+      .pet-banner-btn.primary {
+        border-color: rgba(124, 245, 196, 0.6);
+        color: #7cf5c4;
+      }
+
+      .pet-banner-btn.primary:hover {
+        background: rgba(124, 245, 196, 0.15);
+      }
+
+      .pet-banner-resched {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        margin-top: 10px;
+      }
+
+      .pet-banner-resched input {
+        flex: 1;
+        min-width: 0;
+        padding: 5px 8px;
+        border: 1px solid rgba(124, 245, 196, 0.4);
+        background: rgba(0, 0, 0, 0.35);
+        color: #e8ecf4;
+        font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+        outline: none;
+      }
+
+      .pet-banner-resched input.invalid {
+        border-color: #ff8f7a;
+      }
+
+      .pet-banner-text {
+        word-break: break-all;
+      }
+
+      .pet-banner-hint {
+        margin-top: 6px;
+        font-size: 11px;
+        color: #6d768c;
+      }
+
+      /* 今日速记回看 */
+      .pet-today {
+        position: fixed;
+        z-index: 25;
+        pointer-events: auto;
+        max-height: 320px;
+        overflow-y: auto;
+        border-radius: 10px;
+        background: rgba(16, 20, 30, 0.97);
+        border: 1px solid rgba(124, 245, 196, 0.28);
+        box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
+        font: 12px/1.5 ui-sans-serif, -apple-system, system-ui, sans-serif;
+        color: #e8ecf4;
+      }
+
+      .pet-today-head {
+        position: sticky;
+        top: 0;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 9px 12px;
+        background: inherit;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        font-weight: 600;
+        color: #7cf5c4;
+      }
+
+      .pet-today-close {
+        border: 0;
+        background: transparent;
+        color: #8b93a7;
+        font-size: 16px;
+        line-height: 1;
+        cursor: default;
+        padding: 0 2px;
+      }
+
+      .pet-today-close:hover {
+        color: #fff;
+      }
+
+      .pet-today-empty {
+        padding: 16px 12px;
+        color: #6d768c;
+        text-align: center;
+      }
+
+      .pet-today-row {
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+        padding: 7px 12px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+      }
+
+      .pet-today-text {
+        flex: 1;
+        min-width: 0;
+        word-break: break-all;
+      }
+
+      .pet-today-kind {
+        flex: 0 0 auto;
+        padding: 0 6px;
+        border-radius: 4px;
+        font-size: 10px;
+        background: rgba(124, 245, 196, 0.14);
+        color: #7cf5c4;
+      }
+
+      .pet-today-kind.kind-todo {
+        background: rgba(255, 224, 102, 0.16);
+        color: #ffe066;
+      }
+
+      .pet-today-kind.kind-idea {
+        background: rgba(160, 190, 255, 0.16);
+        color: #a8c0ff;
+      }
+
+      .pet-today-kind.kind-question {
+        background: rgba(255, 150, 130, 0.16);
+        color: #ffab9d;
+      }
+
+      /* 不在家图标：宠物外出串门时缩在右下角，点击召回 */
+      .pet-away-icon {
+        position: fixed;
+        z-index: 26;
+        right: 16px;
+        bottom: 16px;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 8px 12px;
+        border-radius: 10px;
+        background: rgba(16, 20, 30, 0.92);
+        border: 1px solid rgba(124, 245, 196, 0.3);
+        color: #a8b0c2;
+        font: 12px/1.4 ui-sans-serif, -apple-system, system-ui, sans-serif;
+        cursor: pointer;
+        box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+        user-select: none;
+        pointer-events: auto;
+      }
+
+      .pet-away-icon:hover {
+        color: #7cf5c4;
+        border-color: rgba(124, 245, 196, 0.55);
+      }
+
+      /* 测试连接失败原因气泡：点击任意处关闭 */
+      .pet-error-bubble {
+        position: fixed;
+        z-index: 50;
+        pointer-events: auto;
+        max-width: 320px;
+        padding: 10px 12px;
+        border-radius: 8px;
+        background: #1a1116;
+        border: 1px solid #ffab9d;
+        color: #ffd9d2;
+        font: 12px/1.5 ui-sans-serif, -apple-system, system-ui, sans-serif;
+        cursor: pointer;
+        word-break: break-all;
+        white-space: pre-wrap;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+      }
+
+      .pet-error-bubble-hint {
+        margin-top: 5px;
+        font-size: 11px;
+        color: #8b6a66;
+        text-align: right;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="pet-canvas"></canvas>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

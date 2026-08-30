@@ -1,0 +1,8 @@
+{
+  "name": "vibe-pet-sync",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "build": "node -e \"console.log('edge functions deploy: no build needed')\""
+  }
+}

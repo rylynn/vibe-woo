@@ -1,0 +1,12 @@
+# pnpm 11 默认拦截依赖的 build script。esbuild（vite/vitest 的底层依赖）
+# 需要 postinstall 链接平台二进制；不放行会让 pnpm 的运行前依赖检查直接失败，
+# 导致 pnpm dev / pnpm test 完全无法启动。
+#
+# 三个易踩的坑：
+#   1. pnpm 11 起该设置只从本文件读取，写在 package.json 的 "pnpm" 字段会被静默忽略
+#   2. 字段名在 pnpm 11 中已由 onlyBuiltDependencies 改为 allowBuilds
+#   3. 值是 map（pkg: true），不是数组；写成 "- esbuild" 会被解析成 key '0' 而失效
+#
+# 重新放行的命令：pnpm approve-builds esbuild
+allowBuilds:
+  esbuild: true

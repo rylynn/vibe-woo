@@ -1,0 +1,12 @@
+node_modules/
+dist/
+src-tauri/target/
+.DS_Store
+*.local
+.codebuddy/
+
+# 环境与部署产物（含项目标识，不进版本库）
+.env
+.env.*
+!.env.example
+.edgeone/
