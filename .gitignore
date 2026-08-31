@@ -10,3 +10,8 @@ src-tauri/target/
 .env.*
 !.env.example
 .edgeone/
+
+# 服务端本地数据（本地联调产生的账号数据，不进版本库）
+worker-edgeone/.local-data.json
+worker/.dev.vars
+

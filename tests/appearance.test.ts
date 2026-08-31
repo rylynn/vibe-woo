@@ -42,7 +42,7 @@ d("状态到外观的映射", () => {
   });
 
   it("编辑器内卡住时凝视屏幕", () => {
-    const a = appearanceFor(st({ doing: "coding", tempo: "stuck" }));
+    const a = appearanceFor(st({ doing: "editing", tempo: "stuck" }));
     expect(a.peeking).toBe(true);
     expect(a.asleep).toBe(false);
   });
@@ -54,7 +54,7 @@ d("状态到外观的映射", () => {
 
   it("进入状态时提到最高帧率", () => {
     const a = appearanceFor(
-      st({ doing: "coding", tempo: "flow", keystrokes_per_min: 220 }),
+      st({ doing: "editing", tempo: "flow", keystrokes_per_min: 220 }),
     );
     expect(a.activity).toBe("active");
     expect(a.tint).toBe("focused");
@@ -62,18 +62,18 @@ d("状态到外观的映射", () => {
 
   it("卡住时不急促呼吸，即便刚才击键频率很高", () => {
     const a = appearanceFor(
-      st({ doing: "coding", tempo: "stuck", keystrokes_per_min: 250 }),
+      st({ doing: "editing", tempo: "stuck", keystrokes_per_min: 250 }),
     );
     expect(a.breathePeriodMs).toBe(2400);
   });
 
   it("深夜时呼吸放缓并显示疲态", () => {
     const day = appearanceFor(
-      st({ doing: "coding", tempo: "normal", keystrokes_per_min: 60 }),
+      st({ doing: "editing", tempo: "normal", keystrokes_per_min: 60 }),
     );
     const night = appearanceFor(
       st({
-        doing: "coding",
+        doing: "editing",
         tempo: "normal",
         keystrokes_per_min: 60,
         late_night: true,
@@ -92,7 +92,7 @@ d("状态到外观的映射", () => {
   });
 
   it("睡眠呼吸明显慢于清醒", () => {
-    const awake = appearanceFor(st({ doing: "coding", tempo: "normal" }));
+    const awake = appearanceFor(st({ doing: "editing", tempo: "normal" }));
     const sleep = appearanceFor(st({ doing: "away", tempo: "resting" }));
     expect(sleep.breathePeriodMs).toBeGreaterThan(awake.breathePeriodMs);
   });
@@ -100,10 +100,33 @@ d("状态到外观的映射", () => {
 
 d("状态描述文字", () => {
   it("覆盖核心状态组合", () => {
-    expect(label(st({ doing: "coding", tempo: "stuck" }))).toBe("写代码 · 卡住了");
+    expect(label(st({ doing: "editing", tempo: "stuck" }))).toBe("编辑器 · 卡住了");
     expect(label(st({ doing: "away", tempo: "resting" }))).toBe("离开 · 歇着");
     expect(
-      label(st({ doing: "coding", tempo: "flow", late_night: true })),
-    ).toBe("写代码 · 进入状态 · 深夜");
+      label(st({ doing: "editing", tempo: "flow", late_night: true })),
+    ).toBe("编辑器 · 进入状态 · 深夜");
+  });
+
+  it("不预设主人的工种", () => {
+    // 主人未必在写代码 —— 描述文字只说在做什么，不替他定义职业
+    const text = [
+      st({ doing: "editing", tempo: "flow" }),
+      st({ doing: "browsing", tempo: "normal" }),
+      st({ doing: "other", tempo: "resting" }),
+    ]
+      .map(label)
+      .join(" / ");
+    for (const bad of ["写代码", "写码", "代码", "编程"]) {
+      expect(text).not.toContain(bad);
+    }
+  });
+
+  it("不同的事有不同的说法", () => {
+    // 「根据正在做的事交互」的前端侧：九种事应有九种标签
+    const labels = (["editing", "writing", "designing", "data", "messaging",
+      "browsing", "watching", "other", "away"] as const).map((doing) =>
+      label(st({ doing, tempo: "normal" })),
+    );
+    expect(new Set(labels).size).toBe(labels.length);
   });
 });

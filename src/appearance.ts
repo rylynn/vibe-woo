@@ -1,5 +1,6 @@
 import type { PetActivity } from "./anim/frame-budget";
 import type { PetState, Doing, Tempo, Mood, ActivityKind } from "./state";
+import { isProducing } from "./state";
 
 /** 宠物的外观表现。由状态推导，纯函数便于测试。 */
 export interface Appearance {
@@ -9,7 +10,7 @@ export interface Appearance {
   breathePeriodMs: number;
   /** 是否显示睡眠标记。 */
   asleep: boolean;
-  /** 是否朝屏幕方向凝视（陪你一起盯着代码）。 */
+  /** 是否朝屏幕方向凝视（陪你一起盯着屏幕）。 */
   peeking: boolean;
   /** 是否显示深夜黑眼圈。 */
   tired: boolean;
@@ -35,7 +36,7 @@ const LATE_NIGHT_SLOWDOWN = 1.35;
 /**
  * 律动同步：呼吸频率跟随实际击键频率。
  *
- * 这是设计文档 4.1 认定的「上瘾细节」—— 你写得越快宠物越来劲。
+ * 这是设计文档 4.1 认定的「上瘾细节」—— 你手速越快宠物越来劲。
  * 成本几乎为零（只用已有的击键频率），但是留存的主要来源。
  */
 export function breathePeriodFor(kpm: number): number {
@@ -45,7 +46,8 @@ export function breathePeriodFor(kpm: number): number {
 
 export function appearanceFor(s: PetState): Appearance {
   const asleep = s.doing === "away";
-  const peeking = s.doing === "coding" && s.tempo === "stuck";
+  // 不只是写代码：写方案、做设计、对表格时停下来，宠物也陪你一起盯着
+  const peeking = isProducing(s.doing) && s.tempo === "stuck";
 
   let activity: PetActivity;
   if (asleep) {
@@ -100,8 +102,13 @@ export function eyeShapeFor(s: PetState): "round" | "happy" | "worried" | "droop
 /** 供调试显示的简短状态文字。 */
 export function describe(s: PetState): string {
   const doing: Record<Doing, string> = {
-    coding: "写代码",
+    editing: "编辑器",
+    writing: "写文档",
+    designing: "做设计",
+    data: "对数据",
+    messaging: "聊天",
     browsing: "浏览",
+    watching: "看影音",
     other: "其他",
     away: "离开",
   };

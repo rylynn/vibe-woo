@@ -1,22 +1,26 @@
 /**
- * 本机同步服务 —— 用于 KV 申请期间的功能验证。
+ * 本机同步服务 —— 用于 KV 申请期间的功能验证与 admin 看板联调。
  *
- * 复用与线上完全相同的业务逻辑（lib-sync.js），存储改为一个 JSON 文件，
+ * 复用与线上完全相同的业务逻辑（lib-account.js），存储改为一个 JSON 文件，
  * 因此跑通的行为就是线上行为，不会出现「本地过、线上挂」。
  *
  * 用法：
  *   node worker-edgeone/local-dev.js [端口]
  *
- * 默认监听 8787。然后在宠物「好友 → 服务器」填 http://localhost:8787。
+ * 默认监听 8787。然后在宠物「好友 → 服务器」填 http://localhost:8787/api。
  *
- * 注意：这是测试工具，不是生产服务 —— 单机、无鉴权、明文存文件。
+ * admin 联调：本地起服务前设置环境变量（与线上控制台 Secret 同名）
+ *   ADMIN_USER=xxx ADMIN_PASS=yyy node worker-edgeone/local-dev.js
+ * 然后打开 worker-edgeone/admin/index.html，服务器填 http://localhost:8787。
+ *
+ * 注意：这是测试工具，不是生产服务 —— 单机、无鉴权落盘明文（密码仍是哈希）。
  */
 
 import { createServer } from "node:http";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { dispatch, CORS, statusFor } from "./edge-functions/api/lib-sync.js";
+import { dispatch, CORS, statusFor } from "./edge-functions/api/lib-account.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const DATA_FILE = resolve(HERE, ".local-data.json");
@@ -60,6 +64,12 @@ class FileStore {
 const store = new FileStore(DATA_FILE);
 const port = Number(process.argv[2] || 8787);
 
+/** 与线上一致：内部异常摘要默认不回传，需要时 DEBUG_ERRORS=1。 */
+function debugErrors() {
+  const v = process.env.DEBUG_ERRORS;
+  return v === "1" || v === "true";
+}
+
 createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${port}`);
 
@@ -80,25 +90,34 @@ createServer(async (req, res) => {
   }
 
   // 兼容两种前缀：/api/xxx 与 /xxx
-  const segs = url.pathname.split("/").filter(Boolean);
-  const action = segs[segs.length - 1] || "status";
+  const segs = url.pathname.split("/").filter((s) => s && s !== "api");
 
   let result;
   try {
-    result = await dispatch(store, req.method, action, url.searchParams, body);
+    result = await dispatch(store, req.method, segs, url.searchParams, body, process.env, {
+      ip: req.socket.remoteAddress || "local",
+      auth: req.headers.authorization || "",
+    });
   } catch (e) {
-    result = { error: String(e) };
+    console.error("[sync] dispatch failed:", e);
+    result = { error: "server error", _status: 500, detail: String(e) };
   }
 
   const status = statusFor(result);
-  const out = JSON.stringify(
-    action === "status" && result.ok ? { ...result, storage: "file" } : result,
-  );
-  res.writeHead(status, {
+  const detail = result && result.detail;
+  if (detail !== undefined) delete result.detail;
+  if (result && result._status !== undefined) delete result._status;
+  const out = JSON.stringify(result);
+
+  const headers = {
     ...CORS,
     "Content-Length": Buffer.byteLength(out),
     "X-Pet-Sync-Storage": "file",
-  });
+  };
+  if (detail !== undefined && debugErrors()) {
+    headers["X-Pet-Sync-Error"] = encodeURIComponent(String(detail)).slice(0, 180);
+  }
+  res.writeHead(status, headers);
   res.end(out);
 
   console.log(
@@ -107,5 +126,8 @@ createServer(async (req, res) => {
 }).listen(port, () => {
   console.log(`[vibe-pet 本地同步服务] http://localhost:${port}`);
   console.log(`数据文件：${DATA_FILE}`);
-  console.log("在宠物「好友 → 服务器」填 http://localhost:" + port);
+  console.log("在宠物「好友 → 服务器」填 http://localhost:" + port + "/api");
+  if (!process.env.ADMIN_USER || !process.env.ADMIN_PASS) {
+    console.log("提示：未设置 ADMIN_USER/ADMIN_PASS，admin 接口不可用");
+  }
 });

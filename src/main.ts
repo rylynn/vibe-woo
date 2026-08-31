@@ -23,6 +23,9 @@ import { DismissManager } from "./overlay/dismiss";
 import { onStateChange } from "./state";
 import { describe as describeState } from "./appearance";
 import { getConfig, updateConfig, type ConfigView } from "./config";
+import { AvatarPicker } from "./overlay/avatar-picker";
+import { avatarFromView, avatarToView } from "./avatar/types";
+import { analyzeImageFile } from "./avatar/from-image";
 
 const canvas = document.getElementById("pet-canvas") as HTMLCanvasElement | null;
 if (!canvas) throw new Error("#pet-canvas not found");
@@ -39,9 +42,26 @@ refreshTimeDatalist();
 function applyConfig(c: ConfigView): void {
   pet.setSizeIndex(c.size_index);
   pet.setScope(c.roam_scope);
+  if (c.avatar) pet.setAvatar(avatarFromView(c.avatar));
 }
 
-const settings = new SettingsPanel(applyConfig);
+// 首次安装领养流程：确认后持久化并立即换装
+const avatarPicker = new AvatarPicker({
+  onConfirm: (a) => {
+    pet.setAvatar(a);
+    void updateConfig({ avatar: avatarToView(a) });
+  },
+  analyzeImage: analyzeImageFile,
+});
+
+const settings = new SettingsPanel(applyConfig, {
+  openPicker: (initial) => {
+    // 弹窗与设置面板不叠放：先关设置，选定后改动已由 picker 持久化
+    settings.hide();
+    avatarPicker.show(initial);
+  },
+  analyzeImage: analyzeImageFile,
+});
 
 const quickNote = new QuickNote();
 const today = new TodayPanel();
@@ -76,6 +96,7 @@ dismiss.register(quickNote);
 dismiss.register(today);
 dismiss.register(remindersPanel);
 dismiss.register(friendsPanel);
+dismiss.register(avatarPicker);
 dismiss.setPetBox(() => (pet.isHidden ? null : pet.body));
 
 const counters: EventCounters = {
@@ -115,6 +136,8 @@ window.addEventListener("pointerdown", (e) => {
   if (e.button !== 0) return;
   // 设置面板打开时不响应宠物拖动，避免点面板时把宠物一起拖走
   if (settings.isOpen && settings.contains(e.clientX, e.clientY)) return;
+  if (avatarPicker.isOpen && avatarPicker.contains(e.clientX, e.clientY))
+    return;
   if (quickNote.isOpen) return;
   if (today.isOpen && today.contains(e.clientX, e.clientY)) return;
   if (today.isOpen && !today.contains(e.clientX, e.clientY)) today.hide();
@@ -166,6 +189,7 @@ window.addEventListener("keydown", (e) => {
     today.hide();
     remindersPanel.hide();
     friendsPanel.hide();
+    avatarPicker.hide();
   }
 });
 
@@ -184,8 +208,11 @@ void onStateChange((s) => {
   console.log(`[pet] ${describeState(s)}  kpm=${Math.round(s.keystrokes_per_min)}`);
 });
 
-// 载入持久化配置
-void getConfig().then(applyConfig);
+// 载入持久化配置；首次安装（未领养形象）弹出三选一
+void getConfig().then((c) => {
+  applyConfig(c);
+  if (!c.avatar) avatarPicker.show();
+});
 
 startBoxReporter(() => {
   const boxes: Box[] = [];
@@ -208,6 +235,8 @@ startBoxReporter(() => {
   if (remindersBox) boxes.push(remindersBox);
   const friendsBox = friendsPanel.box;
   if (friendsBox) boxes.push(friendsBox);
+  const pickerBox = avatarPicker.box;
+  if (pickerBox) boxes.push(pickerBox);
   // 气泡与通知条：可交互（「知道了」按钮 / 整条点击关闭），必须参与命中判定
   const bubbleBox = bubble.box;
   if (bubbleBox) boxes.push(bubbleBox);
@@ -223,6 +252,7 @@ startBoxReporter(() => {
       today.isOpen ||
       remindersPanel.isOpen ||
       friendsPanel.isOpen ||
+      avatarPicker.isOpen ||
       bubble.isOpen ||
       banner.isOpen,
     counters,

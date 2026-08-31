@@ -27,18 +27,23 @@
   <body>
     <main>
       <h1>Vibe Pet 同步服务已部署</h1>
-      <p>把这个地址填进宠物设置的「好友 → 服务器」即可。</p>
+      <p>把这个地址（含 <code>/api</code>）填进宠物设置的「好友 → 服务器」即可。</p>
       <p>支持的端点：</p>
       <ul>
-        <li><code>POST /api/register</code> — 注册，获取 pet_id 与邀请码</li>
-        <li><code>POST /api/state</code> — 上报粗粒度状态</li>
-        <li><code>POST /api/befriend</code> — 用邀请码添加好友</li>
-        <li><code>GET /api/friends</code> — 拉好友列表</li>
-        <li><code>POST /api/event</code> — 投递串门/互动事件</li>
-        <li><code>GET /api/events</code> — 拉取并清空事件队列</li>
+        <li><code>POST /api/register</code> — 邀请码注册，返回 uid / 会话 token</li>
+        <li><code>POST /api/login</code> — 登录，返回会话 token（90 天滚动续期）</li>
+        <li><code>POST /api/logout</code> — 登出，吊销当前会话（Bearer）</li>
+        <li><code>GET /api/me</code> — 我的账号信息（Bearer）</li>
+        <li><code>POST /api/profile/pet-name</code> — 改宠物名（Bearer）</li>
+        <li><code>POST /api/friends/add</code> / <code>friends/remove</code> — 加/删好友（Bearer）</li>
+        <li><code>GET /api/friends</code> — 好友列表（Bearer）</li>
+        <li><code>POST /api/heartbeat</code> — 心跳，可捎带当日用量计数（Bearer）</li>
+        <li><code>POST /api/visit</code> / <code>home</code> — 串门 / 回家（Bearer）</li>
+        <li><code>POST /api/admin/login</code> — 管理员登录（环境变量 ADMIN_USER / ADMIN_PASS）</li>
+        <li><code>GET /api/admin/overview|users|user?uid=</code> — 数据看板查询（admin Bearer）</li>
       </ul>
-      <p>隐私：本服务只存宠物过滤后的粗粒度状态（写代码/闲着/离开），
-      不接触任何应用名、窗口标题或输入内容。</p>
+      <p>隐私：本服务只存宠物过滤后的粗粒度状态（在忙/闲着/离开）与聚合计数
+      （提醒/速记/番茄/在线分钟），不接触任何应用名、窗口标题或输入内容。</p>
     </main>
   </body>
 </html>

@@ -1,4 +1,11 @@
 import type { EyeFrame } from "../anim/expression";
+import type { EyeStyle } from "../avatar/types";
+
+/**
+ * 眼球深色。所有形象通用：深底浅睛才有对比度，让高光与视线可读。
+ * 定义在这里而非 pet.ts：形象选择弹窗的预览渲染也需要它。
+ */
+export const EYE_COLOR = "#0b1020";
 
 /** 一双眼睛的绘制参数，全部为 CSS 像素。 */
 export interface EyeLayout {
@@ -19,19 +26,71 @@ export interface EyePalette {
 }
 
 /**
- * 眼睛占身体的比例。
+ * 眼睛风格的比例参数（相对身体宽高）。
  *
  * 刻意做得很大（NOMI 取向）：眼睛是唯一的情绪载体，小眼睛表达不了任何
  * 细微变化。原实现只有 side/12，形变根本看不见。
+ *
+ * 风格是「长相」维度，与 EyeShape「表情」维度正交：风格定基础比例，
+ * 表情形变（drawOneEye 里的 switch）照旧在其上叠加。
  */
-const EYE_W_RATIO = 0.22;
-const EYE_H_RATIO = 0.28;
-/** 两眼内侧间距占身体比例。 */
-const EYE_GAP_RATIO = 0.16;
-/** 眼睛中心的垂直位置。 */
-const EYE_CENTER_Y_RATIO = 0.44;
-/** 眼球可移动范围，占眼睛尺寸的比例。 */
-const GAZE_TRAVEL = 0.22;
+interface EyeSpec {
+  /** 眼宽 / 身体宽。 */
+  wR: number;
+  /** 眼高 / 身体高。 */
+  hR: number;
+  /** 两眼内侧间距 / 身体宽。 */
+  gapR: number;
+  /** 眼睛中心垂直位置 / 身体高。 */
+  cyR: number;
+  /** 眼球可移动范围 / 眼睛尺寸。 */
+  gaze: number;
+}
+
+const EYE_SPECS: Record<EyeStyle, EyeSpec> = {
+  classic: { wR: 0.22, hR: 0.28, gapR: 0.16, cyR: 0.44, gaze: 0.22 },
+  big: { wR: 0.27, hR: 0.34, gapR: 0.13, cyR: 0.44, gaze: 0.2 },
+  dot: { wR: 0.13, hR: 0.15, gapR: 0.22, cyR: 0.44, gaze: 0.3 },
+  almond: { wR: 0.29, hR: 0.17, gapR: 0.15, cyR: 0.44, gaze: 0.18 },
+  sleepy: { wR: 0.22, hR: 0.2, gapR: 0.16, cyR: 0.46, gaze: 0.22 },
+};
+
+/** 单只眼睛的几何：左上角 x、宽高、中心 y。 */
+export interface EyeGeom {
+  x: number;
+  w: number;
+  centerY: number;
+  h: number;
+}
+
+/**
+ * 计算一双眼睛的几何布局。
+ *
+ * 抽成独立纯函数的原因：眉毛（brows.ts）必须与眼睛共用同一份布局结果，
+ * 各算各的会在风格切换时错位。
+ */
+export function eyeGeoms(
+  layout: EyeLayout,
+  style: EyeStyle,
+): { left: EyeGeom; right: EyeGeom } {
+  const { bodyX, bodyY, w: bodyW, h: bodyH } = layout;
+  const px = (v: number) => Math.round(v);
+  const spec = EYE_SPECS[style];
+
+  // 眼睛尺寸跟随身体形变：身体被压扁时眼睛也该压扁，否则会「戳出来」
+  const w = Math.max(3, px(bodyW * spec.wR));
+  const h = Math.max(3, px(bodyH * spec.hR));
+  const gap = Math.max(2, px(bodyW * spec.gapR));
+  const centerY = bodyY + px(bodyH * spec.cyR);
+  const centerX = bodyX + px(bodyW / 2);
+
+  // 右眼由左眼严格镜像得出，避免 gap/2 的取整破坏对称（画在脸上会歪）
+  const leftX = px(centerX - gap / 2 - w);
+  return {
+    left: { x: leftX, w, centerY, h },
+    right: { x: bodyX * 2 + bodyW - leftX - w, w, centerY, h },
+  };
+}
 
 /**
  * 绘制一双像素眼。
@@ -44,27 +103,19 @@ export function drawEyes(
   layout: EyeLayout,
   frame: EyeFrame,
   palette: EyePalette,
+  style: EyeStyle = "classic",
 ): void {
-  const { bodyX, bodyY, w: bodyW, h: bodyH } = layout;
   const px = (v: number) => Math.round(v);
+  const spec = EYE_SPECS[style];
+  const { left, right } = eyeGeoms(layout, style);
 
-  // 眼睛尺寸跟随身体形变：身体被压扁时眼睛也该压扁，否则会「戳出来」
-  const baseW = Math.max(3, px(bodyW * EYE_W_RATIO));
-  const baseH = Math.max(3, px(bodyH * EYE_H_RATIO));
-  const gap = Math.max(2, px(bodyW * EYE_GAP_RATIO));
-  const centerY = bodyY + px(bodyH * EYE_CENTER_Y_RATIO);
-  const centerX = bodyX + px(bodyW / 2);
-
-  const travelX = px(baseW * GAZE_TRAVEL);
-  const travelY = px(baseH * GAZE_TRAVEL);
+  const travelX = px(left.w * spec.gaze);
+  const travelY = px(left.h * spec.gaze);
   const dx = px(frame.gazeX * travelX);
   const dy = px(frame.gazeY * travelY);
 
-  const leftX = centerX - gap / 2 - baseW + dx;
-  const rightX = centerX + gap / 2 + dx;
-
-  for (const x of [px(leftX), px(rightX)]) {
-    drawOneEye(ctx, x, centerY + dy, baseW, baseH, frame, palette);
+  for (const eye of [left, right]) {
+    drawOneEye(ctx, eye.x + dx, eye.centerY + dy, eye.w, eye.h, frame, palette);
   }
 }
 

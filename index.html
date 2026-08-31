@@ -697,6 +697,205 @@
         border-color: rgba(124, 245, 196, 0.55);
       }
 
+      /* 形象选择弹窗：首次安装领养流程 */
+      .pet-avatar-picker {
+        position: fixed;
+        z-index: 22;
+        pointer-events: auto;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        width: 356px;
+        padding: 0 0 14px;
+        border-radius: 12px;
+        background: rgba(16, 20, 30, 0.97);
+        border: 1px solid rgba(124, 245, 196, 0.3);
+        box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+        color: #e8ecf4;
+        font: 12px/1.5 ui-sans-serif, -apple-system, system-ui, sans-serif;
+        animation: pet-avatar-in 0.25s ease-out;
+      }
+
+      @keyframes pet-avatar-in {
+        from {
+          opacity: 0;
+          transform: translate(-50%, -48%) scale(0.97);
+        }
+        to {
+          opacity: 1;
+          transform: translate(-50%, -50%) scale(1);
+        }
+      }
+
+      .pet-avatar-picker-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 11px 14px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        font-weight: 600;
+        color: #7cf5c4;
+        cursor: grab;
+      }
+
+      .pet-avatar-picker-head:active {
+        cursor: grabbing;
+      }
+
+      .pet-avatar-picker-close {
+        border: 0;
+        background: transparent;
+        color: #8b93a7;
+        font-size: 17px;
+        line-height: 1;
+        cursor: default;
+        padding: 0 2px;
+      }
+
+      .pet-avatar-picker-close:hover {
+        color: #fff;
+      }
+
+      .pet-avatar-picker-row {
+        display: flex;
+        justify-content: center;
+        gap: 10px;
+        padding: 14px;
+        animation: pet-avatar-fade 0.15s ease-out;
+      }
+
+      @keyframes pet-avatar-fade {
+        from {
+          opacity: 0.2;
+        }
+        to {
+          opacity: 1;
+        }
+      }
+
+      .pet-avatar-option {
+        position: relative;
+        width: 96px;
+        height: 96px;
+        border-radius: 8px;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        /* 深色棋盘格底衬，突出像素感与透明区域 */
+        background-image: conic-gradient(
+          #161a28 0 25%,
+          #1a2030 0 50%,
+          #161a28 0 75%,
+          #1a2030 0
+        );
+        background-size: 12px 12px;
+        cursor: pointer;
+        transition: border-color 0.12s ease-out, box-shadow 0.12s ease-out;
+      }
+
+      .pet-avatar-option canvas {
+        display: block;
+        image-rendering: pixelated;
+      }
+
+      .pet-avatar-option:hover {
+        border-color: rgba(124, 245, 196, 0.5);
+      }
+
+      .pet-avatar-option.selected {
+        border-color: #7cf5c4;
+        box-shadow: 0 0 0 1px rgba(124, 245, 196, 0.4),
+          0 0 14px rgba(124, 245, 196, 0.22);
+      }
+
+      .pet-avatar-check {
+        position: absolute;
+        top: 3px;
+        right: 5px;
+        display: none;
+        color: #7cf5c4;
+        font-size: 13px;
+        font-weight: 700;
+        text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
+      }
+
+      .pet-avatar-option.selected .pet-avatar-check {
+        display: block;
+      }
+
+      .pet-avatar-picker-actions {
+        display: flex;
+        justify-content: center;
+        gap: 8px;
+        padding: 0 14px;
+      }
+
+      .pet-avatar-btn {
+        padding: 5px 14px;
+        border: 1px solid rgba(124, 245, 196, 0.4);
+        border-radius: 6px;
+        background: transparent;
+        color: #7cf5c4;
+        font: 12px/1.4 ui-sans-serif, -apple-system, sans-serif;
+        cursor: pointer;
+      }
+
+      .pet-avatar-btn:hover {
+        background: rgba(124, 245, 196, 0.12);
+      }
+
+      .pet-avatar-picker-foot {
+        padding: 12px 14px 0;
+        text-align: center;
+      }
+
+      .pet-avatar-confirm {
+        width: 100%;
+        padding: 7px 0;
+        border: 0;
+        border-radius: 7px;
+        background: #7cf5c4;
+        color: #0b1020;
+        font: 600 13px/1.4 ui-sans-serif, -apple-system, sans-serif;
+        cursor: pointer;
+        transition: background 0.12s ease-out, transform 0.08s ease-out;
+      }
+
+      .pet-avatar-confirm:hover:not(:disabled) {
+        background: #9dffd8;
+      }
+
+      .pet-avatar-confirm:active:not(:disabled) {
+        transform: scale(0.985);
+      }
+
+      .pet-avatar-confirm:disabled {
+        background: rgba(139, 147, 167, 0.25);
+        color: #6d768c;
+        cursor: default;
+      }
+
+      .pet-avatar-picker-hint {
+        margin-top: 7px;
+        color: #6d768c;
+        font-size: 11px;
+      }
+
+      /* 设置面板的当前形象小预览 */
+      .pet-settings-avatar {
+        flex: 0 0 48px;
+        width: 48px;
+        height: 48px;
+        border-radius: 6px;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        background-image: conic-gradient(
+          #161a28 0 25%,
+          #1a2030 0 50%,
+          #161a28 0 75%,
+          #1a2030 0
+        );
+        background-size: 8px 8px;
+        image-rendering: pixelated;
+      }
+
       /* 测试连接失败原因气泡：点击任意处关闭 */
       .pet-error-bubble {
         position: fixed;

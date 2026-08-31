@@ -83,6 +83,7 @@ pub fn spawn(app: &AppHandle) {
                     tempo: s.tempo,
                     late_night: s.late_night,
                     keystrokes_per_min: s.keystrokes_per_min,
+                    user_kind: &cfg.user_kind,
                 };
                 let mem = crate::memory::summary(&crate::memory::snapshot());
                 crate::llm::speak(&persona::system_prompt(&ctx, mem.as_deref()), &cfg.llm)

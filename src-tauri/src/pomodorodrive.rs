@@ -68,6 +68,8 @@ pub fn spawn(app: &AppHandle) {
                 }
                 Phase::Working { until } => {
                     if now >= until {
+                        // 一个工作期完成（进入休息）—— 用量计数
+                        crate::usage::bump(crate::usage::Kind::Pomodoro);
                         phase = Phase::Break {
                             until: now + Duration::from_secs(brk as u64 * 60),
                         };

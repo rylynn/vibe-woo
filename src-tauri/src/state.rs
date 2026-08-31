@@ -12,24 +12,70 @@ use serde::Serialize;
 use crate::activity::Activity;
 use crate::mood::Mood;
 
-/// 前台应用的类别。
+/// 前台应用的类别 —— 回答「主人正在做哪一类**事**」。
+///
+/// 刻意不按职业划分：分类的是事，不是人。用编辑器写小说的人不是程序员，
+/// 用表格做预算的人和做数据建模的人也是两回事 —— 这里只认前台工具
+/// 属于哪一类场景，至于主人是干什么的，只有他自己填了才知道。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AppKind {
-    Coding,
+    /// 编辑器 / IDE / 终端。
+    Editing,
+    /// 文档、笔记、写作。
+    Writing,
+    /// 设计、绘图、剪辑。
+    Designing,
+    /// 表格、数据。
+    Data,
+    /// 沟通协作：聊天、邮件、会议。
+    Messaging,
+    /// 阅读浏览：浏览器、PDF、电子书。
     Browsing,
+    /// 影音娱乐：音乐、视频。
+    Watching,
+    /// 其他。
     Other,
+}
+
+impl AppKind {
+    /// 是否属于「专注产出」。
+    ///
+    /// 这是「在产出 / 在消遣」的分界 —— 在这类工具里停下来是在思考，
+    /// 在别的地方停下来只是歇着。STUCK 判定、宠物是否留守、当日专注
+    /// 时长都基于它，与具体工种无关。
+    pub fn is_producing(self) -> bool {
+        matches!(
+            self,
+            Self::Editing | Self::Writing | Self::Designing | Self::Data
+        )
+    }
 }
 
 /// 维度一：用户在干什么。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Doing {
-    Coding,
+    Editing,
+    Writing,
+    Designing,
+    Data,
+    Messaging,
     Browsing,
+    Watching,
     Other,
     /// 长时间无任何输入，人已离开。
     Away,
+}
+
+impl Doing {
+    /// 是否属于「专注产出」。语义与 `AppKind::is_producing` 一致。
+    pub fn is_producing(self) -> bool {
+        matches!(
+            self,
+            Self::Editing | Self::Writing | Self::Designing | Self::Data
+        )
+    }
 }
 
 /// 维度二：用户的节奏。
@@ -104,8 +150,13 @@ pub fn derive_with(s: Snapshot, mood: Mood, activity: Activity) -> PetState {
         Doing::Away
     } else {
         match s.app {
-            AppKind::Coding => Doing::Coding,
+            AppKind::Editing => Doing::Editing,
+            AppKind::Writing => Doing::Writing,
+            AppKind::Designing => Doing::Designing,
+            AppKind::Data => Doing::Data,
+            AppKind::Messaging => Doing::Messaging,
             AppKind::Browsing => Doing::Browsing,
+            AppKind::Watching => Doing::Watching,
             AppKind::Other => Doing::Other,
         }
     };
@@ -113,9 +164,9 @@ pub fn derive_with(s: Snapshot, mood: Mood, activity: Activity) -> PetState {
     let tempo = if s.keyboard_idle_secs >= AWAY_SECS {
         Tempo::Resting
     } else if s.keyboard_idle_secs >= STUCK_SECS {
-        // STUCK 专指「在编辑器里发呆」。不在编辑器时，静默只是普通歇着，
+        // STUCK 专指「在产出型工具里发呆」。不在产出时，静默只是普通歇着，
         // 宠物应该自娱自乐而不是陪你盯屏幕。
-        if s.app == AppKind::Coding {
+        if s.app.is_producing() {
             Tempo::Stuck
         } else {
             Tempo::Resting
@@ -140,9 +191,9 @@ pub fn derive_with(s: Snapshot, mood: Mood, activity: Activity) -> PetState {
 mod tests {
     use super::*;
 
-    fn coding() -> Snapshot {
+    fn editing() -> Snapshot {
         Snapshot {
-            app: AppKind::Coding,
+            app: AppKind::Editing,
             keyboard_idle_secs: 1.0,
             keystrokes_per_min: 30.0,
             hour: 14,
@@ -150,9 +201,9 @@ mod tests {
     }
 
     #[test]
-    fn 编辑器内正常敲键为_coding_normal() {
-        let st = derive(coding());
-        assert_eq!(st.doing, Doing::Coding);
+    fn 编辑器内正常敲键为_editing_normal() {
+        let st = derive(editing());
+        assert_eq!(st.doing, Doing::Editing);
         assert_eq!(st.tempo, Tempo::Normal);
     }
 
@@ -160,7 +211,7 @@ mod tests {
     fn 高频击键进入_flow() {
         let st = derive(Snapshot {
             keystrokes_per_min: 200.0,
-            ..coding()
+            ..editing()
         });
         assert_eq!(st.tempo, Tempo::Flow);
     }
@@ -170,30 +221,55 @@ mod tests {
         let st = derive(Snapshot {
             keyboard_idle_secs: 95.0,
             keystrokes_per_min: 0.0,
-            ..coding()
+            ..editing()
         });
-        assert_eq!(st.doing, Doing::Coding);
+        assert_eq!(st.doing, Doing::Editing);
         assert_eq!(
             st.tempo,
             Tempo::Stuck,
-            "在编辑器里发呆是 vibe coding 的核心信号，宠物应陪你盯屏幕"
+            "在产出型工具里发呆是在想事情，宠物应陪你盯屏幕"
         );
     }
 
     #[test]
-    fn 非编辑器静默只是歇着而非_stuck() {
-        let st = derive(Snapshot {
-            app: AppKind::Browsing,
-            keyboard_idle_secs: 95.0,
-            keystrokes_per_min: 0.0,
-            ..coding()
-        });
-        assert_eq!(st.doing, Doing::Browsing);
-        assert_eq!(
-            st.tempo,
-            Tempo::Resting,
-            "不在编辑器时不该触发 STUCK，宠物应自娱自乐"
-        );
+    fn 任何产出型工具里发呆都算_stuck() {
+        // 不只是写代码 —— 写方案、画设计稿、对表格时停下来同样是在想
+        for app in [
+            AppKind::Editing,
+            AppKind::Writing,
+            AppKind::Designing,
+            AppKind::Data,
+        ] {
+            let st = derive(Snapshot {
+                app,
+                keyboard_idle_secs: 120.0,
+                keystrokes_per_min: 0.0,
+                ..editing()
+            });
+            assert_eq!(st.tempo, Tempo::Stuck, "{app:?} 里发呆应判为在思考");
+        }
+    }
+
+    #[test]
+    fn 非产出型工具静默只是歇着而非_stuck() {
+        for app in [
+            AppKind::Browsing,
+            AppKind::Messaging,
+            AppKind::Watching,
+            AppKind::Other,
+        ] {
+            let st = derive(Snapshot {
+                app,
+                keyboard_idle_secs: 95.0,
+                keystrokes_per_min: 0.0,
+                ..editing()
+            });
+            assert_eq!(
+                st.tempo,
+                Tempo::Resting,
+                "{app:?} 不该触发 STUCK，宠物应自娱自乐"
+            );
+        }
     }
 
     #[test]
@@ -201,7 +277,7 @@ mod tests {
         let st = derive(Snapshot {
             keyboard_idle_secs: STUCK_SECS - 1.0,
             keystrokes_per_min: 0.0,
-            ..coding()
+            ..editing()
         });
         assert_eq!(st.tempo, Tempo::Normal, "短暂停顿不应误判为卡住");
     }
@@ -211,7 +287,7 @@ mod tests {
         let st = derive(Snapshot {
             keyboard_idle_secs: AWAY_SECS + 1.0,
             keystrokes_per_min: 0.0,
-            ..coding()
+            ..editing()
         });
         assert_eq!(st.doing, Doing::Away, "人已离开，宠物该睡觉");
         assert_eq!(st.tempo, Tempo::Resting);
@@ -221,10 +297,10 @@ mod tests {
     fn 离开判定优先于应用类别() {
         // 即便前台还停在编辑器，十分钟没动就是离开了，不该是 STUCK
         let st = derive(Snapshot {
-            app: AppKind::Coding,
+            app: AppKind::Editing,
             keyboard_idle_secs: AWAY_SECS + 100.0,
             keystrokes_per_min: 0.0,
-            ..coding()
+            ..editing()
         });
         assert_eq!(st.doing, Doing::Away);
         assert_ne!(st.tempo, Tempo::Stuck);
@@ -233,7 +309,7 @@ mod tests {
     #[test]
     fn 深夜修饰符在凌晨与午夜后生效() {
         for h in [23, 0, 3, 4] {
-            let st = derive(Snapshot { hour: h, ..coding() });
+            let st = derive(Snapshot { hour: h, ..editing() });
             assert!(st.late_night, "{h} 点应属深夜");
         }
     }
@@ -241,7 +317,7 @@ mod tests {
     #[test]
     fn 白天不触发深夜修饰符() {
         for h in [5, 9, 14, 22] {
-            let st = derive(Snapshot { hour: h, ..coding() });
+            let st = derive(Snapshot { hour: h, ..editing() });
             assert!(!st.late_night, "{h} 点不应属深夜");
         }
     }
@@ -250,8 +326,42 @@ mod tests {
     fn 击键频率原样透传供律动同步() {
         let st = derive(Snapshot {
             keystrokes_per_min: 173.5,
-            ..coding()
+            ..editing()
         });
         assert_eq!(st.keystrokes_per_min, 173.5);
+    }
+
+    #[test]
+    fn 产出与消遣的分界与工种无关() {
+        for app in [
+            AppKind::Editing,
+            AppKind::Writing,
+            AppKind::Designing,
+            AppKind::Data,
+        ] {
+            assert!(app.is_producing(), "{app:?} 应算专注产出");
+        }
+        for app in [
+            AppKind::Messaging,
+            AppKind::Browsing,
+            AppKind::Watching,
+            AppKind::Other,
+        ] {
+            assert!(!app.is_producing(), "{app:?} 不该算专注产出");
+        }
+        // Doing 侧与 AppKind 侧判定必须一致，否则状态机会自相矛盾
+        for (app, doing) in [
+            (AppKind::Editing, Doing::Editing),
+            (AppKind::Writing, Doing::Writing),
+            (AppKind::Designing, Doing::Designing),
+            (AppKind::Data, Doing::Data),
+            (AppKind::Messaging, Doing::Messaging),
+            (AppKind::Browsing, Doing::Browsing),
+            (AppKind::Watching, Doing::Watching),
+            (AppKind::Other, Doing::Other),
+        ] {
+            assert_eq!(app.is_producing(), doing.is_producing(), "{app:?}");
+        }
+        assert!(!Doing::Away.is_producing());
     }
 }

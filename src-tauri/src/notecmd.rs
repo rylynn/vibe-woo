@@ -34,6 +34,10 @@ pub fn add_note(app: AppHandle, text: String) -> NoteSaved {
     let written_to = note::persist(&app, &note);
     // 当日记忆 +1（供疲劳叙述与 system prompt 的「今天」段使用）
     crate::memory::note_added();
+    // 用量计数：至少一个落点写成功才算一条速记
+    if !written_to.is_empty() {
+        crate::usage::bump(crate::usage::Kind::Note);
+    }
     use tauri::Emitter;
     let _ = app.emit(EVENT_SAVED, &note.text);
     eprintln!(

@@ -1,6 +1,29 @@
 import { listen } from "@tauri-apps/api/event";
 
-export type Doing = "coding" | "browsing" | "other" | "away";
+/** 正在做的事。分类的是**事**不是**人** —— 主人是不是程序员只有他自己知道。 */
+export type Doing =
+  | "editing"
+  | "writing"
+  | "designing"
+  | "data"
+  | "messaging"
+  | "browsing"
+  | "watching"
+  | "other"
+  | "away";
+
+/** 产出型：在这类工具里停下来是在思考，不是摸鱼。与后端 `Doing::is_producing` 对齐。 */
+const PRODUCING: ReadonlySet<Doing> = new Set<Doing>([
+  "editing",
+  "writing",
+  "designing",
+  "data",
+]);
+
+export function isProducing(doing: Doing): boolean {
+  return PRODUCING.has(doing);
+}
+
 export type Tempo = "flow" | "normal" | "stuck" | "resting";
 export type Mood = "content" | "focused" | "bored" | "frustrated";
 export type ActivityKind = "thinking" | "listening" | "slacking" | "working";

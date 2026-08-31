@@ -1,23 +1,34 @@
 //! 配置相关的前后端命令。
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
-use crate::config::{self, Config};
+use crate::config::{self, Config, USER_KIND_MAX_CHARS};
 
 /// 配置变更推送事件名。
 pub const EVENT_CONFIG: &str = "pet://config";
 
 static CURRENT: Mutex<Option<Config>> = Mutex::new(None);
 
+/// 配置版本号，每次写入内存递增。
+///
+/// 采样循环每 120ms 跑一轮，每轮 `current()` 都要 clone 整个 Config
+/// （含三个 Vec<String>）。高频纯读取不该付这个代价 ——
+/// 让调用方用版本号判断，只在真正变更时重建派生数据。
+static VERSION: AtomicU64 = AtomicU64::new(1);
+
+/// 当前配置版本。变化即意味着配置被改过。
+pub fn config_version() -> u64 {
+    VERSION.load(Ordering::Relaxed)
+}
+
 /// 启动时载入配置到内存。
 pub fn init(app: &AppHandle) -> Config {
     let cfg = config::load(app);
-    if let Ok(mut g) = CURRENT.lock() {
-        *g = Some(cfg.clone());
-    }
+    set_current(&cfg);
     cfg
 }
 
@@ -36,6 +47,7 @@ pub fn set_current(cfg: &Config) {
     if let Ok(mut g) = CURRENT.lock() {
         *g = Some(cfg.clone());
     }
+    VERSION.fetch_add(1, Ordering::Relaxed);
 }
 
 /// 供前端展示的配置。api_key 已掩码，绝不把明文送进 webview ——
@@ -45,6 +57,8 @@ pub struct ConfigView {
     pub size_index: usize,
     pub roam_scope: config::RoamScope,
     pub persona: config::Persona,
+    /// 用户自述的「在忙什么」。空串 = 未填写，宠物不预设任何身份。
+    pub user_kind: String,
     pub autostart: bool,
     pub notes_vault: String,
     pub reminders: Vec<crate::reminder::Reminder>,
@@ -70,6 +84,8 @@ pub struct ConfigView {
     pub social_register_date: String,
     pub social_invite_code: String,
     pub social_hidden: bool,
+    /// 已领养的形象，None 表示首次安装未选择。
+    pub avatar: Option<config::AvatarConfig>,
 }
 
 fn to_view(c: &Config) -> ConfigView {
@@ -77,6 +93,7 @@ fn to_view(c: &Config) -> ConfigView {
         size_index: c.size_index,
         roam_scope: c.roam_scope,
         persona: c.persona,
+        user_kind: c.user_kind.clone(),
         autostart: c.autostart,
         notes_vault: c.notes_vault.clone(),
         reminders: c.reminders.clone(),
@@ -100,6 +117,7 @@ fn to_view(c: &Config) -> ConfigView {
         social_register_date: c.social.register_date.clone(),
         social_invite_code: c.social.invite_code.clone(),
         social_hidden: c.social.hidden,
+        avatar: c.avatar.clone(),
     }
 }
 
@@ -115,6 +133,8 @@ pub struct ConfigPatch {
     pub size_index: Option<usize>,
     pub roam_scope: Option<config::RoamScope>,
     pub persona: Option<config::Persona>,
+    /// Some("") 表示用户主动清空身份，回退到中性表达。
+    pub user_kind: Option<String>,
     pub autostart: Option<bool>,
     pub notes_vault: Option<String>,
     pub reminders: Option<Vec<crate::reminder::Reminder>>,
@@ -134,6 +154,7 @@ pub struct ConfigPatch {
     pub social_server: Option<String>,
     pub social_nick: Option<String>,
     pub social_hidden: Option<bool>,
+    pub avatar: Option<config::AvatarConfig>,
 }
 
 #[tauri::command]
@@ -149,6 +170,10 @@ pub fn update_config(app: AppHandle, patch: ConfigPatch) -> Result<ConfigView, S
     }
     if let Some(v) = patch.persona {
         cfg.persona = v;
+    }
+    if let Some(v) = patch.user_kind {
+        // 超长文本会撑爆 prompt，也说明是误粘贴 —— 截断到 40 字符
+        cfg.user_kind = v.chars().take(USER_KIND_MAX_CHARS).collect();
     }
     if let Some(v) = patch.autostart {
         cfg.autostart = v;
@@ -204,6 +229,9 @@ pub fn update_config(app: AppHandle, patch: ConfigPatch) -> Result<ConfigView, S
     }
     if let Some(v) = patch.social_hidden {
         cfg.social.hidden = v;
+    }
+    if let Some(v) = patch.avatar {
+        cfg.avatar = Some(v);
     }
 
     config::save(&app, &cfg)?;

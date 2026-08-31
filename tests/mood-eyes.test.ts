@@ -82,7 +82,7 @@ describe("心情影响眨眼节奏", () => {
 describe("心情与外观的联动", () => {
   it("心满意足时提到高帧率（情绪需要流畅表达）", () => {
     const a = appearanceFor(
-      st({ doing: "coding", tempo: "normal", mood: "content" }),
+      st({ doing: "editing", tempo: "normal", mood: "content" }),
     );
     expect(a.activity).toBe("active");
   });

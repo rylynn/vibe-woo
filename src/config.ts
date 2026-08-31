@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { Reminder } from "./overlay/reminders";
+import type { AvatarConfigView } from "./avatar/types";
 
 export type Persona = "quiet" | "occasional" | "chatty";
 export type RoamScope = "still" | "nearby" | "halfscreen" | "fullscreen";
@@ -20,6 +21,8 @@ export interface ConfigView {
   notes_vault: string;
   roam_scope: RoamScope;
   persona: Persona;
+  /** 用户自述的「平时主要在忙什么」。空串 = 未填写，宠物不预设任何身份。 */
+  user_kind: string;
   autostart: boolean;
   reminders: Reminder[];
   pomodoro_enabled: boolean;
@@ -42,6 +45,8 @@ export interface ConfigView {
   social_register_date: string;
   social_invite_code: string;
   social_hidden: boolean;
+  /** 已领养的形象。null 表示首次安装未选择（前端应弹形象选择窗）。 */
+  avatar: AvatarConfigView | null;
 }
 
 export interface ConfigPatch {
@@ -49,6 +54,8 @@ export interface ConfigPatch {
   notes_vault?: string;
   roam_scope?: RoamScope;
   persona?: Persona;
+  /** 传空串表示清空身份，宠物回退到中性表达。 */
+  user_kind?: string;
   autostart?: boolean;
   reminders?: Reminder[];
   pomodoro_enabled?: boolean;
@@ -65,6 +72,7 @@ export interface ConfigPatch {
   llm_api_key?: string;
   social_server?: string;
   social_hidden?: boolean;
+  avatar?: AvatarConfigView;
 }
 
 export const FALLBACK_CONFIG: ConfigView = {
@@ -72,6 +80,7 @@ export const FALLBACK_CONFIG: ConfigView = {
   notes_vault: "",
   roam_scope: "nearby",
   persona: "quiet",
+  user_kind: "",
   autostart: false,
   reminders: [],
   pomodoro_enabled: false,
@@ -94,6 +103,7 @@ export const FALLBACK_CONFIG: ConfigView = {
   social_register_date: "",
   social_invite_code: "",
   social_hidden: false,
+  avatar: null,
 };
 
 export async function getConfig(): Promise<ConfigView> {

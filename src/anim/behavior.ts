@@ -10,6 +10,8 @@
  * 出场就应该在那儿待着，而不是从天上砸下来。
  */
 
+import type { ActionStyle } from "../avatar/types";
+
 export type Motion =
   /** 原地待着。 */
   | "idle"
@@ -29,6 +31,18 @@ export type Motion =
 /** 待机小动作，不改变位置，只是让宠物「有事做」。 */
 const IDLE_ACTS = ["hop", "lookaround", "stretch"] as const;
 export type IdleAct = (typeof IDLE_ACTS)[number];
+
+/**
+ * 动作风格对待机小动作的权重（形象的「性格」在行为上的体现）。
+ *
+ * calm 以伸懒腰为主，安静；bouncy 爱跳；curious 爱张望。
+ * 未设置风格时保持旧的均匀随机，不影响存量行为。
+ */
+const ACT_WEIGHTS: Record<ActionStyle, Record<IdleAct, number>> = {
+  calm: { hop: 1, lookaround: 1, stretch: 3 },
+  bouncy: { hop: 4, lookaround: 1, stretch: 1 },
+  curious: { hop: 1, lookaround: 4, stretch: 1 },
+};
 
 /**
  * 活动范围。
@@ -137,6 +151,8 @@ export class Behavior {
   private act: IdleAct | null = null;
   /** 小跳的垂直偏移，向上为正。 */
   private hopLift = 0;
+  /** 形象的动作风格，null 表示未设置（均匀随机，旧行为）。 */
+  private actionStyle: ActionStyle | null = null;
   /** 出生点，nearby 范围以此为锚。 */
   private anchorX: number;
   private baseY: number;
@@ -155,6 +171,11 @@ export class Behavior {
 
   get current(): BehaviorState {
     return this.state;
+  }
+
+  /** 设置动作风格（形象系统驱动），影响待机小动作的选择权重。 */
+  setActionStyle(s: ActionStyle): void {
+    this.actionStyle = s;
   }
 
   /** 外部拖动直接设定位置，并重置锚点与进行中的动作。 */
@@ -265,11 +286,7 @@ export class Behavior {
       return;
     }
 
-    const pick =
-      forceAct ??
-      IDLE_ACTS[
-        Math.min(IDLE_ACTS.length - 1, Math.floor(this.rng() * IDLE_ACTS.length))
-      ];
+    const pick = forceAct ?? this.pickAct();
     this.act = pick;
     switch (pick) {
       case "hop":
@@ -282,6 +299,23 @@ export class Behavior {
         this.actLeft = STRETCH_SECS;
         break;
     }
+  }
+
+  /** 按动作风格权重选一个待机小动作；未设置风格时保持均匀随机。 */
+  private pickAct(): IdleAct {
+    if (this.actionStyle === null) {
+      return IDLE_ACTS[
+        Math.min(IDLE_ACTS.length - 1, Math.floor(this.rng() * IDLE_ACTS.length))
+      ];
+    }
+    const weights = ACT_WEIGHTS[this.actionStyle];
+    const total = IDLE_ACTS.reduce((sum, a) => sum + weights[a], 0);
+    let roll = this.rng() * total;
+    for (const act of IDLE_ACTS) {
+      roll -= weights[act];
+      if (roll < 0) return act;
+    }
+    return IDLE_ACTS[IDLE_ACTS.length - 1];
   }
 
   private continueAct(input: BehaviorInput): BehaviorState {

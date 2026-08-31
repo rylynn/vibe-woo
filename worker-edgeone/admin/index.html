@@ -1,0 +1,600 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Vibe Woo · 数据看板</title>
+<style>
+  /* ---------- 设计令牌（与项目品牌一致：深色科技风） ---------- */
+  :root {
+    --bg: #0d1117;
+    --bg-card: #161b26;
+    --bg-card-hover: #1c2333;
+    --line: #232b3d;
+    --text: #e8ecf4;
+    --text-dim: #8b93a7;
+    --primary: #7cf5c4;
+    --primary-deep: #5ad8a8;
+    --blue: #a8c0ff;
+    --red: #ffab9d;
+    --radius: 14px;
+    font-family: "PingFang SC", -apple-system, system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    min-height: 100vh;
+    background:
+      radial-gradient(1000px 500px at 85% -10%, rgba(124, 245, 196, 0.07), transparent 60%),
+      radial-gradient(800px 400px at -10% 20%, rgba(168, 192, 255, 0.05), transparent 60%),
+      var(--bg);
+    color: var(--text);
+    font-size: 13px;
+    line-height: 1.7;
+  }
+  button { font-family: inherit; }
+
+  /* ---------- 登录卡 ---------- */
+  #login {
+    position: fixed; inset: 0; z-index: 50;
+    display: grid; place-items: center;
+    background: inherit;
+    transition: opacity .4s ease, visibility .4s;
+  }
+  #login.hidden { opacity: 0; visibility: hidden; }
+  .login-card {
+    width: min(360px, 90vw);
+    padding: 28px;
+    background: linear-gradient(160deg, rgba(124,245,196,.06), transparent 40%), var(--bg-card);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    box-shadow: 0 20px 60px rgba(0,0,0,.45);
+    animation: rise .5s ease both;
+  }
+  @keyframes rise { from { opacity: 0; transform: translateY(14px); } }
+  .login-card h1 {
+    margin: 0 0 4px; font-size: 20px; font-weight: 600;
+    color: var(--primary); letter-spacing: .5px;
+  }
+  .login-card .sub { margin: 0 0 18px; color: var(--text-dim); font-size: 12px; }
+  .field { margin-bottom: 12px; }
+  .field label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 4px; }
+  .field input {
+    width: 100%; padding: 9px 12px;
+    background: #0d1117; color: var(--text);
+    border: 1px solid var(--line); border-radius: 9px;
+    font-size: 13px; outline: none;
+    transition: border-color .2s, box-shadow .2s;
+  }
+  .field input:focus {
+    border-color: var(--primary-deep);
+    box-shadow: 0 0 0 3px rgba(124,245,196,.12);
+  }
+  .btn {
+    padding: 9px 16px; border: none; border-radius: 9px; cursor: pointer;
+    background: linear-gradient(135deg, var(--primary), var(--primary-deep));
+    color: #06281c; font-size: 13px; font-weight: 600;
+    transition: transform .15s ease, filter .15s ease;
+  }
+  .btn:hover { transform: translateY(-1px); filter: brightness(1.06); }
+  .btn:active { transform: translateY(0); }
+  .btn-ghost {
+    background: transparent; color: var(--text-dim);
+    border: 1px solid var(--line);
+  }
+  .btn-ghost:hover { color: var(--text); border-color: var(--text-dim); filter: none; }
+  .login-msg { min-height: 18px; margin-top: 10px; font-size: 12px; color: var(--red); }
+
+  /* ---------- 看板布局 ---------- */
+  #app { max-width: 1080px; margin: 0 auto; padding: 24px 20px 60px; }
+  #app.off { display: none; }
+  header {
+    display: flex; align-items: center; gap: 12px;
+    margin-bottom: 20px;
+    animation: rise .4s ease both;
+  }
+  header h1 {
+    margin: 0; font-size: 20px; font-weight: 600; letter-spacing: .5px;
+    background: linear-gradient(90deg, var(--primary), var(--blue));
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  header .spacer { flex: 1; }
+  .badge {
+    padding: 3px 10px; border-radius: 999px; font-size: 11px;
+    background: rgba(124,245,196,.1); color: var(--primary);
+    border: 1px solid rgba(124,245,196,.25);
+  }
+  .badge .dot {
+    display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+    background: var(--primary); margin-right: 5px;
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse { 50% { opacity: .35; } }
+
+  /* 数字卡 */
+  .cards {
+    display: grid; gap: 12px;
+    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+    margin-bottom: 20px;
+  }
+  .card {
+    padding: 14px 16px;
+    background: linear-gradient(165deg, rgba(255,255,255,.02), transparent 50%), var(--bg-card);
+    border: 1px solid var(--line); border-radius: var(--radius);
+    transition: transform .2s ease, border-color .2s ease;
+    animation: rise .45s ease both;
+  }
+  .card:hover { transform: translateY(-3px); border-color: rgba(124,245,196,.3); }
+  .card .k { font-size: 12px; color: var(--text-dim); }
+  .card .v { font-size: 26px; font-weight: 600; color: var(--primary); font-variant-numeric: tabular-nums; }
+  .card .v small { font-size: 12px; color: var(--text-dim); font-weight: 400; }
+  .card.blue .v { color: var(--blue); }
+
+  /* 趋势区 */
+  .panel {
+    background: var(--bg-card); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 18px 20px; margin-bottom: 20px;
+    animation: rise .5s ease both;
+  }
+  .panel h2 { margin: 0 0 4px; font-size: 15px; font-weight: 500; }
+  .panel .sub { margin: 0 0 14px; font-size: 12px; color: var(--text-dim); }
+  .grid2 { display: grid; gap: 20px; grid-template-columns: 1fr 1fr; }
+  @media (max-width: 860px) { .grid2 { grid-template-columns: 1fr; } }
+
+  .chart { display: flex; align-items: flex-end; gap: 3px; height: 120px; }
+  .chart .bar {
+    flex: 1; min-width: 4px; border-radius: 3px 3px 0 0;
+    background: linear-gradient(180deg, var(--primary), rgba(124,245,196,.15));
+    transition: opacity .2s;
+    position: relative;
+  }
+  .chart .bar:hover { opacity: .75; }
+  .chart .bar.blue { background: linear-gradient(180deg, var(--blue), rgba(168,192,255,.15)); }
+  .chart .bar span {
+    position: absolute; bottom: calc(100% + 6px); left: 50%; transform: translateX(-50%);
+    padding: 2px 8px; border-radius: 6px; white-space: nowrap;
+    background: #0a0e14; border: 1px solid var(--line); color: var(--text);
+    font-size: 11px; opacity: 0; pointer-events: none; transition: opacity .15s;
+    z-index: 5;
+  }
+  .chart .bar:hover span { opacity: 1; }
+  .chart-x {
+    display: flex; justify-content: space-between;
+    margin-top: 6px; font-size: 10px; color: var(--text-dim);
+  }
+  .legend { display: flex; gap: 14px; font-size: 11px; color: var(--text-dim); margin-top: 10px; }
+  .legend i {
+    display: inline-block; width: 9px; height: 9px; border-radius: 2px;
+    margin-right: 5px; vertical-align: -1px;
+  }
+
+  /* 用户表 */
+  .toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; }
+  .toolbar input {
+    flex: 1; max-width: 320px; padding: 8px 12px;
+    background: #0d1117; color: var(--text);
+    border: 1px solid var(--line); border-radius: 9px; outline: none; font-size: 13px;
+  }
+  .toolbar input:focus { border-color: var(--primary-deep); }
+  table { width: 100%; border-collapse: collapse; }
+  th {
+    text-align: left; font-size: 11px; font-weight: 500; color: var(--text-dim);
+    padding: 8px 10px; border-bottom: 1px solid var(--line); white-space: nowrap;
+  }
+  td { padding: 9px 10px; border-bottom: 1px solid rgba(35,43,61,.5); white-space: nowrap; }
+  tbody tr.row { cursor: pointer; transition: background .15s; }
+  tbody tr.row:nth-child(even of .row) { background: rgba(255,255,255,.015); }
+  tbody tr.row:hover { background: var(--bg-card-hover); }
+  .online-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+  .on { background: var(--primary); box-shadow: 0 0 6px rgba(124,245,196,.7); }
+  .off { background: #5a6478; }
+  .num { font-variant-numeric: tabular-nums; }
+  .muted { color: var(--text-dim); }
+  .usage-chips { display: flex; gap: 6px; }
+  .chip {
+    font-size: 11px; padding: 1px 8px; border-radius: 999px;
+    background: rgba(124,245,196,.08); color: var(--primary);
+    border: 1px solid rgba(124,245,196,.18); font-variant-numeric: tabular-nums;
+  }
+  .chip.zero { color: var(--text-dim); background: transparent; border-color: var(--line); }
+  .empty { padding: 30px; text-align: center; color: var(--text-dim); }
+
+  /* 明细抽屉 */
+  tr.detail > td { padding: 0; border-bottom: 1px solid var(--line); }
+  .detail-box {
+    padding: 18px 20px; background: rgba(13,17,23,.6);
+    animation: rise .3s ease both;
+  }
+  .detail-head { display: flex; flex-wrap: wrap; gap: 18px; margin-bottom: 12px; }
+  .detail-head .item .k { font-size: 11px; color: var(--text-dim); }
+  .detail-head .item .v { font-size: 14px; font-weight: 500; }
+  .detail-totals { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
+
+  #toast {
+    position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%) translateY(20px);
+    padding: 9px 18px; border-radius: 10px; z-index: 99;
+    background: #1c2333; border: 1px solid var(--line); color: var(--text);
+    font-size: 12px; opacity: 0; pointer-events: none;
+    transition: all .3s ease;
+  }
+  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+</style>
+</head>
+<body>
+
+<!-- 登录 -->
+<div id="login">
+  <form class="login-card" id="login-form">
+    <h1>Vibe Woo · 数据看板</h1>
+    <p class="sub">管理员登录 —— 口令由服务端环境变量管理</p>
+    <div class="field">
+      <label>服务器地址</label>
+      <input id="f-server" placeholder="https://your-app.edgeone.app/api" spellcheck="false" />
+    </div>
+    <div class="field">
+      <label>账号</label>
+      <input id="f-user" placeholder="ADMIN_USER" spellcheck="false" autocomplete="username" />
+    </div>
+    <div class="field">
+      <label>密码</label>
+      <input id="f-pass" type="password" placeholder="ADMIN_PASS" autocomplete="current-password" />
+    </div>
+    <button class="btn" type="submit" style="width:100%">登 录</button>
+    <div class="login-msg" id="login-msg"></div>
+  </form>
+</div>
+
+<!-- 看板 -->
+<div id="app" class="off">
+  <header>
+    <h1>Vibe Woo · 数据看板</h1>
+    <span class="badge"><span class="dot"></span><span id="online-badge">在线 -</span></span>
+    <span class="spacer"></span>
+    <button class="btn btn-ghost" id="btn-refresh">刷新</button>
+    <button class="btn btn-ghost" id="btn-logout">登出</button>
+  </header>
+
+  <div class="cards" id="cards"></div>
+
+  <div class="grid2">
+    <div class="panel">
+      <h2>注册趋势</h2>
+      <p class="sub">近 30 天每日新增注册（本地时区）</p>
+      <div id="chart-reg"></div>
+    </div>
+    <div class="panel">
+      <h2>使用习惯趋势</h2>
+      <p class="sub">近 30 天全站提醒 / 速记 / 番茄 / 在线时长</p>
+      <div id="chart-usage"></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>用户</h2>
+    <div class="toolbar">
+      <input id="q" placeholder="搜索 uid / 账号 / 昵称…" spellcheck="false" />
+      <span class="muted" id="user-count"></span>
+    </div>
+    <div style="overflow-x:auto">
+      <table>
+        <thead>
+          <tr>
+            <th></th><th>uid</th><th>账号</th><th>昵称</th><th>宠物名</th>
+            <th>注册日期</th><th>最近活跃</th><th>状态</th><th>好友度</th><th>好友</th><th>今日习惯</th>
+          </tr>
+        </thead>
+        <tbody id="users"></tbody>
+      </table>
+    </div>
+    <div class="empty" id="users-empty" style="display:none">没有匹配的用户</div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+"use strict";
+/* ================= 状态 ================= */
+const store = {
+  get server() { return localStorage.getItem("vw_server") || ""; },
+  set server(v) { localStorage.setItem("vw_server", v); },
+  get token() { return localStorage.getItem("vw_token") || ""; },
+  set token(v) { localStorage.setItem("vw_token", v); },
+};
+let overview = null;      // /admin/overview 缓存
+let usersCache = null;    // /admin/users 缓存
+let cacheAt = 0;          // 60s 内复用
+let openUid = null;       // 当前展开明细的 uid
+
+const $ = (s) => document.querySelector(s);
+
+/* ================= 工具 ================= */
+function toast(msg) {
+  const t = $("#toast");
+  t.textContent = msg;
+  t.classList.add("show");
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => t.classList.remove("show"), 2200);
+}
+function fmtDate(ms) {
+  if (!ms) return "-";
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+function fmtAgo(ms) {
+  if (!ms) return "从未";
+  const s = Math.max(0, (Date.now() - ms) / 1000);
+  if (s < 3600) return Math.floor(s / 60) + " 分钟前";
+  if (s < 86400) return Math.floor(s / 3600) + " 小时前";
+  return Math.floor(s / 86400) + " 天前";
+}
+function fmtMins(m) {
+  if (m >= 60) return Math.floor(m / 60) + " 小时 " + (m % 60) + " 分";
+  return m + " 分钟";
+}
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+/* ================= API ================= */
+async function api(path, opts = {}) {
+  const url = store.server.replace(/\/+$/, "") + path;
+  const resp = await fetch(url, {
+    ...opts,
+    headers: {
+      "Content-Type": "application/json",
+      ...(store.token ? { Authorization: "Bearer " + store.token } : {}),
+      ...(opts.headers || {}),
+    },
+  });
+  let v = {};
+  try { v = await resp.json(); } catch { /* 非 JSON 视为错误 */ }
+  if (resp.status === 401) { showLogin("会话已过期，请重新登录"); throw new Error("401"); }
+  if (!resp.ok || v.error) throw new Error(v.error || "HTTP " + resp.status);
+  return v;
+}
+
+/* ================= 登录 ================= */
+function showLogin(msg) {
+  store.token = "";
+  $("#login").classList.remove("hidden");
+  $("#app").classList.add("off");
+  if (msg) $("#login-msg").textContent = msg;
+}
+$("#login-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const server = $("#f-server").value.trim().replace(/\/+$/, "");
+  const user = $("#f-user").value.trim();
+  const pass = $("#f-pass").value;
+  const msg = $("#login-msg");
+  msg.textContent = "";
+  if (!server || !user || !pass) { msg.textContent = "请填写完整"; return; }
+  try {
+    const resp = await fetch(server + "/admin/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ user, pass }),
+    });
+    const v = await resp.json().catch(() => ({}));
+    if (!resp.ok || v.error) { msg.textContent = v.error || "登录失败"; return; }
+    store.server = server;
+    store.token = v.token;
+    enterApp();
+  } catch (err) {
+    msg.textContent = "网络错误：" + err.message;
+  }
+});
+
+function enterApp() {
+  $("#login").classList.add("hidden");
+  $("#app").classList.remove("off");
+  refresh(true);
+}
+
+$("#btn-logout").addEventListener("click", () => showLogin());
+$("#btn-refresh").addEventListener("click", () => refresh(true));
+
+/* ================= 数据加载 ================= */
+async function refresh(force) {
+  if (!force && Date.now() - cacheAt < 60_000) return;
+  try {
+    [overview, usersCache] = await Promise.all([
+      api("/admin/overview"),
+      api("/admin/users"),
+    ]);
+    cacheAt = Date.now();
+    openUid = null;
+    renderAll();
+  } catch (e) {
+    if (e.message !== "401") toast("加载失败：" + e.message);
+  }
+}
+
+/* ================= 渲染 ================= */
+function renderAll() {
+  renderCards();
+  renderRegChart();
+  renderUsageChart();
+  renderUsers();
+  $("#online-badge").textContent = "在线 " + overview.online_now;
+}
+
+function renderCards() {
+  const t = overview.today || {};
+  const cards = [
+    { k: "总用户", v: overview.total_users },
+    { k: "今日活跃", v: t.active ?? 0 },
+    { k: "当前在线", v: overview.online_now, blue: true },
+    { k: "今日提醒", v: t.reminders ?? 0 },
+    { k: "今日速记", v: t.notes ?? 0 },
+    { k: "今日番茄", v: t.pomodoros ?? 0 },
+    { k: "今日在线时长", v: fmtMins(t.online_mins ?? 0) },
+  ];
+  $("#cards").innerHTML = cards.map((c, i) => `
+    <div class="card ${c.blue ? "blue" : ""}" style="animation-delay:${i * 40}ms">
+      <div class="k">${esc(c.k)}</div>
+      <div class="v">${esc(String(c.v))}</div>
+    </div>`).join("");
+}
+
+/** 近 30 天日期序列（本地时区）。 */
+function last30Days() {
+  const out = [];
+  const now = new Date();
+  for (let i = 29; i >= 0; i--) {
+    const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - i);
+    out.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`);
+  }
+  return out;
+}
+
+function barChart(container, days, series) {
+  // series: [{ data: {date: value}, color, label }]
+  const max = Math.max(1, ...series.flatMap((s) => days.map((d) => s.data[d] || 0)));
+  const html = days.map((d, i) => {
+    const bars = series.map((s) => {
+      const v = s.data[d] || 0;
+      const h = Math.round((v / max) * 100);
+      const tip = series.map((s2) => {
+        const vv = s2.data[d] || 0;
+        return `${esc(s2.label)}: ${vv}`;
+      }).join(" · ");
+      return `<div class="bar ${s.cls || ""}" style="height:${h}%"><span>${d}<br>${tip}</span></div>`;
+    }).join("");
+    const showDate = i === 0 || i === 29 || i === 14 ? d.slice(5) : "";
+    return `<div style="flex:1;display:flex;align-items:flex-end;gap:1px;min-width:4px">${bars}</div>`;
+  }).join("");
+  container.innerHTML =
+    `<div class="chart">${html}</div>` +
+    `<div class="chart-x"><span>${days[0].slice(5)}</span><span>${days[14].slice(5)}</span><span>${days[29].slice(5)}</span></div>` +
+    `<div class="legend">${series.map((s) => `<span><i style="background:${s.color}"></i>${esc(s.label)}</span>`).join("")}</div>`;
+}
+
+function renderRegChart() {
+  const days = last30Days();
+  const data = {};
+  for (const ms of overview.users_created || []) {
+    const d = fmtDate(ms);
+    data[d] = (data[d] || 0) + 1;
+  }
+  barChart($("#chart-reg"), days, [
+    { data, color: "#7cf5c4", label: "新增注册" },
+  ]);
+}
+
+function renderUsageChart() {
+  const days = last30Days();
+  const mk = (field) => {
+    const data = {};
+    for (const t of overview.trend || []) {
+      const d = (t.date || "").replace(/^(\d{4})(\d{2})(\d{2})$/, "$1-$2-$3");
+      data[d] = t[field] || 0;
+    }
+    return data;
+  };
+  barChart($("#chart-usage"), days, [
+    { data: mk("reminders"), color: "#7cf5c4", label: "提醒" },
+    { data: mk("notes"), color: "#a8c0ff", label: "速记" },
+    { data: mk("pomodoros"), color: "#5ad8a8", label: "番茄" },
+  ]);
+}
+
+function usageChips(today) {
+  if (!today) return '<span class="muted">—</span>';
+  const mk = (label, n) =>
+    `<span class="chip ${n ? "" : "zero"}">${label} ${n}</span>`;
+  return `<div class="usage-chips">${mk("醒", today.reminders || 0)}${mk("记", today.notes || 0)}${mk("茄", today.pomodoros || 0)}${mk("⏱", today.online_mins || 0)}</div>`;
+}
+
+function renderUsers() {
+  const q = $("#q").value.trim().toLowerCase();
+  const list = (usersCache.users || []).filter((u) =>
+    !q || u.uid.includes(q) || (u.account || "").toLowerCase().includes(q) ||
+    (u.nick || "").toLowerCase().includes(q));
+  $("#user-count").textContent = `${list.length} / ${usersCache.users.length} 人`;
+  $("#users-empty").style.display = list.length ? "none" : "block";
+
+  $("#users").innerHTML = list.map((u) => `
+    <tr class="row" data-uid="${esc(u.uid)}">
+      <td><span class="online-dot ${u.online ? "on" : "off"}"></span></td>
+      <td class="num">${esc(u.uid)}</td>
+      <td>${esc(u.account)}</td>
+      <td>${esc(u.nick)}</td>
+      <td>${esc(u.pet_name)}</td>
+      <td class="muted num">${fmtDate(u.created_at)}</td>
+      <td class="muted">${fmtAgo(u.last_seen)}</td>
+      <td class="muted">${u.online ? esc(u.state) : "offline"}</td>
+      <td class="num">♥ ${Math.round(u.affinity || 0)}</td>
+      <td class="num">${u.friends_count ?? 0}</td>
+      <td>${usageChips(u.today)}</td>
+    </tr>
+    ${openUid === u.uid ? '<tr class="detail"><td colspan="11"><div class="detail-box">载入中…</div></td></tr>' : ""}
+  `).join("");
+
+  $("#users").querySelectorAll("tr.row").forEach((tr) => {
+    tr.addEventListener("click", () => toggleDetail(tr.dataset.uid));
+  });
+
+  if (openUid) loadDetail(openUid);
+}
+
+async function toggleDetail(uid) {
+  openUid = openUid === uid ? null : uid;
+  renderUsers();
+  if (openUid) await loadDetail(openUid);
+}
+
+async function loadDetail(uid) {
+  const box = $("#users").querySelector(".detail-box");
+  if (!box) return;
+  try {
+    const d = await api("/admin/user?uid=" + encodeURIComponent(uid));
+    const box0 = $("#users").querySelector(".detail-box");
+    if (!box0 || openUid !== uid) return;
+    const days = last30Days().filter((x) => d.days && d.days[x]);
+    const maxMins = Math.max(1, ...days.map((x) => d.days[x].online_mins || 0));
+    const bars = days.length
+      ? `<div class="chart" style="height:90px">${days.map((x) => {
+          const v = d.days[x].online_mins || 0;
+          return `<div class="bar blue" style="height:${Math.round((v / maxMins) * 100)}%"><span>${x}<br>在线 ${v} 分钟<br>醒 ${d.days[x].reminders || 0} · 记 ${d.days[x].notes || 0} · 茄 ${d.days[x].pomodoros || 0}</span></div>`;
+        }).join("")}</div>`
+      : '<div class="muted" style="padding:20px 0">还没有使用数据（用户上线并打点后出现）</div>';
+    box0.innerHTML = `
+      <div class="detail-head">
+        <div class="item"><div class="k">账号</div><div class="v">${esc(d.account)}</div></div>
+        <div class="item"><div class="k">昵称</div><div class="v">${esc(d.nick)}</div></div>
+        <div class="item"><div class="k">宠物名</div><div class="v">${esc(d.pet_name)}</div></div>
+        <div class="item"><div class="k">注册时间</div><div class="v num">${fmtDate(d.created_at)}</div></div>
+        <div class="item"><div class="k">最近活跃</div><div class="v">${fmtAgo(d.last_seen)}</div></div>
+        <div class="item"><div class="k">好友</div><div class="v num">${d.friends_count} 人${(d.friends || []).length ? "：" + d.friends.map((f) => esc(f.nick)).join("、") : ""}</div></div>
+      </div>
+      <div class="detail-totals">
+        <span class="chip">累计提醒 ${d.total.reminders}</span>
+        <span class="chip">累计速记 ${d.total.notes}</span>
+        <span class="chip">累计番茄 ${d.total.pomodoros}</span>
+        <span class="chip">累计在线 ${fmtMins(d.total.online_mins)}</span>
+      </div>
+      <div class="k muted" style="font-size:12px;margin-bottom:8px">近 30 天每日在线时长（悬停看习惯明细）</div>
+      ${bars}`;
+  } catch (e) {
+    if (e.message !== "401") {
+      const box0 = $("#users").querySelector(".detail-box");
+      if (box0) box0.textContent = "加载失败：" + e.message;
+    }
+  }
+}
+
+$("#q").addEventListener("input", () => renderUsers());
+
+/* ================= 启动 ================= */
+(function init() {
+  const urlApi = new URLSearchParams(location.search).get("api");
+  if (urlApi) store.server = urlApi.replace(/\/+$/, "");
+  $("#f-server").value = store.server;
+  if (store.server && store.token) enterApp();
+  else showLogin();
+})();
+</script>
+</body>
+</html>

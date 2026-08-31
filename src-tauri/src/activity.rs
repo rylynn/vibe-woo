@@ -41,10 +41,14 @@ pub fn detect(s: &Snapshot, bundle_id: &str) -> Activity {
     if MUSIC_BUNDLES.iter().any(|p| id.starts_with(&p.to_ascii_lowercase())) {
         return Activity::Listening;
     }
-    if s.app == AppKind::Coding && s.keyboard_idle_secs >= THINKING_IDLE_SECS {
+    // 产出型工具前台却长时间没敲键 —— 在想事情
+    if s.app.is_producing() && s.keyboard_idle_secs >= THINKING_IDLE_SECS {
         return Activity::Thinking;
     }
-    if s.app == AppKind::Browsing && s.keyboard_idle_secs >= SLACKING_IDLE_SECS {
+    // 浏览器与影音里键盘不动 = 在逛在看，不是产出
+    if matches!(s.app, AppKind::Browsing | AppKind::Watching)
+        && s.keyboard_idle_secs >= SLACKING_IDLE_SECS
+    {
         return Activity::Slacking;
     }
     Activity::Working
@@ -87,15 +91,32 @@ mod tests {
     #[test]
     fn 编辑器内长时间无输入判定为思考() {
         assert_eq!(
-            detect(&snap(AppKind::Coding, 60.0), "com.microsoft.VSCode"),
+            detect(&snap(AppKind::Editing, 60.0), "com.microsoft.VSCode"),
             Activity::Thinking
         );
     }
 
     #[test]
+    fn 任何产出型工具里停手都算思考() {
+        // 写方案、画设计稿、对表格时停下来，同样是在想事情
+        for app in [
+            AppKind::Editing,
+            AppKind::Writing,
+            AppKind::Designing,
+            AppKind::Data,
+        ] {
+            assert_eq!(
+                detect(&snap(app, 60.0), "com.whatever.App"),
+                Activity::Thinking,
+                "{app:?}"
+            );
+        }
+    }
+
+    #[test]
     fn 短暂停顿不算思考() {
         assert_eq!(
-            detect(&snap(AppKind::Coding, 10.0), "com.microsoft.VSCode"),
+            detect(&snap(AppKind::Editing, 10.0), "com.microsoft.VSCode"),
             Activity::Working
         );
     }
@@ -104,6 +125,14 @@ mod tests {
     fn 浏览器里键盘不动判定为摸鱼() {
         assert_eq!(
             detect(&snap(AppKind::Browsing, 30.0), "com.google.Chrome"),
+            Activity::Slacking
+        );
+    }
+
+    #[test]
+    fn 看视频不动判定为消遣() {
+        assert_eq!(
+            detect(&snap(AppKind::Watching, 30.0), "com.colliderli.iina"),
             Activity::Slacking
         );
     }

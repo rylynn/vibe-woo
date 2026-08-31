@@ -65,6 +65,7 @@ pub fn spawn(app: &AppHandle) {
                 }
                 if should_fire(r, &ctx, "") {
                     fired.insert(key, ());
+                    crate::usage::bump(crate::usage::Kind::Reminder);
                     eprintln!("[reminder] 触发：{}（{}）", r.text, r.time);
                     let _ = app.emit(
                         EVENT_REMINDER,
@@ -98,6 +99,7 @@ pub fn spawn(app: &AppHandle) {
             };
             for i in due {
                 if let Some(r) = cfg.reminders.get(i) {
+                    crate::usage::bump(crate::usage::Kind::Reminder);
                     eprintln!("[reminder] 稍后重响：{}（{}）", r.text, r.time);
                     let _ = app.emit(
                         EVENT_REMINDER,

@@ -1,11 +1,19 @@
 import {
   ACTION_STYLES,
+  ATTACHMENTS,
   BODY_SHAPES,
   BROW_STYLES,
   EYE_STYLES,
+  type Pattern,
   type PetAvatar,
 } from "./types";
-import { accentFor, bodyHslFor, harmoniousHues, hslToHex } from "./palette";
+import {
+  accentFor,
+  bodyHslFor,
+  clampBodyHsl,
+  harmoniousHues,
+  hslToHex,
+} from "./palette";
 
 function pick<T>(list: readonly T[], rng: () => number): T {
   return list[Math.floor(rng() * list.length)];
@@ -32,6 +40,11 @@ export function generateCandidates(rng: () => number, count = 3): PetAvatar[] {
     if (used.has(key)) continue;
     used.add(key);
     const body = bodyHslFor(hues[out.length], rng);
+    // 特征件/纹理低概率入池：点缀性质，不该喧宾夺主
+    const attachment =
+      rng() < 0.25 ? pick(ATTACHMENTS.slice(1), rng) : "none";
+    const pattern: Pattern =
+      rng() < 0.2 ? (rng() < 0.5 ? "stripes" : "spots") : "none";
     out.push({
       shape,
       eyeStyle,
@@ -39,6 +52,13 @@ export function generateCandidates(rng: () => number, count = 3): PetAvatar[] {
       actionStyle: pick(ACTION_STYLES, rng),
       bodyColor: hslToHex(body),
       accentColor: hslToHex(accentFor(body, rng)),
+      attachment,
+      pattern,
+      // 纹理次色：与点缀色同族的协调色，亮度压回主色域
+      secondaryColor:
+        pattern === "none"
+          ? ""
+          : hslToHex(clampBodyHsl(accentFor(body, rng))),
     });
   }
   return out;

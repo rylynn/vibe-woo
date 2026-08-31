@@ -10,6 +10,16 @@ import {
   type RoamScope,
 } from "../config";
 import { enablePanelDrag } from "./panel-drag";
+import { avatarFromView, type PetAvatar } from "../avatar/types";
+import { drawAvatarStill } from "./avatar-picker";
+
+/** 形象相关操作流（由 main.ts 装配，避免设置面板直接依赖弹窗与持久化）。 */
+export interface AvatarFlow {
+  /** 打开形象选择弹窗；initial 非空时直接展示这批候选。 */
+  openPicker(initial?: PetAvatar[]): void;
+  /** 从图片生成候选；未提供时隐藏该入口。 */
+  analyzeImage?: (file: File) => Promise<PetAvatar[]>;
+}
 
 const SIZE_LABELS = ["小 48", "中 96", "大 144", "特大 192"];
 
@@ -47,6 +57,7 @@ export class SettingsPanel {
 
   constructor(
     private readonly onApply: (c: ConfigView) => void,
+    private readonly avatarFlow?: AvatarFlow,
   ) {
     this.el = document.createElement("div");
     this.el.className = "pet-settings";
@@ -162,6 +173,26 @@ export class SettingsPanel {
       ),
     );
 
+    this.el.appendChild(
+      this.rowText(
+        "我平时在忙什么",
+        c.user_kind,
+        (v) => this.patch({ user_kind: v.trim() }),
+        "可留空",
+        40,
+      ),
+    );
+    this.el.appendChild(
+      this.hint(
+        "留空则不预设身份，宠物只根据你正在做的事说话。填写后用于 AI 对话；开启 AI 接入时会随请求发往你配置的服务端",
+      ),
+    );
+
+    if (this.avatarFlow) {
+      this.el.appendChild(this.divider("形象"));
+      this.el.appendChild(this.rowAvatar(c));
+    }
+
     this.el.appendChild(this.divider("速记"));
     this.el.appendChild(
       this.rowText("Obsidian 目录", c.notes_vault, (v) =>
@@ -236,6 +267,52 @@ export class SettingsPanel {
     this.el.appendChild(credit);
 
     this.el.appendChild(this.footer());
+  }
+
+  /** 形象区块：当前形象 48px 预览 + 换一批 / 从图片生成入口。 */
+  private rowAvatar(c: ConfigView): HTMLElement {
+    const r = this.row("形象");
+
+    const canvas = document.createElement("canvas");
+    canvas.width = 48;
+    canvas.height = 48;
+    canvas.className = "pet-settings-avatar";
+    canvas.title = c.avatar ? "当前形象" : "尚未领养形象";
+    if (c.avatar) drawAvatarStill(canvas, avatarFromView(c.avatar));
+    r.appendChild(canvas);
+
+    const flow = this.avatarFlow;
+    if (!flow) return r;
+
+    const reroll = document.createElement("button");
+    reroll.className = "pet-avatar-btn";
+    reroll.textContent = "换一批";
+    reroll.addEventListener("click", () => flow.openPicker());
+    r.appendChild(reroll);
+
+    if (flow.analyzeImage) {
+      const fromImage = document.createElement("button");
+      fromImage.className = "pet-avatar-btn";
+      fromImage.textContent = "从图片生成";
+      const input = document.createElement("input");
+      input.type = "file";
+      input.accept = "image/*";
+      input.style.display = "none";
+      fromImage.addEventListener("click", () => input.click());
+      input.addEventListener("change", () => {
+        const file = input.files?.[0];
+        input.value = "";
+        if (!file || !flow.analyzeImage) return;
+        void flow
+          .analyzeImage(file)
+          .then((list) => {
+            if (list.length > 0) flow.openPicker(list);
+          })
+          .catch((e) => console.warn("[avatar] 图片分析失败", e));
+      });
+      r.append(fromImage, input);
+    }
+    return r;
   }
 
   /** 只读信息行（关于区）。 */
@@ -328,12 +405,16 @@ export class SettingsPanel {
     label: string,
     value: string,
     onCommit: (v: string) => void,
+    placeholder?: string,
+    maxLength?: number,
   ): HTMLElement {
     const r = this.row(label);
     const input = document.createElement("input");
     input.type = "text";
     input.value = value;
     input.spellcheck = false;
+    if (placeholder !== undefined) input.placeholder = placeholder;
+    if (maxLength !== undefined) input.maxLength = maxLength;
     const commit = () => {
       if (input.value !== value) onCommit(input.value);
     };

@@ -5,7 +5,7 @@
 //!
 //! 串门由 persona 自动决策（非人工发起），依据：
 //!   - 性格：唠唠 > 偶尔 > 安静的出门概率
-//!   - 主人是否忙：主人在写代码时宠物留守陪伴，不出门
+//!   - 主人是否忙：主人专注产出时宠物留守陪伴，不出门
 //!   - 好友度：达到门槛才出门，出门消耗 8 点防连环打扰
 //!   - 对方在线且家中访客 <3（服务端判定）
 //!
@@ -96,10 +96,10 @@ pub fn decide_visit(
 
 /// 主人是否正忙（宠物应留守陪伴，不出门）。
 ///
-/// 写代码的任何节奏都算忙 —— 盯屏幕思考也一样；
+/// 专注产出的任何节奏都算忙 —— 盯屏幕思考也一样；
 /// 上网闲逛/人不在 → 宠物自由活动。
 pub fn owner_busy(doing: crate::state::Doing) -> bool {
-    matches!(doing, crate::state::Doing::Coding)
+    doing.is_producing()
 }
 
 fn set_visiting(app: &AppHandle, v: Option<Visiting>) {
@@ -157,10 +157,11 @@ pub fn spawn(app: &AppHandle) {
                 continue;
             }
 
-            // 共同在线时长计入好友度
+            // 共同在线时长计入好友度 + 用量计数（在线分钟）
             let elapsed_min = last_min_mark.elapsed().as_secs_f64() / 60.0;
             last_min_mark = std::time::Instant::now();
             affinity.tick_online(elapsed_min);
+            crate::usage::add_online_secs(elapsed_min * 60.0);
 
             // 心跳状态：离家串门时为 visiting，其余按传感器（隐身在此层生效）
             let share_state = if is_away() {
@@ -171,11 +172,22 @@ pub fn spawn(app: &AppHandle) {
                     .unwrap_or_else(|| "idle".into())
             };
 
-            let beat = serde_json::json!({
+            let mut beat = serde_json::json!({
                 "state": share_state,
                 "affinity": affinity.value as u32,
                 "pet_name": cfg.social.pet_name,
             });
+            // 用量上报：当日聚合计数（隐私红线：只有数字，没有内容）。
+            // 未打点过（刚启动）不带 usage 字段，服务端按缺失处理。
+            if let Some(u) = crate::usage::snapshot() {
+                beat["usage"] = serde_json::json!({
+                    "date": u.date,
+                    "reminders": u.reminders,
+                    "notes": u.notes,
+                    "pomodoros": u.pomodoros,
+                    "online_mins": u.online_mins,
+                });
+            }
 
             let mut went_visiting: Option<Visiting> = None;
             rt.block_on(async {
@@ -339,7 +351,7 @@ mod tests {
     use crate::state::Doing;
 
     #[test]
-    fn 主人写代码时宠物留守() {
+    fn 主人专注时宠物留守() {
         for p in [Persona::Quiet, Persona::Occasional, Persona::Chatty] {
             assert!(!decide_visit(p, true, true, 0.0), "忙时任何人格都不出门");
         }
@@ -364,10 +376,18 @@ mod tests {
     }
 
     #[test]
-    fn 写代码算忙_其他不算() {
-        assert!(owner_busy(Doing::Coding));
-        assert!(!owner_busy(Doing::Browsing));
-        assert!(!owner_busy(Doing::Other));
-        assert!(!owner_busy(Doing::Away));
+    fn 专注产出算忙_其他不算() {
+        for d in [Doing::Editing, Doing::Writing, Doing::Designing, Doing::Data] {
+            assert!(owner_busy(d), "{d:?} 应算忙，宠物该留守");
+        }
+        for d in [
+            Doing::Messaging,
+            Doing::Browsing,
+            Doing::Watching,
+            Doing::Other,
+            Doing::Away,
+        ] {
+            assert!(!owner_busy(d), "{d:?} 不算忙，宠物可自由活动");
+        }
     }
 }

@@ -54,10 +54,15 @@ pub fn spawn(app: &AppHandle) {
         // 保留上一次能识别的前台应用。
         //
         // 取不到时（例如前台恰好是宠物自己、或某个无 bundle 的进程）
-        // 若退化成空串就会被分类为 Other，宠物会误判「你没在写代码」。
+        // 若退化成空串就会被分类为 Other，宠物会误判「你没在忙」。
         // 沿用上次的值比凭空归零准确得多。
         let mut last_bundle = String::new();
         let mut last = Instant::now();
+        // 配置几乎不变，但采样每 120ms 一轮 —— 每轮都 clone 一次 Config
+        // （含三个 Vec<String>）纯属浪费。用版本号只在真正变更时重建。
+        let mut cfg_version = u64::MAX; // 强制首轮加载
+        let mut overrides = Overrides::default();
+        let mut persona = crate::config::Persona::default();
 
         loop {
             std::thread::sleep(SAMPLE_INTERVAL);
@@ -80,13 +85,18 @@ pub fn spawn(app: &AppHandle) {
             }
             let bundle = &last_bundle;
 
-            // 每轮重读配置，让用户改完分类规则立刻生效，无需重启
-            let cfg = configcmd::current();
-            let overrides = Overrides {
-                coding: cfg.coding_apps,
-                browsing: cfg.browsing_apps,
-                other: cfg.excluded_apps,
-            };
+            // 配置变了就重读，让用户改完分类规则立刻生效，无需重启
+            let v = configcmd::config_version();
+            if v != cfg_version {
+                let cfg = configcmd::current();
+                overrides = Overrides {
+                    coding: cfg.coding_apps,
+                    browsing: cfg.browsing_apps,
+                    other: cfg.excluded_apps,
+                };
+                persona = cfg.persona;
+                cfg_version = v;
+            }
 
             let snap = Snapshot {
                 app: appclass::classify(bundle, &overrides),
@@ -106,7 +116,7 @@ pub fn spawn(app: &AppHandle) {
             // 宠物不在家（串门中）不说话 —— 家里没人听。
             if !crate::socialdrive::is_away() {
                 if let Some(line) = reactor.feed(
-                    cfg.persona,
+                    persona,
                     prev_state.as_ref(),
                     &next,
                     &memory::snapshot(),

@@ -45,19 +45,25 @@ pub struct SharePayload {
 /// 从本地状态映射到可上报状态。
 ///
 /// 刻意只看 doing：tempo/mood/activity/kpm 一律不出本机。
-/// 好友知道「你在写代码」是乐趣；知道「你卡住了/你在摸鱼」
+/// 好友知道「你在忙」是乐趣；知道「你卡住了/你在摸鱼」
 /// 就是监视了。
 pub fn share_state_of(s: &PetState) -> ShareState {
-    match s.doing {
-        Doing::Coding => ShareState::Coding,
-        Doing::Away => ShareState::Away,
-        Doing::Browsing | Doing::Other => ShareState::Idle,
+    if s.doing == Doing::Away {
+        return ShareState::Away;
+    }
+    // 上报值仍只有 coding/idle/away —— 服务端与旧客户端按这三个值工作。
+    // 细分的「在做什么」绝不上报：好友知道你在忙就够了，
+    // 知道你是在填表还是在画图就越界了。
+    if s.doing.is_producing() {
+        ShareState::Coding
+    } else {
+        ShareState::Idle
     }
 }
 
 /// 隐身模式下上报的状态 —— 恒为 Idle，且这是唯一出口。
 ///
-/// 注意：隐身时连「你在写代码」都不说。凌晨三点在写代码这件事，
+/// 注意：隐身时连「你在忙」都不说。凌晨三点还在忙这件事，
 /// 用户应该有权完全不让人看见（设计文档 7.3）。
 pub fn share_state_hidden() -> ShareState {
     ShareState::Idle
@@ -107,9 +113,8 @@ pub fn build_payload(
 mod tests {
     use super::*;
     use crate::activity::Activity;
-    use crate::state::Tempo;
     use crate::mood::Mood;
-    use crate::state::{AppKind, Snapshot};
+    use crate::state::Tempo;
 
     fn state(doing: Doing, tempo: Tempo) -> PetState {
         PetState {
@@ -123,11 +128,27 @@ mod tests {
     }
 
     #[test]
-    fn 状态映射只有四档() {
-        assert_eq!(share_state_of(&state(Doing::Coding, Tempo::Flow)), ShareState::Coding);
-        assert_eq!(share_state_of(&state(Doing::Coding, Tempo::Stuck)), ShareState::Coding);
-        assert_eq!(share_state_of(&state(Doing::Browsing, Tempo::Normal)), ShareState::Idle);
-        assert_eq!(share_state_of(&state(Doing::Other, Tempo::Resting)), ShareState::Idle);
+    fn 状态映射只有三档产出都归忙() {
+        // 对外契约：产出型 → coding，消遣型 → idle，离开 → away
+        for d in [Doing::Editing, Doing::Writing, Doing::Designing, Doing::Data] {
+            assert_eq!(
+                share_state_of(&state(d, Tempo::Flow)),
+                ShareState::Coding,
+                "{d:?}"
+            );
+        }
+        for d in [
+            Doing::Messaging,
+            Doing::Browsing,
+            Doing::Watching,
+            Doing::Other,
+        ] {
+            assert_eq!(
+                share_state_of(&state(d, Tempo::Normal)),
+                ShareState::Idle,
+                "{d:?}"
+            );
+        }
         assert_eq!(share_state_of(&state(Doing::Away, Tempo::Resting)), ShareState::Away);
     }
 
@@ -135,7 +156,7 @@ mod tests {
     fn 序列化结果绝不包含敏感字段() {
         // 红线测试：把带满敏感数据的 PetState 打进去，
         // 序列化输出里不允许出现任何键位频率/心情/活动痕迹。
-        let p = build_payload("pid", "阿咪", &state(Doing::Coding, Tempo::Flow), 42, false, 1770000000);
+        let p = build_payload("pid", "阿咪", &state(Doing::Editing, Tempo::Flow), 42, false, 1770000000);
         let json = serde_json::to_string(&p).unwrap();
         assert!(!json.contains("keystrokes"), "击键频率泄漏：{json}");
         assert!(!json.contains("mood"), "心情泄漏：{json}");
@@ -146,11 +167,11 @@ mod tests {
     }
 
     #[test]
-    fn 隐身时恒为idle且不说在写代码() {
+    fn 隐身时恒为idle且不说在忙() {
         let p = build_payload(
             "pid",
             "阿咪",
-            &state(Doing::Coding, Tempo::Flow),
+            &state(Doing::Editing, Tempo::Flow),
             42,
             true,
             1770000000,

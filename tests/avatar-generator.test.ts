@@ -130,4 +130,25 @@ d("形象候选生成器", () => {
     expect(generateCandidates(mulberry32(7), 5)).toHaveLength(5);
     expect(generateCandidates(mulberry32(7), 1)).toHaveLength(1);
   });
+
+  it("随机池以低概率纳入特征件与纹理（不喧宾夺主）", () => {
+    const all = batches(SEEDS).flat();
+    const withAttachment = all.filter((c) => c.attachment !== "none");
+    const withPattern = all.filter((c) => c.pattern !== "none");
+    // 60 个候选里至少出现一些，但不占多数
+    expect(withAttachment.length).toBeGreaterThan(2);
+    expect(withAttachment.length).toBeLessThan(all.length / 2);
+    expect(withPattern.length).toBeGreaterThan(1);
+    expect(withPattern.length).toBeLessThan(all.length / 2);
+  });
+
+  it("带纹理的候选必有合法次色", () => {
+    for (const c of batches(SEEDS).flat()) {
+      if (c.pattern === "none") {
+        expect(c.secondaryColor).toBe("");
+      } else {
+        expect(c.secondaryColor).toMatch(/^#[0-9A-F]{6}$/);
+      }
+    }
+  });
 });

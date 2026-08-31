@@ -140,8 +140,21 @@ bash scripts/install.sh
 
 ## 可选：社交服务（好友 / 串门）
 
-好友、串门是可选功能，需要自建同步服务（Cloudflare Worker，免费额度足够小圈子用）。
-不部署不影响其他功能。
+好友、串门是可选功能，需要自建同步服务。不部署不影响其他功能。
+
+### 方式一：EdgeOne Pages（国内访问友好，推荐）
+
+1. EdgeOne 控制台创建 Pages 项目并接入仓库（或控制台编辑器粘贴 `worker-edgeone/edge-functions/` 下的代码）
+2. 控制台完成 KV 绑定：项目详情 → KV 存储 → 绑定命名空间 → 变量名 **`SYNC_KV`**
+3. 部署后把地址填进宠物：**右键宠物 → 设置 → 好友 → 服务器**（填到 `/api` 结尾，如 `https://xxx.edgeone.app/api`）
+
+本地验证（与线上同一份逻辑）：
+
+```bash
+node worker-edgeone/local-dev.js        # http://localhost:8787
+```
+
+### 方式二：Cloudflare Worker
 
 ```bash
 cd worker
@@ -151,7 +164,33 @@ npx wrangler secret put ADMIN_TOKEN
 npx wrangler deploy
 ```
 
-部署后把地址填进宠物：**右键宠物 → 设置 → 好友 → 服务器**。完整说明见 `worker/README.md`。
+部署后同样把地址填进宠物设置。完整说明见 `worker/README.md`。
+
+## 可选：管理员数据看板（仅自己可见）
+
+查看线上注册统计、用户明细与使用习惯（提醒/速记/番茄/在线时长）。线上只暴露 JSON API（需要口令），页面在本地打开。
+
+1. EdgeOne 控制台给边缘函数配两个 **Secret 类型环境变量**（配置后需重新部署生效）：
+   - `ADMIN_USER` —— 看板账号
+   - `ADMIN_PASS` —— 看板密码
+2. 本地打开看板页：
+
+```bash
+cd worker-edgeone
+python3 -m http.server 8899             # 或任意静态服务
+# 浏览器访问 http://localhost:8899/admin/?api=https://你的域名/api
+```
+
+3. 登录后可看：总用户/今日活跃/当前在线、注册与使用习惯趋势（30 天）、用户列表（可搜索）、点用户行展开个人明细。
+
+用量数据由桌面客户端心跳自动捎带（只有聚合计数，无任何内容，隐私红线不变）；旧版客户端不携带也完全兼容。
+
+本地联调看板（与线上同一份逻辑）：
+
+```bash
+ADMIN_USER=boss ADMIN_PASS=YourPass node worker-edgeone/local-dev.js 8787
+# 打开 admin 页面，服务器填 http://localhost:8787
+```
 
 ## 常见问题
 

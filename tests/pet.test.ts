@@ -1,11 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { Pet, SIZE_STEPS } from "../src/pet";
+import { applyTint } from "../src/avatar/palette";
+import { DEFAULT_AVATAR, type PetAvatar } from "../src/avatar/types";
 
 interface RecordedFill {
   globalAlpha: number;
   shadowBlur: number;
+  x: number;
+  y: number;
   w: number;
   h: number;
+  style: string;
 }
 
 interface StubCtx {
@@ -49,12 +54,15 @@ function makeStubCtx(): StubCtx {
       state.fillStyle = v;
     },
     clearRect: () => {},
-    fillRect: (_x: number, _y: number, w: number, h: number) => {
+    fillRect: (x: number, y: number, w: number, h: number) => {
       fills.push({
         globalAlpha: state.globalAlpha,
         shadowBlur: state.shadowBlur,
+        x,
+        y,
         w,
         h,
+        style: state.fillStyle,
       });
     },
   } as unknown as CanvasRenderingContext2D;
@@ -122,7 +130,7 @@ describe("穿透约束：绝不产生半透明像素", () => {
     // 辉光只在「进入状态」时出现（语义信号而非常驻装饰），
     // 因此必须先进入该状态才能验证其形态
     pet.applyState({
-      doing: "coding",
+      doing: "editing",
       tempo: "flow",
       late_night: false,
       keystrokes_per_min: 220,
@@ -140,7 +148,7 @@ describe("穿透约束：绝不产生半透明像素", () => {
   it("非专注状态不画辉光，避免常亮造成的闪烁感", () => {
     const { pet, fills } = makePet();
     pet.applyState({
-      doing: "coding",
+      doing: "editing",
       tempo: "normal",
       late_night: false,
       keystrokes_per_min: 10,
@@ -403,6 +411,126 @@ describe("帧率预算", () => {
     pet.applyState(AWAY_STATE);
     settle(pet);
     expect(["idle", "sleep"]).toContain(pet.currentMotion);
+  });
+});
+
+describe("形象系统", () => {
+  const CUSTOM: PetAvatar = {
+    shape: "round",
+    eyeStyle: "big",
+    browStyle: "flat",
+    actionStyle: "bouncy",
+    bodyColor: "#A85232",
+    accentColor: "#FFE066",
+    attachment: "none",
+    pattern: "none",
+    secondaryColor: "",
+  };
+
+  it("未设置形象时保持旧外观（默认矩形+青绿基色）", () => {
+    const { pet, fills } = makePet();
+    pet.setActivity("active");
+    pet.tick(1000);
+    expect(fills.some((f) => f.style === DEFAULT_AVATAR.bodyColor)).toBe(true);
+  });
+
+  it("setAvatar 后身体使用形象基色", () => {
+    const { pet, fills } = makePet();
+    pet.setAvatar(CUSTOM);
+    pet.setActivity("active");
+    pet.tick(1000);
+    expect(fills.some((f) => f.style === CUSTOM.bodyColor)).toBe(true);
+  });
+
+  it("focused 状态在形象基色上提亮，而非回退到固定旧色", () => {
+    const { pet, fills } = makePet();
+    pet.setAvatar(CUSTOM);
+    pet.applyState({
+      doing: "editing",
+      tempo: "flow",
+      late_night: false,
+      keystrokes_per_min: 220,
+      mood: "focused",
+      activity: "working",
+    });
+    pet.tick(1000);
+    const focusedColor = applyTint(CUSTOM.bodyColor, "focused");
+    expect(focusedColor).not.toBe(CUSTOM.bodyColor);
+    expect(fills.some((f) => f.style === focusedColor)).toBe(true);
+  });
+
+  it("非矩形形状逐行绘制，fillRect 次数远多于矩形的 1 次", () => {
+    const { pet, fills } = makePet();
+    pet.setAvatar(CUSTOM);
+    pet.setActivity("active");
+    pet.tick(1000);
+    const bodyRows = fills.filter((f) => f.style === CUSTOM.bodyColor);
+    expect(bodyRows.length).toBeGreaterThan(50);
+  });
+
+  it("眉毛使用形象点缀色", () => {
+    const { pet, fills } = makePet();
+    pet.setAvatar(CUSTOM);
+    pet.setActivity("active");
+    pet.tick(1000);
+    expect(fills.some((f) => f.style === CUSTOM.accentColor)).toBe(true);
+  });
+
+  it("无眉毛形象不绘制眉毛色", () => {
+    const { pet, fills } = makePet();
+    pet.setAvatar({ ...CUSTOM, browStyle: "none", bodyColor: "#7CF5C4" });
+    pet.setActivity("active");
+    pet.tick(1000);
+    // 点缀色只用于眉毛与高光；无眉时只允许高光出现（高光很小，w 远小于身体）
+    const accentFills = fills.filter((f) => f.style === CUSTOM.accentColor);
+    for (const f of accentFills) {
+      expect(f.w).toBeLessThan(pet.body.w / 4);
+    }
+  });
+
+  it("带耳形象：附件画在身体上沿的预留区内", () => {
+    const { pet, fills } = makePet();
+    pet.setAvatar({ ...CUSTOM, attachment: "ears", browStyle: "none" });
+    pet.setActivity("active");
+    pet.tick(1000);
+    const b = pet.body;
+    // 附件色块出现在 bbox 顶部约 1/4 区域（高光在眼睛中部，不会落进来）
+    const capFills = fills.filter(
+      (f) => f.style === CUSTOM.accentColor && f.y < b.y + b.h * 0.28 && f.w >= 4,
+    );
+    expect(capFills.length).toBeGreaterThan(0);
+  });
+
+  it("条纹形象：身体行出现次色", () => {
+    const { pet, fills } = makePet();
+    pet.setAvatar({
+      ...CUSTOM,
+      attachment: "none",
+      browStyle: "none",
+      pattern: "stripes",
+      secondaryColor: "#223344",
+    });
+    pet.setActivity("active");
+    pet.tick(1000);
+    expect(fills.some((f) => f.style === "#223344")).toBe(true);
+  });
+
+  it("斑点形象：次色以小块出现且数量受控", () => {
+    const { pet, fills } = makePet();
+    pet.setAvatar({
+      ...CUSTOM,
+      attachment: "none",
+      browStyle: "none",
+      pattern: "spots",
+      secondaryColor: "#223344",
+    });
+    pet.setActivity("active");
+    pet.tick(1000);
+    const spots = fills.filter((f) => f.style === "#223344");
+    expect(spots.length).toBeGreaterThan(3);
+    for (const f of spots) {
+      expect(f.w).toBeLessThanOrEqual(6);
+    }
   });
 });
 

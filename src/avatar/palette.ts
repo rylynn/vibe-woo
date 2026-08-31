@@ -84,6 +84,60 @@ export function bodyHslFor(hue: number, rng: () => number): Hsl {
   };
 }
 
+/** 把任意 HSL 钳制到主色协调域（图生形象的提取色、纹理次色用）。 */
+export function clampBodyHsl(hsl: Hsl): Hsl {
+  return {
+    h: hsl.h,
+    s: Math.min(BODY_S[1], Math.max(BODY_S[0], hsl.s)),
+    l: Math.min(BODY_L[1], Math.max(BODY_L[0], hsl.l)),
+  };
+}
+
+/** 解析 #RRGGBB 为 HSL。 */
+export function hexToHsl(hex: string): Hsl {
+  const r = parseInt(hex.slice(1, 3), 16) / 255;
+  const g = parseInt(hex.slice(3, 5), 16) / 255;
+  const b = parseInt(hex.slice(5, 7), 16) / 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const l = (max + min) / 2;
+  if (max === min) return { h: 0, s: 0, l };
+  const delta = max - min;
+  const s = l > 0.5 ? delta / (2 - max - min) : delta / (max + min);
+  let h: number;
+  if (max === r) {
+    h = (g - b) / delta + (g < b ? 6 : 0);
+  } else if (max === g) {
+    h = (b - r) / delta + 2;
+  } else {
+    h = (r - g) / delta + 4;
+  }
+  return { h: h * 60, s, l };
+}
+
+/**
+ * 状态色调叠加：形象的基色是「长相」，tint 是「状态」。
+ *
+ * normal 原样；focused 提亮（旧 FOCUSED_COLOR 的语义）；dim 压暗降饱和
+ * （旧 DIM_COLOR 的语义）。任何基色经过同一变换，状态语义在全形象池里
+ * 保持可读。
+ */
+export function applyTint(
+  hex: string,
+  tint: "normal" | "focused" | "dim",
+): string {
+  if (tint === "normal") return hex.toUpperCase();
+  const hsl = hexToHsl(hex);
+  if (tint === "focused") {
+    return hslToHex({ ...hsl, l: Math.min(0.9, hsl.l + 0.09) });
+  }
+  return hslToHex({
+    ...hsl,
+    s: hsl.s * 0.35,
+    l: Math.max(0.15, hsl.l * 0.6),
+  });
+}
+
 /**
  * 由主色推导点缀色（高光/眉毛）。
  *

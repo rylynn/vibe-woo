@@ -22,7 +22,8 @@ interface FriendRow {
 }
 
 const STATE_LABEL: Record<string, string> = {
-  coding: "在写代码",
+  // 好友侧看不到对方的身份自述（那是本地隐私），只能泛化到「在忙」
+  coding: "在忙",
   idle: "闲着",
   away: "离开了",
   visiting: "外出串门",

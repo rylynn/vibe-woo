@@ -16,7 +16,14 @@ import {
 import { isInsideBox, type Box } from "./interact/hit-test";
 import { appearanceFor, type Appearance } from "./appearance";
 import { DEFAULT_STATE, type PetState } from "./state";
-import { drawEyes } from "./render/eyes";
+import { drawEyes, EYE_COLOR } from "./render/eyes";
+import { drawBody } from "./render/body";
+import { drawBrows } from "./render/brows";
+import { drawAttachments, splitBodyBox } from "./render/attachments";
+import { drawSpots } from "./render/patterns";
+import { squashScale } from "./anim/squash";
+import { DEFAULT_AVATAR, type PetAvatar } from "./avatar/types";
+import { applyTint } from "./avatar/palette";
 
 /** 像素艺术必须整数倍缩放，否则糊。基础格 48px。 */
 const BASE_CELL = 48;
@@ -53,15 +60,6 @@ const GAZE_RANGE = 3.2;
 /** 今日特效奖励（认真休息所得，隔天失效）。 */
 export type RewardEffect = "tomato" | "bubbles" | "sparkle";
 
-const BODY_COLOR = "#7cf5c4";
-const GLOW_COLOR = "#7cf5c4";
-const EYE_COLOR = "#0b1020";
-/** 眼睛高光，让眼神有生气。 */
-const CATCHLIGHT_COLOR = "#e8fff6";
-/** FLOW 状态的身体色，比常态更亮。 */
-const FOCUSED_COLOR = "#9dffd8";
-/** 睡眠时的身体色，压暗以示安静。 */
-const DIM_COLOR = "#4a8f78";
 /** 深夜黑眼圈颜色。 */
 const TIRED_COLOR = "#4a5a7a";
 
@@ -97,6 +95,8 @@ export class Pet {
   private dirty: Box | null = null;
   /** 由 Rust 传感器推送的状态推导出的外观。 */
   private look: Appearance = appearanceFor(DEFAULT_STATE);
+  /** 形象（长相）：形状/眼风/眉/基色/动作偏好。 */
+  private avatar: PetAvatar = DEFAULT_AVATAR;
   private readonly expr = new MicroExpression();
   private readonly behavior: Behavior;
   private motion: Motion = "idle";
@@ -370,18 +370,48 @@ export class Pet {
       this.drawDitherGlow(px, py, w, h);
     }
 
-    ctx.fillStyle = this.bodyColor();
-    ctx.fillRect(px, py, w, h);
+    // 形象合成：身体（形状+纹理）→ 特征件（顶部预留区）→ 眼睛 → 眉毛。
+    // 特征件存在时身体压缩高度，附件画在 bbox 内顶部（脏矩形零改动）。
+    const full = { bodyX: px, bodyY: py, w, h };
+    const { body } = splitBodyBox(full, this.avatar.attachment);
+    const bodyColor = this.bodyColor();
+    const secondary = this.avatar.secondaryColor
+      ? applyTint(this.avatar.secondaryColor, this.look.tint)
+      : "";
+    drawBody(
+      ctx,
+      this.avatar.shape,
+      body.x,
+      body.y,
+      body.w,
+      body.h,
+      bodyColor,
+      this.avatar.pattern === "stripes" && secondary ? secondary : undefined,
+    );
+    if (this.avatar.pattern === "spots" && secondary) {
+      drawSpots(ctx, this.avatar.shape, body, secondary);
+    }
+    drawAttachments(ctx, full, this.avatar.attachment, this.accentColor());
 
+    const layout = { bodyX: body.x, bodyY: body.y, w: body.w, h: body.h };
     drawEyes(
       ctx,
-      { bodyX: px, bodyY: py, w, h },
+      layout,
       this.eye,
       {
         iris: EYE_COLOR,
-        catchlight: CATCHLIGHT_COLOR,
+        catchlight: this.accentColor(),
         eyebag: this.look.tired ? TIRED_COLOR : null,
       },
+      this.avatar.eyeStyle,
+    );
+    drawBrows(
+      ctx,
+      layout,
+      this.avatar.browStyle,
+      this.eye,
+      this.accentColor(),
+      this.avatar.eyeStyle,
     );
 
     if (this.effects.size > 0) {
@@ -470,37 +500,10 @@ export class Pet {
    * 量化到整数像素：像素艺术里亚像素尺寸会让边缘看起来在抖。
    */
   private squash(side: number): { w: number; h: number } {
-    let sx = 1;
-    let sy = 1;
+    // 公式见 anim/squash.ts（与形象选择弹窗的预览共享）
+    const { sx, sy } = squashScale(this.motion, this.actPhase);
 
-    switch (this.motion) {
-      case "hop":
-        // 腾空时略微拉长，符合物理直觉
-        sx = 0.9;
-        sy = 1.12;
-        break;
-      case "stretch": {
-        // 伸懒腰：先压扁蓄力，再往上抻长
-        const t = this.actPhase;
-        const wave = Math.sin(t * Math.PI);
-        if (t < 0.35) {
-          sx = 1 + 0.14 * wave;
-          sy = 1 - 0.12 * wave;
-        } else {
-          sx = 1 - 0.1 * wave;
-          sy = 1 + 0.18 * wave;
-        }
-        break;
-      }
-      case "lookaround":
-        // 张望只转头，身体几乎不变
-        sx = 1;
-        sy = 1;
-        break;
-      default:
-        break;
-    }
-
+    // 量化到整数像素：像素艺术里亚像素尺寸会让边缘看起来在抖
     return {
       w: Math.max(4, Math.round(side * sx)),
       h: Math.max(4, Math.round(side * sy)),
@@ -547,15 +550,14 @@ export class Pet {
     return null;
   }
 
+  /** 形象基色 × 状态色调：focused 提亮、dim 压暗降饱和。 */
   private bodyColor(): string {
-    switch (this.look.tint) {
-      case "focused":
-        return FOCUSED_COLOR;
-      case "dim":
-        return DIM_COLOR;
-      default:
-        return BODY_COLOR;
-    }
+    return applyTint(this.avatar.bodyColor, this.look.tint);
+  }
+
+  /** 点缀色（高光/眉毛）随状态色调同规则变换，保持整体协调。 */
+  private accentColor(): string {
+    return applyTint(this.avatar.accentColor, this.look.tint);
   }
 
   /** 擦除上一帧的脏矩形；首帧或 resize 后为整屏。 */
@@ -607,7 +609,8 @@ export class Pet {
   private drawDitherGlow(px: number, py: number, bw: number, bh: number): void {
     const { ctx } = this;
     const cell = this.glowCell(Math.max(bw, bh));
-    ctx.fillStyle = GLOW_COLOR;
+    // 辉光只在 focused 时调用，与身体提亮色同源，保持色相协调
+    ctx.fillStyle = this.bodyColor();
 
     for (let ring = 1; ring <= GLOW_RINGS; ring++) {
       const inset = ring * cell;
@@ -651,6 +654,19 @@ export class Pet {
     this.sizeIndex = (this.sizeIndex + 1) % SIZE_STEPS.length;
     // 尺寸变化后旧脏矩形范围不足以覆盖新尺寸，会留下残影
     this.dirty = null;
+  }
+
+  /** 设置形象。联动动作风格到行为层，并立即重绘。 */
+  setAvatar(a: PetAvatar): void {
+    this.avatar = a;
+    this.behavior.setActionStyle(a.actionStyle);
+    this.dirty = null;
+    this.lastRenderMs = 0;
+  }
+
+  /** 当前形象（供测试与设置面板回显）。 */
+  get avatarValue(): PetAvatar {
+    return this.avatar;
   }
 
   /** 设置尺寸档位。越界会让宠物直接消失，故做钳制。 */

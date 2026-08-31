@@ -13,7 +13,7 @@ use crate::state::{Doing, PetState, Tempo};
 
 /// 连续工作超过此秒数（45 分钟）→ 久坐，该起来走走。
 const LONG_SIT_SECS: f64 = 45.0 * 60.0;
-/// 当日编码超过此秒数（5 小时）→ 过劳。
+/// 当日专注产出超过此秒数（5 小时）→ 过劳。
 const OVERWORK_SECS: f64 = 5.0 * 3600.0;
 /// 连续心流超过此秒数（50 分钟）→ 高强度输出，也累。
 const LONG_FLOW_SECS: f64 = 50.0 * 60.0;
@@ -23,8 +23,10 @@ const LONG_FLOW_SECS: f64 = 50.0 * 60.0;
 pub struct DayMemory {
     /// 当天 0 点起的秒数，用于跨天清零判断。
     pub day_secs: f64,
-    /// 编码类前台累计秒数（含思考/卡住的时间 —— 盯屏幕也是耗神）。
-    pub coding_secs: f64,
+    /// 专注产出类前台累计秒数（含思考/卡住的时间 —— 盯屏幕也是耗神）。
+    ///
+    /// 不只是写代码：写方案、做设计、对表格都算。
+    pub focus_secs: f64,
     /// 其中处于心流（高频输出）的累计秒数。
     pub flow_secs: f64,
     /// 自上次「离开」以来的连续秒数。回来即重新计时。
@@ -62,8 +64,8 @@ pub fn update(s: &PetState, dt: f64, day_secs: f64) {
             mem.continuous_secs = 0.0; // 人离开了，连续工作断掉
         } else {
             mem.continuous_secs += dt;
-            if s.doing == Doing::Coding {
-                mem.coding_secs += dt;
+            if s.doing.is_producing() {
+                mem.focus_secs += dt;
                 if s.tempo == Tempo::Flow {
                     mem.flow_secs += dt;
                 }
@@ -86,7 +88,7 @@ pub fn snapshot() -> DayMemory {
 
 /// 由事实量推断疲劳等级。纯函数。
 pub fn fatigue(m: &DayMemory) -> Fatigue {
-    if m.coding_secs >= OVERWORK_SECS {
+    if m.focus_secs >= OVERWORK_SECS {
         return Fatigue::Overworked;
     }
     if m.continuous_secs >= LONG_SIT_SECS || m.flow_secs >= LONG_FLOW_SECS {
@@ -109,8 +111,9 @@ fn minutes(secs: f64) -> u32 {
 pub fn summary(m: &DayMemory) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
 
-    if m.coding_secs >= 15.0 * 60.0 {
-        parts.push(format!("今天写码约{}小时", hours(m.coding_secs)));
+    if m.focus_secs >= 15.0 * 60.0 {
+        // 不提具体工种：主人未必在写代码，可能是做设计、写方案
+        parts.push(format!("今天专注了约{}小时", hours(m.focus_secs)));
         if m.flow_secs >= 5.0 * 60.0 {
             parts.push(format!("其中进入状态约{}分钟", minutes(m.flow_secs)));
         }
@@ -146,18 +149,18 @@ mod tests {
     }
 
     #[test]
-    fn 少量编码不出摘要_避免刚坐下就被总结() {
+    fn 少量专注不出摘要_避免刚坐下就被总结() {
         let m = DayMemory {
-            coding_secs: 5.0 * 60.0,
+            focus_secs: 5.0 * 60.0,
             ..Default::default()
         };
         assert!(summary(&m).is_none());
     }
 
     #[test]
-    fn 累计编码进入摘要() {
+    fn 累计专注进入摘要() {
         let m = DayMemory {
-            coding_secs: 2.0 * 3600.0,
+            focus_secs: 2.0 * 3600.0,
             flow_secs: 30.0 * 60.0,
             notes: 3,
             ..Default::default()
@@ -166,6 +169,22 @@ mod tests {
         assert!(s.contains("2小时"), "{s}");
         assert!(s.contains("30分钟"), "{s}");
         assert!(s.contains("3条速记"), "{s}");
+    }
+
+    #[test]
+    fn 摘要不提任何具体工种() {
+        // 主人未必在写代码 —— 摘要只说时长与状态，不替他定义职业
+        let m = DayMemory {
+            focus_secs: 3.5 * 3600.0,
+            continuous_secs: 50.0 * 60.0,
+            notes: 2,
+            ..Default::default()
+        };
+        let s = summary(&m).unwrap();
+        for bad in ["写代码", "写码", "代码", "编程"] {
+            assert!(!s.contains(bad), "摘要里出现了工种词「{bad}」：{s}");
+        }
+        assert!(s.contains("专注"), "{s}");
     }
 
     #[test]
@@ -179,9 +198,9 @@ mod tests {
     }
 
     #[test]
-    fn 累计五小时过劳优先于久坐() {
+    fn 累计五小时专注过劳优先于久坐() {
         let m = DayMemory {
-            coding_secs: 5.5 * 3600.0,
+            focus_secs: 5.5 * 3600.0,
             continuous_secs: 50.0 * 60.0,
             ..Default::default()
         };

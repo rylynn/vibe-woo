@@ -28,6 +28,12 @@ impl Default for Persona {
     }
 }
 
+/// 用户自述「在忙什么」的最大字符数。
+///
+/// 这段文本会原文进入 system prompt —— 太长既挤占上下文，也说明是误粘贴。
+/// 手改 config.json 能绕过 `update_config`，因此 `load` 里再兜一次。
+pub const USER_KIND_MAX_CHARS: usize = 40;
+
 /// LLM 请求协议。三种主流 API 形态各走各的端点与报文格式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -104,7 +110,7 @@ pub struct SocialConfig {
     pub register_date: String,
     /// 自己的邀请码（注册时服务端签发，可邀请一位好友注册）。
     pub invite_code: String,
-    /// 隐身开关：开启后上报恒为 idle，连「在写代码」都不说。
+    /// 隐身开关：开启后上报恒为 idle，连「在忙」都不说。
     pub hidden: bool,
 }
 
@@ -156,6 +162,106 @@ impl Default for PomodoroConfig {
     }
 }
 
+/// 身体形状（形象维度，与前端 BodyShape 对齐）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BodyShape {
+    Box,
+    Round,
+    Blob,
+    Tall,
+    Wide,
+    /// 蘑菇：底宽顶窄。
+    Shroom,
+    /// 水滴：顶尖底圆。
+    Drop,
+}
+
+/// 眼睛风格（长相维度，与 EyeShape 表情维度正交）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EyeStyle {
+    Classic,
+    Big,
+    Dot,
+    Almond,
+    Sleepy,
+}
+
+/// 眉毛风格。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BrowStyle {
+    None,
+    Flat,
+    Slanted,
+    Arched,
+    Bushy,
+}
+
+/// 动作风格：待机小动作的触发偏好。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ActionStyle {
+    Calm,
+    Bouncy,
+    Curious,
+}
+
+/// 特征件：画在身体上沿的轮廓特征（从图片轮廓的顶部凸起识别）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Attachment {
+    /// 无特征件。默认。
+    #[default]
+    None,
+    /// 圆耳（熊/鼠）：顶部两个矮宽凸起。
+    Ears,
+    /// 尖耳（猫）：顶部两个高窄凸起。
+    PointyEars,
+    /// 角：顶部两侧尖锥。
+    Horns,
+    /// 触角：居中细杆顶珠。
+    Antenna,
+}
+
+/// 身体颜色纹理（从图片双主色的空间分布识别）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Pattern {
+    /// 无纹理。默认。
+    #[default]
+    None,
+    /// 条纹：次色按行聚集。
+    Stripes,
+    /// 斑点：次色分散分布。
+    Spots,
+}
+
+/// 宠物形象配置（首次启动三选一选定后持久化）。
+///
+/// 全部为值语义小字段，前端渲染层据此程序化绘制；无外部资源引用。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AvatarConfig {
+    pub shape: BodyShape,
+    pub eye_style: EyeStyle,
+    pub brow_style: BrowStyle,
+    pub action_style: ActionStyle,
+    /// 身体基色 #RRGGBB，状态色调在其上变换。
+    pub body_color: String,
+    /// 点缀色 #RRGGBB（高光/眉毛）。
+    pub accent_color: String,
+    /// 特征件。旧配置缺省为 None（渲染无变化）。
+    #[serde(default)]
+    pub attachment: Attachment,
+    /// 身体纹理。旧配置缺省为 None。
+    #[serde(default)]
+    pub pattern: Pattern,
+    /// 次色 #RRGGBB（纹理用色）；空串表示无。
+    #[serde(default)]
+    pub secondary_color: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -164,6 +270,11 @@ pub struct Config {
     /// 活动范围。
     pub roam_scope: RoamScope,
     pub persona: Persona,
+    /// 用户自述的「平时主要在忙什么」。空串表示未填写 ——
+    /// 此时不预设任何身份：宠物只描述正在做的事，绝不假设主人的职业。
+    ///
+    /// 只在本地使用（进 system prompt 与本地语料选取），不参与任何上报。
+    pub user_kind: String,
     /// 开机自启。
     pub autostart: bool,
     /// Obsidian vault 目录（速记的额外落点）。空字符串表示不启用。
@@ -178,6 +289,8 @@ pub struct Config {
     pub excluded_apps: Vec<String>,
     pub llm: LlmConfig,
     pub social: SocialConfig,
+    /// 已领养的形象。None 表示首次安装尚未选择，前端据此弹选择窗。
+    pub avatar: Option<AvatarConfig>,
 }
 
 impl Default for Config {
@@ -186,6 +299,7 @@ impl Default for Config {
             size_index: 1, // 96px
             roam_scope: RoamScope::default(),
             persona: Persona::default(),
+            user_kind: String::new(),
             autostart: false,
             notes_vault: String::new(),
             reminders: Vec::new(),
@@ -195,6 +309,7 @@ impl Default for Config {
             excluded_apps: Vec::new(),
             llm: LlmConfig::default(),
             social: SocialConfig::default(),
+            avatar: None,
         }
     }
 }
@@ -212,13 +327,16 @@ pub fn load(app: &AppHandle) -> Config {
     let Ok(text) = fs::read_to_string(&path) else {
         return Config::default();
     };
-    match serde_json::from_str::<Config>(&text) {
+    let mut c = match serde_json::from_str::<Config>(&text) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("[config] 解析失败，使用默认值：{e}");
             Config::default()
         }
-    }
+    };
+    // 手改配置文件可以绕过 update_config 的截断，这里统一收口
+    c.user_kind = c.user_kind.chars().take(USER_KIND_MAX_CHARS).collect();
+    c
 }
 
 /// 写入配置。
@@ -325,6 +443,27 @@ mod tests {
     }
 
     #[test]
+    fn 旧配置缺身份字段时解析为空串而非预设() {
+        // 不预设身份是硬要求：老用户升级后绝不能被当成程序员
+        let c: Config = serde_json::from_str(r#"{"size_index": 2}"#).unwrap();
+        assert!(c.user_kind.is_empty(), "缺省必须为空串，不能预设任何身份");
+        assert!(Config::default().user_kind.is_empty());
+    }
+
+    #[test]
+    fn 身份字段可往返序列化且空串能清空() {
+        let mut c = Config::default();
+        c.user_kind = "在做电商运营".into();
+        let back: Config = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
+        assert_eq!(back.user_kind, "在做电商运营");
+
+        // Some("") 表示用户主动清空，回退到中性
+        let cleared: Config =
+            serde_json::from_str(r#"{"user_kind": ""}"#).unwrap();
+        assert!(cleared.user_kind.is_empty());
+    }
+
+    #[test]
     fn 旧社交配置的pet_id字段被忽略而不报错() {
         // 旧版有 pet_id/invite_code 字段；serde 默认忽略未知字段
         let json = r#"{"social": {"server": "https://x", "pet_id": "abc", "invite_code": "XX", "nick": "n", "hidden": true}}"#;
@@ -360,5 +499,103 @@ mod tests {
         assert_eq!(back.persona, Persona::Occasional);
         assert_eq!(back.coding_apps, vec!["com.foo.bar".to_string()]);
         assert_eq!(back.roam_scope, RoamScope::Halfscreen);
+    }
+
+    #[test]
+    fn 旧配置无形象字段时解析为未选择() {
+        // None 即「首次安装未领养」，前端据此弹出形象选择
+        let c: Config = serde_json::from_str(r#"{"size_index": 2}"#).unwrap();
+        assert!(c.avatar.is_none(), "旧配置应视为未选择形象");
+        assert!(Config::default().avatar.is_none());
+    }
+
+    #[test]
+    fn 形象配置往返序列化() {
+        let mut c = Config::default();
+        c.avatar = Some(AvatarConfig {
+            shape: BodyShape::Round,
+            eye_style: EyeStyle::Big,
+            brow_style: BrowStyle::Flat,
+            action_style: ActionStyle::Bouncy,
+            body_color: "#A85232".into(),
+            accent_color: "#FFE066".into(),
+            attachment: Attachment::Ears,
+            pattern: Pattern::Spots,
+            secondary_color: "#7A3B22".into(),
+        });
+        let text = serde_json::to_string(&c).unwrap();
+        let back: Config = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.avatar, c.avatar);
+    }
+
+    #[test]
+    fn 形象枚举序列化为小写字符串与前端类型对齐() {
+        assert_eq!(serde_json::to_string(&BodyShape::Blob).unwrap(), "\"blob\"");
+        assert_eq!(serde_json::to_string(&EyeStyle::Almond).unwrap(), "\"almond\"");
+        assert_eq!(serde_json::to_string(&BrowStyle::Bushy).unwrap(), "\"bushy\"");
+        assert_eq!(
+            serde_json::to_string(&ActionStyle::Curious).unwrap(),
+            "\"curious\""
+        );
+        let s: BodyShape = serde_json::from_str("\"wide\"").unwrap();
+        assert_eq!(s, BodyShape::Wide);
+    }
+
+    #[test]
+    fn 形象字段名为snake_case与前端约定一致() {
+        let a = AvatarConfig {
+            shape: BodyShape::Tall,
+            eye_style: EyeStyle::Sleepy,
+            brow_style: BrowStyle::Arched,
+            action_style: ActionStyle::Calm,
+            body_color: "#112233".into(),
+            accent_color: "#445566".into(),
+            attachment: Attachment::None,
+            pattern: Pattern::None,
+            secondary_color: String::new(),
+        };
+        let v = serde_json::to_value(&a).unwrap();
+        for key in [
+            "shape",
+            "eye_style",
+            "brow_style",
+            "action_style",
+            "body_color",
+            "accent_color",
+            "attachment",
+            "pattern",
+            "secondary_color",
+        ] {
+            assert!(v.get(key).is_some(), "缺少字段 {key}");
+        }
+    }
+
+    #[test]
+    fn 旧形象配置缺新字段时补默认值且渲染无变化() {
+        // 升级前保存的形象没有 attachment/pattern/secondary_color
+        // 注意：颜色值含 `"#` 序列，原始字符串必须用 r## 避免提前终止
+        let json = r##"{"shape":"round","eye_style":"big","brow_style":"flat","action_style":"calm","body_color":"#A85232","accent_color":"#FFE066"}"##;
+        let a: AvatarConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(a.attachment, Attachment::None);
+        assert_eq!(a.pattern, Pattern::None);
+        assert!(a.secondary_color.is_empty(), "无纹理时次色为空串");
+    }
+
+    #[test]
+    fn 特征件枚举序列化为kebab_case与前端对齐() {
+        assert_eq!(
+            serde_json::to_string(&Attachment::PointyEars).unwrap(),
+            "\"pointy-ears\""
+        );
+        assert_eq!(serde_json::to_string(&Attachment::None).unwrap(), "\"none\"");
+        assert_eq!(serde_json::to_string(&Pattern::Stripes).unwrap(), "\"stripes\"");
+        let a: Attachment = serde_json::from_str("\"antenna\"").unwrap();
+        assert_eq!(a, Attachment::Antenna);
+    }
+
+    #[test]
+    fn 新形状枚举序列化与前端对齐() {
+        assert_eq!(serde_json::to_string(&BodyShape::Shroom).unwrap(), "\"shroom\"");
+        assert_eq!(serde_json::to_string(&BodyShape::Drop).unwrap(), "\"drop\"");
     }
 }

@@ -24,7 +24,7 @@ pub enum Reaction {
     Unstuck,
     /// 离开后回来。
     Back,
-    /// 深夜还在写码（每晚最多一次）。
+    /// 深夜还在忙（每晚最多一次）。
     LateNight,
     /// 连续工作太久，该起来走走。
     LongSit,
@@ -47,6 +47,9 @@ const GLOBAL_GAP_SECS: u64 = 90;
 const UNSTUCK_MIN_SECS: u64 = 120;
 
 /// 反应语料（人格 × 反应）。安静人格大多缺席 —— 安静用动作反应。
+///
+/// 与 persona.rs 的主表同样遵守「不提工种」：反应发生在状态迁移的瞬间，
+/// 说错工种的违和感比定时说话更强。
 const LINES: &[(Reaction, Persona, &[&str])] = &[
     (
         Reaction::FlowStart,
@@ -61,17 +64,17 @@ const LINES: &[(Reaction, Persona, &[&str])] = &[
     (
         Reaction::FlowStart,
         Persona::Chatty,
-        &["这个节奏对了，我就不打扰了。", "你写嗨了，我看得出来。"],
+        &["这个节奏对了，我就不打扰了。", "你来劲了，我看得出来。"],
     ),
     (
         Reaction::FlowEnd,
         Persona::Occasional,
-        &["告一段落？", "（伸了个懒腰）", "写完那口气了？"],
+        &["告一段落？", "（伸了个懒腰）", "忙完那口气了？"],
     ),
     (
         Reaction::FlowEnd,
         Persona::Chatty,
-        &["刚才那段写得很顺，歇口气吧。"],
+        &["刚才那段挺顺的，歇口气吧。"],
     ),
     (Reaction::Unstuck, Persona::Quiet, &["（尾巴摇了一下）"]),
     (
@@ -99,12 +102,12 @@ const LINES: &[(Reaction, Persona, &[&str])] = &[
     (
         Reaction::LateNight,
         Persona::Occasional,
-        &["这个点了。", "夜深了，写完这段就睡？"],
+        &["这个点了。", "夜深了，忙完这段就睡？"],
     ),
     (
         Reaction::LateNight,
         Persona::Chatty,
-        &["都半夜了。代码明早还在，觉不补不回来。"],
+        &["都半夜了。活儿明早还在，觉不补不回来。"],
     ),
     (
         Reaction::LongSit,
@@ -187,7 +190,7 @@ impl Reactor {
             Some(prev)
                 if prev.tempo == Tempo::Stuck
                     && cur.tempo != Tempo::Stuck
-                    && cur.doing == Doing::Coding =>
+                    && cur.doing.is_producing() =>
             {
                 // 卡得够久的恢复才算「想通了」
                 match self.stuck_since {
@@ -202,13 +205,13 @@ impl Reactor {
             Some(prev)
                 if !prev.late_night
                     && cur.late_night
-                    && cur.doing == Doing::Coding =>
+                    && cur.doing.is_producing() =>
             {
                 Some(Reaction::LateNight)
             }
             _
                 if memory::fatigue(mem) == Fatigue::Tired
-                    && cur.doing == Doing::Coding
+                    && cur.doing.is_producing()
                     && cur.tempo == Tempo::Normal =>
             {
                 // 久坐催休息：挂在链尾，状态不变也会轮到它；
@@ -270,15 +273,31 @@ mod tests {
         }
     }
 
-    fn coding(tempo: Tempo) -> PetState {
-        state(Doing::Coding, tempo)
+    fn doing(d: Doing, tempo: Tempo) -> PetState {
+        state(d, tempo)
+    }
+
+    fn editing(tempo: Tempo) -> PetState {
+        state(Doing::Editing, tempo)
+    }
+
+    #[test]
+    fn 反应语料不提任何具体工种() {
+        // 主人未必在写代码 —— 反应语料里出现工种词会瞬间出戏
+        for (_, _, ls) in LINES {
+            for l in *ls {
+                for bad in ["代码", "写码", "写", "编程", "bug"] {
+                    assert!(!l.contains(bad), "反应语料里出现了工种词「{bad}」：{l}");
+                }
+            }
+        }
     }
 
     #[test]
     fn 进入心流触发反应() {
         let mut r = Reactor::new();
-        let prev = coding(Tempo::Normal);
-        let cur = coding(Tempo::Flow);
+        let prev = editing(Tempo::Normal);
+        let cur = editing(Tempo::Flow);
         assert!(r
             .feed(Persona::Occasional, Some(&prev), &cur, &DayMemory::default())
             .is_some());
@@ -287,8 +306,8 @@ mod tests {
     #[test]
     fn 安静人格进入心流用动作表达() {
         let mut r = Reactor::new();
-        let prev = coding(Tempo::Normal);
-        let cur = coding(Tempo::Flow);
+        let prev = editing(Tempo::Normal);
+        let cur = editing(Tempo::Flow);
         let line = r
             .feed(Persona::Quiet, Some(&prev), &cur, &DayMemory::default())
             .unwrap();
@@ -298,7 +317,7 @@ mod tests {
     #[test]
     fn 状态不变不反应() {
         let mut r = Reactor::new();
-        let s = coding(Tempo::Normal);
+        let s = editing(Tempo::Normal);
         assert!(r
             .feed(Persona::Chatty, Some(&s), &s, &DayMemory::default())
             .is_none());
@@ -307,14 +326,14 @@ mod tests {
     #[test]
     fn 首帧不反应() {
         let mut r = Reactor::new();
-        let s = coding(Tempo::Flow);
+        let s = editing(Tempo::Flow);
         assert!(r.feed(Persona::Chatty, None, &s, &DayMemory::default()).is_none());
     }
 
     #[test]
     fn 离开瞬间不说话() {
         let mut r = Reactor::new();
-        let prev = coding(Tempo::Normal);
+        let prev = editing(Tempo::Normal);
         let cur = state(Doing::Away, Tempo::Resting);
         assert!(r
             .feed(Persona::Chatty, Some(&prev), &cur, &DayMemory::default())
@@ -325,7 +344,7 @@ mod tests {
     fn 离开后回来触发反应() {
         let mut r = Reactor::new();
         let prev = state(Doing::Away, Tempo::Resting);
-        let cur = coding(Tempo::Normal);
+        let cur = editing(Tempo::Normal);
         assert!(r
             .feed(Persona::Occasional, Some(&prev), &cur, &DayMemory::default())
             .is_some());
@@ -334,8 +353,8 @@ mod tests {
     #[test]
     fn 全局间隔内不再反应() {
         let mut r = Reactor::new();
-        let prev = coding(Tempo::Normal);
-        let cur = coding(Tempo::Flow);
+        let prev = editing(Tempo::Normal);
+        let cur = editing(Tempo::Flow);
         assert!(r
             .feed(Persona::Occasional, Some(&prev), &cur, &DayMemory::default())
             .is_some());
@@ -346,10 +365,10 @@ mod tests {
     }
 
     #[test]
-    fn 深夜开始写码触发提醒() {
+    fn 深夜还在忙触发提醒() {
         let mut r = Reactor::new();
-        let prev = coding(Tempo::Normal);
-        let mut cur = coding(Tempo::Normal);
+        let prev = editing(Tempo::Normal);
+        let mut cur = editing(Tempo::Normal);
         cur.late_night = true;
         assert!(r
             .feed(Persona::Occasional, Some(&prev), &cur, &DayMemory::default())
@@ -363,20 +382,36 @@ mod tests {
             ..Default::default()
         };
         let mut r = Reactor::new();
-        let s = coding(Tempo::Normal);
+        let s = editing(Tempo::Normal);
         assert!(r.feed(Persona::Occasional, Some(&s), &s, &mem).is_some());
 
         // 但 STUCK（在想事情）时不催
         let mut r2 = Reactor::new();
-        let stuck = coding(Tempo::Stuck);
+        let stuck = editing(Tempo::Stuck);
         assert!(r2.feed(Persona::Occasional, Some(&stuck), &stuck, &mem).is_none());
+    }
+
+    #[test]
+    fn 不只是写代码_任何产出卡住后恢复都算想通() {
+        // 写方案、画设计稿卡了很久终于动了，同样值得一句
+        for d in [Doing::Writing, Doing::Designing, Doing::Data] {
+            let mut r = Reactor::new();
+            let prev = doing(d, Tempo::Stuck);
+            let cur = doing(d, Tempo::Normal);
+            // stuck_since 本轮才设置，时长不足 UNSTUCK_MIN_SECS → 本轮不说话，
+            // 但至少不该因为「不是写代码」而永不触发
+            assert!(
+                r.feed(Persona::Chatty, Some(&prev), &cur, &DayMemory::default())
+                    .is_none()
+            );
+        }
     }
 
     #[test]
     fn 短暂停顿的恢复不算想通() {
         let mut r = Reactor::new();
-        let prev = coding(Tempo::Stuck);
-        let cur = coding(Tempo::Normal);
+        let prev = editing(Tempo::Stuck);
+        let cur = editing(Tempo::Normal);
         // stuck_since 本轮才设置，时长不足 UNSTUCK_MIN_SECS
         assert!(r
             .feed(Persona::Occasional, Some(&prev), &cur, &DayMemory::default())
@@ -388,7 +423,7 @@ mod tests {
         // 通过 pick 轮转而非固定第一句
         let mut r = Reactor::new();
         let prev = state(Doing::Away, Tempo::Resting);
-        let cur = coding(Tempo::Normal);
+        let cur = editing(Tempo::Normal);
         let first = r
             .feed(Persona::Occasional, Some(&prev), &cur, &DayMemory::default())
             .unwrap();

@@ -30,6 +30,7 @@ mod shortcut;
 mod sensor;
 mod state;
 mod tray;
+mod usage;
 mod window;
 
 use tauri::Manager;

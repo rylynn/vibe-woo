@@ -58,9 +58,12 @@ const SHOW_THRESHOLD: f64 = 18.0;
 impl MoodMeter {
     /// 喂入一次采样，返回当前心情。
     pub fn update(&mut self, s: &Snapshot, dt: f64) -> Mood {
-        let in_flow = s.app == AppKind::Coding && s.keystrokes_per_min >= 120.0;
-        let stuck = s.app == AppKind::Coding && s.keyboard_idle_secs >= 90.0;
-        let browsing = s.app == AppKind::Browsing;
+        // 满足感与烦躁感只从「专注产出」里长出来 ——
+        // 在聊天框里打字打得再快，也不是进入状态。
+        let producing = s.app.is_producing();
+        let in_flow = producing && s.keystrokes_per_min >= 120.0;
+        let stuck = producing && s.keyboard_idle_secs >= 90.0;
+        let slacking = matches!(s.app, AppKind::Browsing | AppKind::Watching);
         let idle_long = s.keyboard_idle_secs >= 300.0;
         let late = s.hour >= 23 || s.hour < 5;
 
@@ -82,7 +85,7 @@ impl MoodMeter {
         );
         self.bored = clamp(
             self.bored
-                + if browsing || (idle_long && !in_flow) {
+                + if slacking || (idle_long && !in_flow) {
                     BORED_RATE
                 } else {
                     -BORED_DECAY
@@ -138,34 +141,34 @@ mod tests {
     #[test]
     fn 初始为平静专注() {
         let mut m = MoodMeter::default();
-        assert_eq!(m.update(&snap(AppKind::Coding, 50.0, 2.0, 14), 1.0), Mood::Focused);
+        assert_eq!(m.update(&snap(AppKind::Editing, 50.0, 2.0, 14), 1.0), Mood::Focused);
     }
 
     #[test]
     fn 持续进入状态后心满意足() {
         let mut m = MoodMeter::default();
-        let m0 = run(&mut m, &snap(AppKind::Coding, 180.0, 1.0, 14), 45);
+        let m0 = run(&mut m, &snap(AppKind::Editing, 180.0, 1.0, 14), 45);
         assert_eq!(m0, Mood::Content);
     }
 
     #[test]
     fn 进入状态几分钟才有满足感_不会一开编辑器就欢呼() {
         let mut m = MoodMeter::default();
-        let m0 = run(&mut m, &snap(AppKind::Coding, 180.0, 1.0, 14), 8);
+        let m0 = run(&mut m, &snap(AppKind::Editing, 180.0, 1.0, 14), 8);
         assert_eq!(m0, Mood::Focused, "情绪需要时间累积，不应瞬时切换");
     }
 
     #[test]
     fn 卡住一段时间后沮丧() {
         let mut m = MoodMeter::default();
-        let m0 = run(&mut m, &snap(AppKind::Coding, 0.0, 120.0, 14), 20);
+        let m0 = run(&mut m, &snap(AppKind::Editing, 0.0, 120.0, 14), 20);
         assert_eq!(m0, Mood::Frustrated);
     }
 
     #[test]
     fn 深夜还在写也容易沮丧() {
         let mut m = MoodMeter::default();
-        let m0 = run(&mut m, &snap(AppKind::Coding, 150.0, 1.0, 2), 25);
+        let m0 = run(&mut m, &snap(AppKind::Editing, 150.0, 1.0, 2), 25);
         assert_eq!(m0, Mood::Frustrated);
     }
 
@@ -179,10 +182,28 @@ mod tests {
     }
 
     #[test]
+    fn 聊天打得再快也不是进入状态() {
+        // 满足感只从专注产出里长出来 —— 在 IM 里飞快打字不算心流
+        let mut m = MoodMeter::default();
+        let m0 = run(&mut m, &snap(AppKind::Messaging, 200.0, 1.0, 14), 45);
+        assert_ne!(m0, Mood::Content, "聊天不算进入状态");
+    }
+
+    #[test]
+    fn 写文档与做设计同样能进入状态() {
+        // 心流不是写代码的专利
+        for app in [AppKind::Writing, AppKind::Designing, AppKind::Data] {
+            let mut m = MoodMeter::default();
+            let m0 = run(&mut m, &snap(app, 180.0, 1.0, 14), 45);
+            assert_eq!(m0, Mood::Content, "{app:?} 也应能累积满足感");
+        }
+    }
+
+    #[test]
     fn 情绪有惯性_不会来回跳变() {
         let mut m = MoodMeter::default();
         // 先满足
-        run(&mut m, &snap(AppKind::Coding, 180.0, 1.0, 14), 45);
+        run(&mut m, &snap(AppKind::Editing, 180.0, 1.0, 14), 45);
         // 短暂切走（比如去查个文档），不应立刻变无聊
         let m0 = run(&mut m, &snap(AppKind::Browsing, 0.0, 5.0, 14), 10);
         assert_eq!(m0, Mood::Content, "短暂切走不应立刻翻转情绪");
@@ -191,17 +212,17 @@ mod tests {
     #[test]
     fn 满足感涨得慢退得快() {
         let mut m = MoodMeter::default();
-        run(&mut m, &snap(AppKind::Coding, 180.0, 1.0, 14), 45);
+        run(&mut m, &snap(AppKind::Editing, 180.0, 1.0, 14), 45);
         assert_eq!(m.current(), Mood::Content);
         // 停止进入状态 30 秒就退回去
-        let m0 = run(&mut m, &snap(AppKind::Coding, 30.0, 1.0, 14), 30);
+        let m0 = run(&mut m, &snap(AppKind::Editing, 30.0, 1.0, 14), 30);
         assert_ne!(m0, Mood::Content, "心流被打断很可惜，满足感应较快消退");
     }
 
     #[test]
     fn 各情绪量有界_不会无限累积() {
         let mut m = MoodMeter::default();
-        run(&mut m, &snap(AppKind::Coding, 180.0, 1.0, 14), 10000);
+        run(&mut m, &snap(AppKind::Editing, 180.0, 1.0, 14), 10000);
         assert!(m.content <= 100.0);
         assert!(m.frustrated <= 100.0);
         assert!(m.bored <= 100.0);
