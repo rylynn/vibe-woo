@@ -1,5 +1,8 @@
 import type { Box } from "../interact/hit-test";
 
+/** 气泡与宠物身体之间的留白（也是尾巴三角形的高度）。 */
+const TAIL_GAP = 10;
+
 /**
  * 宠物气泡。
  *
@@ -81,6 +84,8 @@ export class Bubble {
 
     this.el.style.display = "block";
     this.open = true;
+    // 立刻按上次已知的身体位置定位，避免上屏第一帧闪在别处
+    if (this.body) this.follow(this.body);
     // 点气泡本身不关闭（避免误触），只有按钮或超时才关
   }
 
@@ -110,12 +115,21 @@ export class Bubble {
       4,
       Math.min(window.innerWidth - w - 4, body.x + body.w / 2 - w / 2),
     );
-    const top = body.y - h - 10;
+    // 头顶塞不下（宠物被拖到屏幕顶部）就翻到脚下 —— 绝不飘出屏幕外
+    const above = body.y - h - TAIL_GAP;
+    const flip = above < 4;
+    const top = flip
+      ? Math.min(body.y + body.h + TAIL_GAP, window.innerHeight - h - 4)
+      : above;
+    this.el.classList.toggle("pet-bubble-below", flip);
     this.el.style.left = `${Math.round(left)}px`;
-    this.el.style.top = `${Math.round(top)}px`;
-    // 尾巴水平位置跟随气泡相对宠物的偏移
+    this.el.style.top = `${Math.round(Math.max(4, top))}px`;
+    // 尾巴水平位置跟随气泡相对宠物的偏移（贴边时收进气泡内，别戳出圆角外）
     const tailX = body.x + body.w / 2 - left;
-    this.el.style.setProperty("--pet-tail-x", `${Math.round(tailX)}px`);
+    this.el.style.setProperty(
+      "--pet-tail-x",
+      `${Math.round(Math.max(12, Math.min(w - 12, tailX)))}px`,
+    );
   }
 
   get box(): Box | null {
@@ -136,15 +150,27 @@ export class Bubble {
 }
 
 /**
- * 右上角通知条（番茄等简单通知）。
+ * 通知条（番茄等简单通知）。
  *
- * 与气泡的区别：气泡跟着宠物走、更亲和；通知条固定右上角、
- * 视觉权重更高。简单模式点击整条即消失。
+ * 与气泡的区别：气泡跟着宠物走、更亲和；通知条视觉权重更高。
+ * 位置两种：贴着宠物头顶（宠物相关通知，show 时 followPet）—— 不然
+ * 消息和说话的宠物对不上号；固定右上角（提醒大卡片，要点的东西别乱跑）。
+ * 简单模式点击整条即消失。
  */
 export class Banner {
   private readonly el: HTMLDivElement;
   private open = false;
   private timer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * 是否贴着宠物显示。
+   *
+   * true 时位置由渲染循环每帧给出（在宠物头顶，放不下则落到脚下）；
+   * false 时走 CSS 的固定右上角。提醒大卡片始终用后者 —— 那是要操作的
+   * 面板，跟着宠物乱跑反而没法点。
+   */
+  private anchored = false;
+  /** 贴宠物模式下的身体位置，show 时先定位一次，避免闪在右上角。 */
+  private body: Box | null = null;
 
   constructor() {
     this.el = document.createElement("div");
@@ -153,8 +179,17 @@ export class Banner {
     document.body.appendChild(this.el);
   }
 
-  show(text: string, time?: string): void {
-    this.el.className = "pet-banner";
+  /**
+   * 显示通知条。
+   * @param opts.followPet 贴着宠物头顶显示；宠物不在家时自动退回右上角
+   */
+  show(
+    text: string,
+    time?: string,
+    opts: { followPet?: boolean } = {},
+  ): void {
+    this.anchored = opts.followPet ?? false;
+    this.setAnchored(this.anchored);
     this.el.replaceChildren();
     if (time) {
       const t = document.createElement("div");
@@ -181,6 +216,8 @@ export class Banner {
 
     this.el.style.display = "block";
     this.open = true;
+    // 贴宠物模式下先按已知位置定位，避免上屏第一帧闪在右上角
+    if (this.anchored && this.body) this.follow(this.body);
   }
 
   /**
@@ -197,6 +234,9 @@ export class Banner {
       onReschedule: (index: number, time: string) => Promise<void> | void;
     },
   ): void {
+    // 要点的卡片不跟宠物跑，固定右上角
+    this.anchored = false;
+    this.setAnchored(false);
     this.el.className = r.important
       ? "pet-banner pet-banner-important"
       : "pet-banner pet-banner-reminder";
@@ -309,11 +349,54 @@ export class Banner {
     input.focus();
   }
 
+  /** 切换贴宠物模式：加上/去掉跟随类，并清掉可能残留的行内定位。 */
+  private setAnchored(on: boolean): void {
+    this.el.classList.toggle("pet-banner-follow", on);
+    if (!on) {
+      // 不跟随就交还给 CSS 的固定右上角
+      this.el.style.left = "";
+      this.el.style.top = "";
+    }
+  }
+
+  /**
+   * 渲染循环每帧调用：贴宠物模式下跟随身体。
+   *
+   * 宠物被拖到屏幕顶部时头顶放不下，翻到脚下；水平方向越界则贴边。
+   */
+  follow(body: Box): void {
+    this.body = body;
+    if (!this.open || !this.anchored) return;
+    const w = this.el.offsetWidth;
+    const h = this.el.offsetHeight;
+    const left = Math.max(
+      4,
+      Math.min(window.innerWidth - w - 4, body.x + body.w / 2 - w / 2),
+    );
+    const above = body.y - h - TAIL_GAP;
+    const top =
+      above >= 4
+        ? above
+        : Math.min(body.y + body.h + TAIL_GAP, window.innerHeight - h - 4);
+    this.el.style.left = `${Math.round(left)}px`;
+    this.el.style.top = `${Math.round(Math.max(4, top))}px`;
+  }
+
   dismiss(): void {
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
     this.el.style.display = "none";
     this.open = false;
+  }
+
+  /**
+   * 宠物离家时收起贴身通知。
+   *
+   * 没有宠物可贴，留着就变成悬在半空的孤零零一条 —— 直接收掉。
+   * 提醒大卡片不跟随宠物，不受影响。
+   */
+  releaseFromPet(): void {
+    if (this.open && this.anchored) this.dismiss();
   }
 
   get isOpen(): boolean {

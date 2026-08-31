@@ -311,6 +311,8 @@ document.body.appendChild(awayIcon);
 
 void onAwayChange((n) => {
   pet.setHidden(n.away);
+  // 宠物走了：贴它身上的通知没了依托，收掉（右上角提醒卡片不受影响）
+  if (n.away) banner.releaseFromPet();
   awayIcon.style.display = n.away ? "flex" : "none";
   if (n.away && n.at_nick) {
     awayIcon.textContent = `🐾 在 ${n.at_nick} 家`;
@@ -330,7 +332,23 @@ void listen<{ text: string; source: "llm" | "local" }>("pet://talk", (e) => {
   });
 }).catch(() => {});
 
-// —— 番茄工作法：阶段通知走右上角通知条（醒目但不挡操作）——
+/**
+ * 贴着宠物头顶的通知条。
+ *
+ * 宠物相关的通知就该长在宠物身上 —— 固定在右上角会让人找不着是谁在说话。
+ * 宠物不在家（去串门）时没有身体可贴，退回右上角，至少不丢消息。
+ */
+function notifyNearPet(text: string): void {
+  if (pet.isHidden) {
+    banner.show(text);
+    return;
+  }
+  banner.show(text, undefined, { followPet: true });
+  // 立刻定位一次，避免上屏第一帧先闪在右上角
+  banner.follow(pet.body);
+}
+
+// —— 番茄工作法：阶段通知 ——
 interface PomodoroEvent {
   phase: string;
   mins: number;
@@ -339,7 +357,8 @@ interface PomodoroEvent {
 void listen<PomodoroEvent>("pet://pomodoro", (e) => {
   const { phase, text } = e.payload;
   if (phase === "break_start") {
-    banner.show(text);
+    // 该休息了：停在头顶等确认，不自动消失；也不怕被闲聊气泡盖掉
+    notifyNearPet(text);
   } else {
     bubble.show(text, { autoDismissMs: 8000 });
   }
@@ -359,7 +378,7 @@ void listen<RewardsEvent>("pet://rewards", (e) => {
   pet.setEffects(e.payload.effects);
   if (e.payload.granted) {
     // 刚获得新特效：宠物高兴地宣布（重要时刻，用通知条）
-    banner.show(
+    notifyNearPet(
       `认真休息奖励到手：今天我会${REWARD_LABELS[e.payload.granted] ?? "有新特效"}（明天失效）`,
     );
   }
@@ -392,8 +411,9 @@ void onReminderFired((r) => {
 
 function loop(now: number): void {
   pet.tick(now);
-  // 气泡跟随宠物身体
+  // 气泡与贴宠物通知条跟随宠物身体
   bubble.follow(pet.body);
+  banner.follow(pet.body);
   requestAnimationFrame(loop);
 }
 requestAnimationFrame(loop);

@@ -425,6 +425,15 @@
         border-bottom: 0;
       }
 
+      /* 头顶放不下时气泡翻到脚下，尾巴随之朝上指 */
+      .pet-bubble-below::after {
+        bottom: auto;
+        top: -10px;
+        border-width: 0 6px 10px 6px;
+        border-top-color: transparent;
+        border-bottom-color: #7cf5c4;
+      }
+
       /* 右上角通知条 */
       .pet-banner {
         position: fixed;
@@ -449,6 +458,28 @@
         }
         to {
           transform: translateX(0);
+          opacity: 1;
+        }
+      }
+
+      /* 贴宠物模式：位置由渲染循环每帧给出（默认固定在右上角）。
+         宽度收成随内容，免得小宠物顶着一条横幅。 */
+      .pet-banner.pet-banner-follow {
+        right: auto;
+        bottom: auto;
+        width: auto;
+        min-width: 180px;
+        max-width: 264px;
+        animation: pet-banner-pop 0.18s ease-out;
+      }
+
+      @keyframes pet-banner-pop {
+        from {
+          transform: translateY(8px);
+          opacity: 0;
+        }
+        to {
+          transform: translateY(0);
           opacity: 1;
         }
       }
