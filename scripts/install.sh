@@ -19,6 +19,12 @@
 
 set -euo pipefail
 
+# 注意：macOS 自带的 bash 3.2 在 UTF-8 locale 下，会把紧跟在 $VAR 后面的
+# 多字节字符的第一个字节当成变量名的一部分 —— $V 后面紧跟全角左括号时，
+# 会被解析成一个名为 V 加半个汉字的变量，在 set -u 下直接报
+# unbound variable 退出（C locale 下不触发，换个终端就可能不复现）。
+# 因此：变量后面紧跟中文/全角字符时，一律写成 ${VAR}。新加输出时请照此办理。
+
 # ---------- 参数 ----------
 MODE="install"      # install | build-only | dev | uninstall
 CLONE_URL=""
@@ -77,7 +83,7 @@ version_ge() {
 ARCH="$(uname -m)"
 case "$ARCH" in
   arm64|x86_64) ;;
-  *) warn "未验证的架构：$ARCH，构建可能失败" ;;
+  *) warn "未验证的架构：${ARCH}，构建可能失败" ;;
 esac
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -133,7 +139,7 @@ uninstall() {
   if [[ $PURGE -eq 1 ]]; then
     rm -rf "$CONFIG_DIR" && ok "已删除配置与数据：$CONFIG_DIR"
   else
-    say "  ${C_DIM}配置保留在：$CONFIG_DIR（加 --purge 可一起删除）${C_RESET}"
+    say "  ${C_DIM}配置保留在：${CONFIG_DIR}（加 --purge 可一起删除）${C_RESET}"
   fi
   ok "卸载完成"
   exit 0
@@ -169,9 +175,9 @@ fi
 command -v cargo >/dev/null 2>&1 || die "Rust 安装后仍找不到 cargo，请重开终端再跑一次"
 RUST_V="$(cargo --version | awk '{print $2}')"
 if version_ge "$RUST_V" "$MIN_RUST"; then
-  ok "cargo $RUST_V（要求 ≥ $MIN_RUST）"
+  ok "cargo ${RUST_V}（要求 ≥ ${MIN_RUST}）"
 else
-  die "Rust 版本过低：$RUST_V（需要 ≥ $MIN_RUST）。请运行：rustup update"
+  die "Rust 版本过低：${RUST_V}（需要 ≥ ${MIN_RUST}）。请运行：rustup update"
 fi
 
 # ---------- 4. Node 与 pnpm ----------
@@ -183,7 +189,7 @@ if ! command -v node >/dev/null 2>&1; then
     或访问 https://nodejs.org 下载 LTS 版"
 fi
 NODE_V="$(node -v | sed 's/^v//')"
-version_ge "$NODE_V" "$MIN_NODE" || die "Node 版本过低：v$NODE_V（需要 ≥ 18）"
+version_ge "$NODE_V" "$MIN_NODE" || die "Node 版本过低：v${NODE_V}（需要 ≥ 18）"
 ok "node v$NODE_V"
 
 if ! command -v pnpm >/dev/null 2>&1; then

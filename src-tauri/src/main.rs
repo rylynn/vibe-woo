@@ -106,6 +106,7 @@ fn main() {
             // 万一窗口逻辑有问题，用户至少已经能退出了。
             app.global_shortcut().register(kill_switch())?;
             shortcut::register_note_shortcut(app.handle());
+            shortcut::register_reminder_shortcut(app.handle());
             tray::setup_tray(app)?;
 
             let cfg = configcmd::init(app.handle());

@@ -245,3 +245,14 @@ export async function onReminderFired(
     return () => {};
   }
 }
+
+/** 订阅提醒面板呼出事件（全局快捷键 Alt+R）。 */
+export async function onReminderPanelOpen(
+  cb: () => void,
+): Promise<() => void> {
+  try {
+    return await listen("pet://reminder-open", () => cb());
+  } catch {
+    return () => {};
+  }
+}

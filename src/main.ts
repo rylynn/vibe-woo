@@ -9,6 +9,7 @@ import { Bubble, Banner } from "./overlay/bubble";
 import {
   RemindersPanel,
   onReminderFired,
+  onReminderPanelOpen,
   refreshTimeDatalist,
 } from "./overlay/reminders";
 import {
@@ -77,7 +78,7 @@ quickNote.onSaved = () => {
 
 const menu = new ContextMenu([
   { label: "记一笔  (⌥Space)", onPick: () => void quickNote.show() },
-  { label: "每日提醒", onPick: () => void remindersPanel.show() },
+  { label: "每日提醒  (⌥R)", onPick: () => void remindersPanel.show() },
   { label: "好友", onPick: () => void friendsPanel.show() },
   { label: "今日速记", onPick: () => void today.show() },
   { label: "设置", onPick: () => void settings.show() },
@@ -181,17 +182,26 @@ window.addEventListener("blur", () => {
   menu.hide();
 });
 
-window.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") {
-    menu.hide();
-    settings.hide();
-    quickNote.hide();
-    today.hide();
-    remindersPanel.hide();
-    friendsPanel.hide();
-    avatarPicker.hide();
-  }
-});
+// Esc 关闭所有面板。必须用捕获阶段：速记/提醒/好友等面板的输入框
+// 会在冒泡阶段 stopPropagation，若挂在冒泡阶段则 Esc 永远到不了这里。
+// 捕获先于目标元素触发，一处覆盖全部面板。
+window.addEventListener(
+  "keydown",
+  (e) => {
+    if (e.key === "Escape") {
+      menu.hide();
+      settings.hide();
+      quickNote.hide();
+      today.hide();
+      remindersPanel.hide();
+      friendsPanel.hide();
+      avatarPicker.hide();
+      bubble.dismiss();
+      banner.dismiss();
+    }
+  },
+  true,
+);
 
 // Alt+Space 呼出速记窗；已打开时再按同一快捷键关闭，与 Esc 等效
 void onQuickNoteOpen(() => {
@@ -199,6 +209,15 @@ void onQuickNoteOpen(() => {
     quickNote.hide();
   } else {
     void quickNote.show();
+  }
+});
+
+// Alt+R 呼出提醒面板，toggle 逻辑与速记一致
+void onReminderPanelOpen(() => {
+  if (remindersPanel.isOpen) {
+    remindersPanel.hide();
+  } else {
+    void remindersPanel.show();
   }
 });
 

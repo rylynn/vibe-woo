@@ -16,8 +16,10 @@
 
 - [功能](#功能)
 - [安装](#安装)
+- [启动](#启动)
 - [使用](#使用)
 - [怎么关掉它](#怎么关掉它)
+- [更新](#更新)
 - [隐私](#隐私)
 - [架构](#架构)
 - [开发](#开发)
@@ -104,11 +106,31 @@ cp -R src-tauri/target/release/bundle/macos/vibe-pet.app /Applications/
 
 ---
 
+## 启动
+
+装进 `/Applications` 之后就是普通 macOS 应用，不需要 `pnpm tauri dev`，也不需要 Rust / Node 在 PATH 里。
+
+| 方式 | 操作 |
+|---|---|
+| 终端 | `open -a vibe-pet` |
+| Spotlight | `Cmd+Space` → 输入 `vibe-pet` → 回车 |
+| 启动台 / Finder | 启动台点图标，或双击 `/Applications/vibe-pet.app` |
+| 开机自启 | 系统设置 → 通用 → 登录项与扩展 → 登录时打开 → 加入 `vibe-pet` |
+
+- **单实例**：重复 `open -a vibe-pet` 只会激活已在跑的那只宠物，不会叠出第二层全屏透明窗（`tauri-plugin-single-instance`）。
+- **怎么确认它在跑**：它不在 Dock、不在 `Cmd+Tab`，看菜单栏托盘图标，或终端 `pgrep -lf vibe-pet`。
+- **加进登录项后就不用管了**：开机自动在，需要退出时用[下面几种方式](#怎么关掉它)。
+- **开机自启的界面开关还没做**：配置项已预留，UI 未开放，目前只能手动加登录项。
+- 首次启动若被系统拦下：**系统设置 → 隐私与安全性 → 仍要打开**（自建应用未公证，属正常现象）。
+
+---
+
 ## 使用
 
 | 操作 | 方式 |
 |---|---|
 | 随时记一笔 | `Alt+Space`（再按一次收起） |
+| 管理每日提醒 | `Alt+R`（再按一次收起） |
 | 功能菜单 | 右键宠物：速记 / 每日提醒 / 好友 / 今日速记 / 设置 / 退出 |
 | 拖动 | 直接拖 |
 | 退出 | `Ctrl+Alt+Cmd+Q`，或托盘菜单，或终端 `pnpm stop` |
@@ -135,6 +157,39 @@ cp -R src-tauri/target/release/bundle/macos/vibe-pet.app /Applications/
 | 手动兜底 | `pkill -9 -f vibe-pet` |
 
 如果桌面点击出现异常（点不到其他应用），直接在终端跑 `pnpm stop` 或 `pkill -9 -f vibe-pet`。
+
+---
+
+## 更新
+
+**没有内置自动更新**：仓库未接入 `tauri-plugin-updater`，也不做公证签名，所以它不会联网检查新版本。更新就是「拉最新代码 + 重装」，和首次安装同一条命令：
+
+```bash
+cd vibe-pet
+git pull
+bash scripts/install.sh
+```
+
+脚本幂等：依赖已就绪就跳过，会先停掉正在跑的宠物再覆盖 `/Applications`，并对新包重新 ad-hoc 签名。Rust 是增量构建，通常几十秒到几分钟（首次除外）。
+
+**不会丢的东西**：配置、当日奖励、速记都在 `~/Library/Application Support/dev.vibepet.app/`，不在 `.app` 包内 —— 重装不影响，卸载也不会删（除非加 `--purge`）。
+
+| 场景 | 命令 |
+|---|---|
+| 用 `--clone` 装的（默认在 `~/vibe-pet`） | `cd ~/vibe-pet && git pull && bash scripts/install.sh` |
+| 先只构建、不覆盖 | `bash scripts/install.sh --build-only` |
+| 回退 / 切到某个版本 | `git checkout <tag-or-commit> && bash scripts/install.sh` |
+| 连数据一起清空的干净重装 | `git pull && bash scripts/install.sh --uninstall --purge && bash scripts/install.sh` |
+| 彻底移除 | `bash scripts/install.sh --uninstall` |
+
+确认装的是哪个版本：
+
+```bash
+# /Applications 里实际装的版本，应与 src-tauri/tauri.conf.json 的 version 一致
+defaults read /Applications/vibe-pet.app/Contents/Info.plist CFBundleShortVersionString
+```
+
+更新后若被系统提示「已损坏 / 无法打开」：右键应用 → 打开，或 系统设置 → 隐私与安全性 → 仍要打开。重装等于换了一个 ad-hoc 签名，系统需要重新确认一次。
 
 ---
 
