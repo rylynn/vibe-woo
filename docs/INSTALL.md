@@ -10,7 +10,7 @@
 |---|---|
 | 系统 | macOS 13.0+（Ventura 及以上） |
 | 芯片 | Apple Silicon（arm64）或 Intel（x86_64）均可 |
-| Node.js | ≥ 18 |
+| Node.js | ≥ 18.12（推荐 22 LTS；低于 18.12 脚本会自动尝试补装） |
 | Rust | ≥ 1.77（`src-tauri/Cargo.toml` 中的 `rust-version`） |
 | 磁盘 | 约 4 GB（Rust 工具链 + 构建缓存，装完可删缓存） |
 | 网络 | 首次需下载 Rust 工具链与依赖包 |
@@ -49,6 +49,7 @@ bash scripts/install.sh --clone <git仓库地址>
 | `--dev` | 只起开发模式（不打包） |
 | `--clone <url>` | 克隆到 `~/vibe-pet` 后再安装 |
 | `--skip-tests` | 跳过单元测试（装得快一些） |
+| `--yes` / `-y` | 自动同意补装 Node / pnpm，不再询问（CI 用） |
 | `--uninstall` | 从 `/Applications` 卸载 |
 | `--uninstall --purge` | 卸载并删除配置与速记数据 |
 | `--help` | 查看用法 |
@@ -65,10 +66,10 @@ xcode-select --install
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source "$HOME/.cargo/env"     # cargo 默认不在 PATH 中
 
-# 3. Node ≥18（有 Homebrew 时）
+# 3. Node ≥ 18.12（有 Homebrew 时）
 brew install node
-# 4. pnpm
-npm install -g pnpm
+# 4. pnpm（固定 10：pnpm 11 需要 Node ≥ 22.13）
+npm install -g pnpm@10
 
 # 5. 依赖 + 构建
 cd vibe-pet
@@ -197,6 +198,19 @@ ADMIN_USER=boss ADMIN_PASS=YourPass node worker-edgeone/local-dev.js 8787
 
 **构建卡住 / 很慢**
 首次要编译整个 Rust 依赖树，5–15 分钟属正常。之后是增量构建，几秒到几十秒。
+
+**`pnpm requires at least Node.js v22.13` / `ERR_UNKNOWN_BUILTIN_MODULE: node:sqlite`**
+pnpm 11 需要 Node ≥ 22.13，在 Node 18 / 20 上会出现「装上了但一跑就崩」。本项目固定用 pnpm 10（见 `package.json` 的 `packageManager`）。本机若已装过 pnpm 11，执行：
+
+```bash
+corepack enable && corepack prepare pnpm@10 --activate
+pnpm -v            # 应输出 10.x.x
+```
+
+想继续用 pnpm 11 也行，把 Node 升到 22.13 以上即可（脚本会优先沿用能跑的 pnpm）。
+
+**`Node 版本不满足要求（当前：v16.x，需要 ≥ 18.12.0）`**
+脚本已依次尝试 Homebrew → nvm → fnm 自动安装，都失败了才会提示。多半是没装 Homebrew 且网络受限，按 [手动安装](#手动安装分步) 装好 Node 后重跑脚本即可。
 
 **cargo 下载依赖慢**
 可配置国内镜像（`~/.cargo/config.toml`），例如：

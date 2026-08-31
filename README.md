@@ -101,7 +101,7 @@ pnpm tauri build
 cp -R src-tauri/target/release/bundle/macos/vibe-pet.app /Applications/
 ```
 
-要求：macOS 13+、Node ≥ 18、Rust ≥ 1.77，首次需要联网，约 4 GB 磁盘空间。首次编译 Rust 约 5–15 分钟。
+要求：macOS 13+、Node ≥ 18.12（推荐 22 LTS，低了脚本会自动补）、Rust ≥ 1.77，首次需要联网，约 4 GB 磁盘空间。首次编译 Rust 约 5–15 分钟。
 
 > **没用过终端？** 直接看下一节 [新手完整指引](#新手完整指引)，从「怎么打开终端」开始，每一步都写了怎么算成功、失败了怎么办。
 
@@ -184,10 +184,10 @@ bash scripts/install.sh --help
 | 刷过一大片 `✓` 测试项 | 脚本在跑一遍单元测试，确认代码健康 |
 | 最后出现 `安装完成！` | 全部搞定 |
 
-**唯一需要你手动装的是 Node.js。** 如果看到：
+**Node 版本不够时脚本会自动补**：它先用 Homebrew 装 / 升 Node，没有 Homebrew 就试 nvm、fnm。只有看到下面这样的红色提示，才需要你自己动手：
 
 ```
-✗ 缺少 Node.js（需要 ≥ 18）。安装方式：
+✗ Node 版本不满足要求（当前：v16.20.0，需要 ≥ 18.12.0）。请手动安装后重跑本脚本：
 ```
 
 按下面做，然后**重跑** `bash scripts/install.sh`：
@@ -197,7 +197,9 @@ bash scripts/install.sh --help
 3. 双击下载好的 `.pkg`，一路「继续 / 安装」直到完成
 4. **关掉终端窗口，重新打开**（新装的 node 要重开终端才找得到），`cd vibe-woo` 回到目录，再跑 `bash scripts/install.sh`
 
-> 如果脚本提示 pnpm 装不上：终端里执行 `sudo npm install -g pnpm`，会要求输入**开机密码 —— 输入时屏幕上什么都不显示，这是正常的**，输完直接回车。
+> 如果脚本提示 pnpm 装不上：终端里执行 `sudo npm install -g pnpm@10`，会要求输入**开机密码 —— 输入时屏幕上什么都不显示，这是正常的**，输完直接回车。
+>
+> 为什么是 pnpm 10：pnpm 11 要求 Node ≥ 22.13，在 Node 18 / 20 上会「装上了但一跑就崩」，项目已固定用 pnpm 10。
 
 ### 第 4 步：确认装好了，并启动它
 
@@ -227,7 +229,7 @@ open -a vibe-pet                 # 启动
 | 打开终端 | `Cmd+空格` → 输入「终端」 | 出现 `$` 提示符 | — |
 | 检查 git | `git --version` | `git version 2.xx.x` | 点弹窗安装，完成后重试 |
 | 下载代码 | `git clone <地址>` | 出现新目录 | 地址换 HTTPS；私有仓库用 Token |
-| 安装 | `bash scripts/install.sh` | 出现 `安装完成！` | 缺 Node 就先装 nodejs.org 的 LTS |
+| 安装 | `bash scripts/install.sh` | 出现 `安装完成！` | 脚本会自动补 Node；补不了才去 nodejs.org 装 LTS |
 | 启动 | `open -a vibe-pet` | 桌面上出现宠物 | 去隐私与安全性点「仍要打开」 |
 | 退出 | `Ctrl+Alt+Cmd+Q` | 宠物消失 | 见[怎么关掉它](#怎么关掉它) |
 

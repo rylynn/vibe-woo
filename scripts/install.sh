@@ -13,6 +13,7 @@
 #   bash scripts/install.sh --dev              # 只起开发模式（不打包）
 #   bash scripts/install.sh --clone <git-url>  # 克隆到 ~/vibe-pet 后再安装
 #   bash scripts/install.sh --skip-tests       # 跳过单元测试
+#   bash scripts/install.sh --yes              # 自动同意补装依赖（不询问，CI 用）
 #   bash scripts/install.sh --uninstall        # 从 /Applications 卸载
 #   bash scripts/install.sh --uninstall --purge # 连配置与数据一起删除
 #   bash scripts/install.sh --help
@@ -30,6 +31,7 @@ MODE="install"      # install | build-only | dev | uninstall
 CLONE_URL=""
 SKIP_TESTS=0
 PURGE=0
+ASSUME_YES=0
 
 # ---------- 输出 ----------
 if [[ -t 1 ]]; then
@@ -58,6 +60,7 @@ while [[ $# -gt 0 ]]; do
     --dev)        MODE="dev"; shift ;;
     --clone)      CLONE_URL="${2:-}"; [[ -n "$CLONE_URL" ]] || die "--clone 需要 git 仓库地址"; shift 2 ;;
     --skip-tests) SKIP_TESTS=1; shift ;;
+    --yes|-y)     ASSUME_YES=1; shift ;;
     --uninstall)  MODE="uninstall"; shift ;;
     --purge)      PURGE=1; shift ;;
     -h|--help)    usage ;;
@@ -182,32 +185,186 @@ fi
 
 # ---------- 4. Node 与 pnpm ----------
 step "检查 Node 与 pnpm"
-MIN_NODE="18.0.0"
-if ! command -v node >/dev/null 2>&1; then
-  die "缺少 Node.js（需要 ≥ 18）。安装方式：
-    brew install node        # 有 Homebrew 时
-    或访问 https://nodejs.org 下载 LTS 版"
-fi
-NODE_V="$(node -v | sed 's/^v//')"
-version_ge "$NODE_V" "$MIN_NODE" || die "Node 版本过低：v${NODE_V}（需要 ≥ 18）"
-ok "node v$NODE_V"
+MIN_NODE="18.12.0"   # pnpm 10 的 Node 下限，低于此版本装不上依赖
+REC_NODE="22.13.0"   # pnpm 11 的 Node 下限；低于此值也能装，只是统一用 pnpm 10
+PINNED_PNPM="10"     # 与 package.json 的 packageManager 一致
+PNPM_SPEC="pnpm@${PINNED_PNPM}"
 
-if ! command -v pnpm >/dev/null 2>&1; then
-  warn "未安装 pnpm，正在安装"
+# 当前 node 版本；没装则输出空串
+current_node() {
+  if command -v node >/dev/null 2>&1; then
+    node -v 2>/dev/null | sed 's/^v//'
+  fi
+}
+
+node_ok() {
+  local v
+  v="$(current_node || true)"
+  [[ -n "$v" ]] || return 1
+  version_ge "$v" "$MIN_NODE"
+}
+
+# pnpm 存在 ≠ 能用：corepack 的 pnpm shim 会在版本与 Node 不匹配时直接崩，
+# 因此一律以「真的跑得出 pnpm -v」为准
+pnpm_runs() {
+  command -v pnpm >/dev/null 2>&1 || return 1
+  pnpm -v >/dev/null 2>&1 || return 1
+}
+
+# 交互式确认（默认同意）：--yes 或非交互（CI / 管道）直接通过
+confirm() {
+  if [[ $ASSUME_YES -eq 1 ]]; then
+    return 0
+  fi
+  if [[ ! -t 0 ]]; then
+    return 0
+  fi
+  local reply=""
+  printf '%s [Y/n] ' "$1"
+  read -r reply 2>/dev/null || true
+  [[ -z "$reply" || "$reply" == [Yy]* ]]
+}
+
+install_node_brew() {
+  command -v brew >/dev/null 2>&1 || return 1
+  say "  用 Homebrew 安装 / 升级 Node（约 1–2 分钟）"
+  if brew list --formula node >/dev/null 2>&1; then
+    brew upgrade node >/dev/null 2>&1 || true
+  else
+    brew install node >/dev/null 2>&1 || return 1
+  fi
+  export PATH="$(brew --prefix)/bin:$PATH"
+  hash -r 2>/dev/null || true
+  node_ok
+}
+
+install_node_nvm() {
+  export NVM_DIR="$HOME/.nvm"
+  if [[ ! -s "$NVM_DIR/nvm.sh" ]]; then
+    say "  安装 nvm（约 1 分钟）"
+    curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash >/dev/null 2>&1 || return 1
+  fi
+  [[ -s "$NVM_DIR/nvm.sh" ]] || return 1
+  say "  用 nvm 安装 Node LTS（约 1 分钟）"
+  # nvm.sh 在 set -u 下会踩到未定义变量，加载期间临时关掉
+  set +u
+  # shellcheck disable=SC1091
+  . "$NVM_DIR/nvm.sh" >/dev/null 2>&1 || { set -u; return 1; }
+  nvm install --lts >/dev/null 2>&1 || { set -u; return 1; }
+  nvm use --lts >/dev/null 2>&1 || true
+  set -u
+  hash -r 2>/dev/null || true
+  node_ok
+}
+
+install_node_fnm() {
+  local fnm_bin=""
+  if command -v fnm >/dev/null 2>&1; then
+    fnm_bin="$(command -v fnm)"
+  fi
+  if [[ -z "$fnm_bin" ]]; then
+    say "  安装 fnm（约 1 分钟）"
+    curl -fsSL https://fnm.vercel.app/install | bash -s -- --skip-shell >/dev/null 2>&1 || true
+    if [[ -x "$HOME/.local/share/fnm/fnm" ]]; then
+      fnm_bin="$HOME/.local/share/fnm/fnm"
+    elif [[ -x "$HOME/.fnm/fnm" ]]; then
+      fnm_bin="$HOME/.fnm/fnm"
+    fi
+  fi
+  [[ -n "$fnm_bin" && -x "$fnm_bin" ]] || return 1
+  say "  用 fnm 安装 Node LTS（约 1 分钟）"
+  "$fnm_bin" install --lts >/dev/null 2>&1 || return 1
+  # fnm 不改动当前 shell，直接把装好的版本目录塞进 PATH
+  local base="${FNM_DIR:-$HOME/.local/share/fnm}" dir ver best="" best_ver=""
+  for dir in "$base"/node-versions/*/installation/bin; do
+    [[ -x "$dir/node" ]] || continue
+    ver="$("$dir/node" -v 2>/dev/null | sed 's/^v//')"
+    [[ -n "$ver" ]] || continue
+    if [[ -z "$best" ]] || version_ge "$ver" "$best_ver"; then
+      best="$dir"; best_ver="$ver"
+    fi
+  done
+  [[ -n "$best" ]] || return 1
+  export PATH="$best:$PATH"
+  hash -r 2>/dev/null || true
+  node_ok
+}
+
+if ! node_ok; then
+  NODE_V_NOW="$(current_node || true)"
+  if [[ -n "$NODE_V_NOW" ]]; then
+    warn "Node v${NODE_V_NOW} 低于要求的 ${MIN_NODE}"
+  else
+    warn "未检测到 Node.js"
+  fi
+  if confirm "  是否自动安装 / 升级 Node（Homebrew → nvm → fnm）？"; then
+    if install_node_brew || install_node_nvm || install_node_fnm; then
+      ok "Node 已就绪：v$(current_node)"
+    else
+      warn "自动安装没成功，继续尝试其他方式也失败了"
+    fi
+  fi
+  if ! node_ok; then
+    die "Node 版本不满足要求（当前：v${NODE_V_NOW:-未安装}，需要 ≥ ${MIN_NODE}）。请手动安装后重跑本脚本：
+    brew install node        # 有 Homebrew 时
+    nvm install --lts        # 用 nvm 时
+    或访问 https://nodejs.org 下载 LTS 版（.pkg 一路「继续」即可）
+  装完记得关掉终端重开一次，再跑 bash scripts/install.sh"
+  fi
+fi
+NODE_V="$(current_node)"
+ok "node v${NODE_V}"
+
+# 装 pnpm：钉死在 package.json 的 packageManager 同版本，绝不用 @latest。
+# pnpm 11 要求 Node ≥ 22.13，在 Node 18 / 20 上装出来就是「装了但跑不起来」。
+ensure_pnpm() {
+  if pnpm_runs; then
+    return 0
+  fi
   if command -v corepack >/dev/null 2>&1; then
     corepack enable >/dev/null 2>&1 || true
-    corepack prepare pnpm@latest --activate >/dev/null 2>&1 || true
+    corepack prepare "$PNPM_SPEC" --activate >/dev/null 2>&1 || true
+    pnpm_runs && return 0
   fi
-  if ! command -v pnpm >/dev/null 2>&1; then
-    npm install -g pnpm >/dev/null 2>&1 || die "pnpm 安装失败，请手动执行：npm i -g pnpm"
+  if command -v npm >/dev/null 2>&1; then
+    npm install -g "$PNPM_SPEC" >/dev/null 2>&1 || true
+    pnpm_runs && return 0
+    # 系统级 Node 装全局包常要权限，输入密码时屏幕不回显是正常的
+    if [[ $EUID -ne 0 ]] && command -v sudo >/dev/null 2>&1; then
+      warn "  权限不足，改用 sudo 安装（要输开机密码，输入时不显示是正常现象）"
+      sudo npm install -g "$PNPM_SPEC" >/dev/null 2>&1 || true
+      pnpm_runs && return 0
+    fi
   fi
+  # 最后一招：corepack 缓存里可能留着与当前 Node 不匹配的 pnpm，清掉重来
+  if command -v corepack >/dev/null 2>&1; then
+    warn "  清理 corepack 缓存后重试"
+    rm -rf "$HOME/.cache/node/corepack" 2>/dev/null || true
+    corepack prepare "$PNPM_SPEC" --activate >/dev/null 2>&1 || true
+  fi
+  pnpm_runs
+}
+
+if ! pnpm_runs; then
+  warn "pnpm 不可用（未安装，或版本与当前 Node v${NODE_V} 不兼容）"
+  ensure_pnpm || die "pnpm 安装失败。请手动执行下面任一命令，再重跑本脚本：
+    corepack enable && corepack prepare ${PNPM_SPEC} --activate
+    npm install -g ${PNPM_SPEC}
+  原因：pnpm 11 需要 Node ≥ ${REC_NODE}，而当前是 v${NODE_V}，只能用 ${PNPM_SPEC}。"
+  ok "已安装 ${PNPM_SPEC}"
 fi
-PNPM_V="$(pnpm -v)"
-ok "pnpm $PNPM_V"
+PNPM_V="$(pnpm -v 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+[[ -n "$PNPM_V" ]] || die "pnpm 装上了但拿不到版本号，请手动执行：npm install -g ${PNPM_SPEC}"
+ok "pnpm ${PNPM_V}"
+if ! version_ge "$NODE_V" "$REC_NODE"; then
+  say "  ${C_DIM}Node v${NODE_V} < ${REC_NODE}，统一使用 ${PNPM_SPEC}（pnpm 11 需要 Node ≥ ${REC_NODE}）${C_RESET}"
+fi
 
 # ---------- 5. 前端依赖 ----------
 step "安装前端依赖"
-pnpm install
+# 跨 pnpm 大版本时会先要求确认清空 node_modules，非交互环境（CI / 管道）会直接
+# 中断（ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY）。这里显式放行，避免卡在这一步。
+pnpm install --config.confirmModulesPurge=false
 ok "依赖就绪"
 
 # ---------- 6. 单元测试 ----------

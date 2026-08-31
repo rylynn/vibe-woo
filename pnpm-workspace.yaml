@@ -8,5 +8,11 @@
 #   3. 值是 map（pkg: true），不是数组；写成 "- esbuild" 会被解析成 key '0' 而失效
 #
 # 重新放行的命令：pnpm approve-builds esbuild
+#
+# 两个键都保留是刻意的：项目固定用 pnpm 10（见 package.json 的 packageManager），
+# 它只认 onlyBuiltDependencies；而已经装了 pnpm 11 的人直接 pnpm install 时，
+# 只有 allowBuilds 生效。两个版本各自取自己认识的那个，互不干扰。
 allowBuilds:
   esbuild: true
+onlyBuiltDependencies:
+  - esbuild
