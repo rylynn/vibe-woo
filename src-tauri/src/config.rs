@@ -139,8 +139,8 @@ impl Default for RoamScope {
 
 /// 番茄工作法配置。
 ///
-/// 开启后进入「工作 → 休息」循环；休息期间若用户至少一分钟
-/// 没碰键盘鼠标，视为认真休息，宠物发当天特效奖励。
+/// 开启后进入「工作 → 休息」循环；休息期间键鼠累计活跃不超过一分钟
+/// 视为认真休息，宠物发当天特效奖励。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PomodoroConfig {

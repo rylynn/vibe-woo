@@ -207,7 +207,7 @@ export class SettingsPanel {
         "启用",
         c.pomodoro_enabled,
         (v) => this.patch({ pomodoro_enabled: v }),
-        "开启后进入工作/休息循环；休息时至少 1 分钟不碰键盘鼠标算认真休息，会得到当天限定的外观特效（隔天失效）",
+        "开启后进入工作/休息循环；休息期间键鼠活动累计不超过 1 分钟算认真休息，会得到当天限定的外观特效（隔天失效）",
       ),
     );
     this.el.appendChild(
@@ -441,7 +441,13 @@ export class SettingsPanel {
     input.style.width = "72px";
     const commit = () => {
       const n = Math.floor(Number(input.value));
-      if (Number.isFinite(n) && n >= 1 && n !== value) onCommit(n);
+      // 非法输入（空/非数字/小于 1）回显为当前配置值，
+      // 避免输入框显示与实际配置静默不一致；合法但超范围值由后端钳制后经 patch 重渲染回显
+      if (!Number.isFinite(n) || n < 1 || n === value) {
+        input.value = String(value);
+        return;
+      }
+      onCommit(n);
     };
     input.addEventListener("change", commit);
     input.addEventListener("keydown", (e) => {
