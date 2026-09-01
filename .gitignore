@@ -1,9 +1,14 @@
 node_modules/
+.codebuddy/
+.gitignore
+docs/
 dist/
 src-tauri/target/
 .DS_Store
 *.local
-.codebuddy/
+# 仅规则目录进版本库：合入规范（比如版本号要求）要跟着代码一起走，团队共用
+.codebuddy/*
+!.codebuddy/rules/
 
 # 环境与部署产物（含项目标识，不进版本库）
 .env

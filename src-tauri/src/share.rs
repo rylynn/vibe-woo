@@ -124,6 +124,7 @@ mod tests {
             keystrokes_per_min: 173.0,
             mood: Mood::Frustrated,
             activity: Activity::Slacking,
+            dnd_on: false,
         }
     }
 
@@ -164,6 +165,21 @@ mod tests {
         assert!(!json.contains("tempo"), "节奏泄漏：{json}");
         assert!(!json.contains("bundle"), "应用名泄漏：{json}");
         assert!(json.contains("\"coding\""));
+    }
+
+    #[test]
+    fn 序列化结果绝不包含tier0环境信号() {
+        // 红线测试的 Tier-0 延伸：麦克风占用、锁屏、视频断言、构建检测、
+        // 专注模式这些新感知信号只在本机使用，绝不上报 ——
+        // 好友知道「你在忙」是乐趣，知道「你在开会/在等编译」就是监视了。
+        let p = build_payload("pid", "阿咪", &state(Doing::Editing, Tempo::Flow), 42, false, 1770000000);
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(!json.contains("mic"), "麦克风信号泄漏：{json}");
+        assert!(!json.contains("screen"), "锁屏信号泄漏：{json}");
+        assert!(!json.contains("display"), "显示断言泄漏：{json}");
+        assert!(!json.contains("build"), "构建检测泄漏：{json}");
+        assert!(!json.contains("dnd"), "专注模式泄漏：{json}");
+        assert!(!json.contains("video"), "视频信号泄漏：{json}");
     }
 
     #[test]

@@ -15,6 +15,10 @@ pub enum Activity {
     Listening,
     /// 在浏览器里且键盘几乎不动 —— 大概率在摸鱼。
     Slacking,
+    /// 麦克风被占用 —— 在开会 / 语音通话，不该打扰。
+    Meeting,
+    /// 前台在跑构建 / 测试 / AI 会话 —— 在等它跑完。
+    Waiting,
     /// 正常干活或其他。
     Working,
 }
@@ -35,11 +39,27 @@ const SLACKING_IDLE_SECS: f64 = 8.0;
 ///
 /// 与状态机分离：状态机回答「在干什么 / 什么节奏」，
 /// 这里回答「具体是什么场景」。两者叠加才是完整的判断。
+///
+/// 优先级：语音占用（最强的不打扰信号）→ 音乐 → 等构建/AI →
+/// 思考 → 摸鱼 → 正常。
 pub fn detect(s: &Snapshot, bundle_id: &str) -> Activity {
     let id = bundle_id.to_ascii_lowercase();
 
-    if MUSIC_BUNDLES.iter().any(|p| id.starts_with(&p.to_ascii_lowercase())) {
+    // 麦克风被占用 = 在语音里。系统级布尔，不含任何音频内容，
+    // 也不知道对面是谁 —— 但「不该打扰」这一点足够准。
+    if s.mic_in_use {
+        return Activity::Meeting;
+    }
+    if MUSIC_BUNDLES
+        .iter()
+        .any(|p| id.starts_with(&p.to_ascii_lowercase()))
+    {
         return Activity::Listening;
+    }
+    // 前台在跑构建 / 测试 / AI 会话 —— 不管敲没敲键都算「在等」：
+    // 等待期间顺手改两行，本质还是在等它跑完。
+    if s.build_running && s.app.is_producing() {
+        return Activity::Waiting;
     }
     // 产出型工具前台却长时间没敲键 —— 在想事情
     if s.app.is_producing() && s.keyboard_idle_secs >= THINKING_IDLE_SECS {
@@ -61,9 +81,8 @@ mod tests {
     fn snap(app: AppKind, idle: f64) -> Snapshot {
         Snapshot {
             app,
-            keystrokes_per_min: 0.0,
             keyboard_idle_secs: idle,
-            hour: 14,
+            ..Default::default()
         }
     }
 
@@ -156,5 +175,119 @@ mod tests {
             detect(&snap(AppKind::Other, 1.0), "COM.SPOTIFY.CLIENT"),
             Activity::Listening
         );
+    }
+
+    fn mic_snap(app: AppKind, idle: f64) -> Snapshot {
+        Snapshot {
+            app,
+            keyboard_idle_secs: idle,
+            mic_in_use: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn 麦克风占用判定为开会() {
+        // 系统级布尔：不知道在跟谁开，只知道「在语音里，别打扰」
+        assert_eq!(
+            detect(&mic_snap(AppKind::Other, 1.0), "com.foo.Bar"),
+            Activity::Meeting
+        );
+    }
+
+    #[test]
+    fn 麦克风占用优先于前台应用判定() {
+        // 即便前台是编辑器（边开会边看代码），该安静还是要安静
+        assert_eq!(
+            detect(&mic_snap(AppKind::Editing, 1.0), "com.microsoft.VSCode"),
+            Activity::Meeting
+        );
+    }
+
+    #[test]
+    fn 麦克风占用优先于听歌判定() {
+        // 前台是音乐应用但麦克风在用 → 大概率是在 K 歌或语音，按开会算
+        assert_eq!(
+            detect(&mic_snap(AppKind::Watching, 1.0), "com.spotify.client"),
+            Activity::Meeting
+        );
+    }
+
+    #[test]
+    fn 麦克风释放后恢复原判定() {
+        assert_eq!(
+            detect(&snap(AppKind::Editing, 1.0), "com.microsoft.VSCode"),
+            Activity::Working
+        );
+    }
+
+    fn build_snap(app: AppKind, idle: f64) -> Snapshot {
+        Snapshot {
+            app,
+            keyboard_idle_secs: idle,
+            build_running: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn 产出工具里构建在跑判定为等待() {
+        assert_eq!(
+            detect(&build_snap(AppKind::Editing, 1.0), "com.microsoft.VSCode"),
+            Activity::Waiting
+        );
+    }
+
+    #[test]
+    fn 等构建期间敲键仍是等待() {
+        // 等待期间顺手改两行，本质还是在等它跑完 —— 不要求键盘静默
+        assert_eq!(
+            detect(&build_snap(AppKind::Editing, 2.0), "com.microsoft.VSCode"),
+            Activity::Waiting
+        );
+    }
+
+    #[test]
+    fn 构建在跑但前台切走了不算等待() {
+        // 构建挂后台、人去刷网页 —— 那是摸鱼，不是在盯着等
+        for app in [AppKind::Browsing, AppKind::Watching] {
+            assert_eq!(
+                detect(&build_snap(app, 30.0), "com.google.Chrome"),
+                Activity::Slacking,
+                "{app:?}"
+            );
+        }
+        // 去聊天则是正常干别的
+        assert_eq!(
+            detect(&build_snap(AppKind::Messaging, 30.0), "com.tencent.xinWeChat"),
+            Activity::Working
+        );
+    }
+
+    #[test]
+    fn 构建结束长时间静默回落到思考() {
+        // 「在等编译」结束后的持续静默才是真的在想事情
+        let mut s = snap(AppKind::Editing, 60.0);
+        assert_eq!(detect(&s, "com.microsoft.VSCode"), Activity::Thinking);
+        s.build_running = true;
+        assert_eq!(detect(&s, "com.microsoft.VSCode"), Activity::Waiting);
+        s.build_running = false;
+        assert_eq!(detect(&s, "com.microsoft.VSCode"), Activity::Thinking);
+    }
+
+    #[test]
+    fn 任何产出型工具里等构建都算等待() {
+        for app in [
+            AppKind::Editing,
+            AppKind::Writing,
+            AppKind::Designing,
+            AppKind::Data,
+        ] {
+            assert_eq!(
+                detect(&build_snap(app, 1.0), "com.whatever.App"),
+                Activity::Waiting,
+                "{app:?}"
+            );
+        }
     }
 }

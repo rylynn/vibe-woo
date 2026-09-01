@@ -66,6 +66,8 @@ pub fn spawn(app: &AppHandle) {
                 if should_fire(r, &ctx, "") {
                     fired.insert(key, ());
                     crate::usage::bump(crate::usage::Kind::Reminder);
+                    // 提醒内容反映生活习惯：记进当天的行为日志供 LLM 归纳
+                    crate::habitmemory::reminder_fired(&r.time, &r.text);
                     eprintln!("[reminder] 触发：{}（{}）", r.text, r.time);
                     let _ = app.emit(
                         EVENT_REMINDER,
@@ -120,6 +122,11 @@ pub fn spawn(app: &AppHandle) {
 }
 
 /// 取当前本地日期与分钟数。pub 供番茄驱动复用。
+///
+/// 分钟级缓存：结果粒度本来就是分钟，同分钟内直接克隆缓存，
+/// 避免高频调用方（感知循环等）每次都付 localtime_r + format! 的分配成本。
+static LOCAL_MINUTE: Mutex<Option<(i64, TimeCtx)>> = Mutex::new(None);
+
 pub fn local_now() -> Option<TimeCtx> {
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -127,7 +134,24 @@ pub fn local_now() -> Option<TimeCtx> {
         .duration_since(UNIX_EPOCH)
         .ok()?
         .as_millis() as i64;
+    let minute = ms / 60_000;
 
+    if let Ok(g) = LOCAL_MINUTE.lock() {
+        if let Some((m, ctx)) = g.as_ref() {
+            if *m == minute {
+                return Some(ctx.clone());
+            }
+        }
+    }
+
+    let ctx = compute_local_now(ms)?;
+    if let Ok(mut g) = LOCAL_MINUTE.lock() {
+        *g = Some((minute, ctx.clone()));
+    }
+    Some(ctx)
+}
+
+fn compute_local_now(ms: i64) -> Option<TimeCtx> {
     #[cfg(unix)]
     unsafe {
         let secs = (ms / 1000) as libc::time_t;

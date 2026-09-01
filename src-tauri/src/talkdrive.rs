@@ -63,9 +63,14 @@ pub fn spawn(app: &AppHandle) {
                 next_at = now + Duration::from_secs(RETRY_SECS);
                 continue;
             };
-            // 睡觉不说梦话；宠物不在家（去好友家串门了）不说。
-            // 都只是短重试，不消耗说话间隔。
-            if s.doing == crate::state::Doing::Away || crate::socialdrive::is_away() {
+            // 睡觉不说梦话；宠物不在家（去好友家串门了）不说；
+            // 专注模式开着不说（用户已用系统开关表达「别打扰」）；
+            // 开会 / 语音中也不说（安静陪伴）。都只是短重试，不消耗说话间隔。
+            if s.doing == crate::state::Doing::Away
+                || s.dnd_on
+                || s.activity == crate::activity::Activity::Meeting
+                || crate::socialdrive::is_away()
+            {
                 next_at = now + Duration::from_secs(RETRY_SECS);
                 continue;
             }
@@ -75,6 +80,8 @@ pub fn spawn(app: &AppHandle) {
                 if cfg.llm.api_key.is_empty() {
                     return None;
                 }
+                // 习惯记忆：观察久了总结的规律，置信度不足时内部返回 None
+                let habit = crate::habitmemory::summary();
                 let ctx = persona::PromptCtx {
                     persona: cfg.persona,
                     mood: s.mood,
@@ -84,6 +91,7 @@ pub fn spawn(app: &AppHandle) {
                     late_night: s.late_night,
                     keystrokes_per_min: s.keystrokes_per_min,
                     user_kind: &cfg.user_kind,
+                    habit: habit.as_deref(),
                 };
                 let mem = crate::memory::summary(&crate::memory::snapshot());
                 crate::llm::speak(&persona::system_prompt(&ctx, mem.as_deref()), &cfg.llm)

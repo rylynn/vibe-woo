@@ -2,9 +2,13 @@
 
 mod activity;
 mod account;
+mod appinfo;
 mod appclass;
 mod config;
 mod configcmd;
+mod envsense;
+mod habitdrive;
+mod habitmemory;
 mod hittest;
 mod inputfocus;
 mod llm;
@@ -94,6 +98,7 @@ fn main() {
             llm::test_llm,
             configcmd::get_config,
             configcmd::update_config,
+            appinfo::get_app_info,
             reminddrive::snooze_reminder
         ])
         .setup(|app| {
@@ -118,6 +123,8 @@ fn main() {
 
             window::setup_pet_window(app.handle())?;
             hittest::spawn_hit_test_loop(app.handle());
+            // 先于感知循环：习惯日志的目录与缓存要在第一次采样前就位
+            habitdrive::spawn(app.handle());
             sensedrive::spawn(app.handle());
             reminddrive::spawn(app.handle());
             talkdrive::spawn(app.handle());

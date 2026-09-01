@@ -58,6 +58,8 @@ export class SettingsPanel {
   constructor(
     private readonly onApply: (c: ConfigView) => void,
     private readonly avatarFlow?: AvatarFlow,
+    /** 打开「关于」面板。版本与账号信息是低频内容，收进二级面板。 */
+    private readonly onOpenAbout?: () => void,
   ) {
     this.el = document.createElement("div");
     this.el.className = "pet-settings";
@@ -228,6 +230,14 @@ export class SettingsPanel {
       ),
     );
     this.el.appendChild(
+      this.rowCheck(
+        "记住我的习惯",
+        c.habit_enabled,
+        (v) => this.patch({ habit_enabled: v }),
+        "每 12 小时归纳一次作息规律与常用工具风格，只存本地，用来让宠物更懂你；关闭后不再为此调用模型",
+      ),
+    );
+    this.el.appendChild(
       this.rowSelect(
         "协议",
         LLM_PROTOCOLS.map((p) => PROTOCOL_LABELS[p]),
@@ -256,15 +266,8 @@ export class SettingsPanel {
     );
     this.el.appendChild(this.rowTest());
 
-    // 关于：uid / 注册日期 / 署名
-    this.el.appendChild(this.divider("关于"));
-    this.el.appendChild(this.rowStatic("uid", c.social_uid || "未登录"));
-    this.el.appendChild(
-      this.rowStatic("注册日期", c.social_register_date || "—"),
-    );
-    const credit = this.hint("power by rylynnxj");
-    credit.style.paddingLeft = "14px";
-    this.el.appendChild(credit);
+    // 关于：一年也看不了几次的只读信息，收成面板最底部的二级入口
+    if (this.onOpenAbout) this.el.appendChild(this.rowAbout());
 
     this.el.appendChild(this.footer());
   }
@@ -315,15 +318,16 @@ export class SettingsPanel {
     return r;
   }
 
-  /** 只读信息行（关于区）。 */
-  private rowStatic(label: string, value: string): HTMLElement {
-    const r = this.row(label);
-    const v = document.createElement("span");
-    v.textContent = value;
-    v.title = value;
-    v.style.cssText =
-      "color:#c6cddd;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap";
-    r.appendChild(v);
+  /** 关于入口：面板最底部的一颗按钮，点开是独立的关于面板。 */
+  private rowAbout(): HTMLElement {
+    const r = this.row("关于");
+    const btn = document.createElement("button");
+    btn.className = "pet-bubble-confirm";
+    btn.textContent = "版本与账号";
+    btn.title = "查看版本号、构建信息与账号";
+    btn.style.flex = "1";
+    btn.addEventListener("click", () => this.onOpenAbout?.());
+    r.appendChild(btn);
     return r;
   }
 

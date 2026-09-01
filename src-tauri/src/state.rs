@@ -93,7 +93,8 @@ pub enum Tempo {
 }
 
 /// 传感器采样快照。所有字段都不含任何隐私内容 ——
-/// 只有「距上次按键多少秒」，绝不涉及键位本身。
+/// 只有「距上次按键多少秒」与若干结构性布尔（某设备是否在用、
+/// 某进程是否存在），绝不涉及键位、标题、文件名本身。
 #[derive(Debug, Clone, Copy)]
 pub struct Snapshot {
     pub app: AppKind,
@@ -103,6 +104,33 @@ pub struct Snapshot {
     pub keystrokes_per_min: f64,
     /// 本地小时（0–23），用于判断深夜。
     pub hour: u8,
+    // —— Tier-0 环境信号（全 bool，保持 Copy）——
+    /// 麦克风被某进程占用 → 在开会 / 语音通话。
+    pub mic_in_use: bool,
+    /// 屏幕已锁定 → 人一定不在，立即判 Away。
+    pub screen_locked: bool,
+    /// 显示休眠被阻止 → 大概率在全屏播视频，不算发呆。
+    pub display_video: bool,
+    /// 前台进程树下有构建/AI 生成在跑 → 在等编译 / 等 AI。
+    pub build_running: bool,
+    /// 系统专注模式 / 勿扰开启 → 抑制说话（不进状态机语义）。
+    pub dnd_on: bool,
+}
+
+impl Default for Snapshot {
+    fn default() -> Self {
+        Self {
+            app: AppKind::Other,
+            keyboard_idle_secs: 0.0,
+            keystrokes_per_min: 0.0,
+            hour: 12,
+            mic_in_use: false,
+            screen_locked: false,
+            display_video: false,
+            build_running: false,
+            dnd_on: false,
+        }
+    }
 }
 
 /// 推导出的宠物状态。
@@ -118,6 +146,9 @@ pub struct PetState {
     pub mood: Mood,
     /// 更细的活动场景。
     pub activity: Activity,
+    /// 专注模式 / 勿扰开启。不是「在干什么」，是「别打扰」开关 ——
+    /// 由说话驱动消费，不参与状态语义。
+    pub dnd_on: bool,
 }
 
 /// 无输入超过此时长即判定人已离开（宠物睡觉）。
@@ -146,7 +177,11 @@ pub fn derive(s: Snapshot) -> PetState {
 ///
 /// derive() 保留给不依赖这两个维度的纯状态测试。
 pub fn derive_with(s: Snapshot, mood: Mood, activity: Activity) -> PetState {
-    let doing = if s.keyboard_idle_secs >= AWAY_SECS {
+    // 人不在的判定：锁屏最准（系统级事实，秒级生效），
+    // 空闲 10 分钟是滞后兜底（人可能只是在看书）。
+    let gone = s.screen_locked || s.keyboard_idle_secs >= AWAY_SECS;
+
+    let doing = if gone {
         Doing::Away
     } else {
         match s.app {
@@ -161,12 +196,15 @@ pub fn derive_with(s: Snapshot, mood: Mood, activity: Activity) -> PetState {
         }
     };
 
-    let tempo = if s.keyboard_idle_secs >= AWAY_SECS {
+    let tempo = if gone {
         Tempo::Resting
     } else if s.keyboard_idle_secs >= STUCK_SECS {
         // STUCK 专指「在产出型工具里发呆」。不在产出时，静默只是普通歇着，
         // 宠物应该自娱自乐而不是陪你盯屏幕。
-        if s.app.is_producing() {
+        //
+        // 例外：显示休眠被阻止说明大概率在全屏播视频（系统级断言，
+        // 不读任何内容）—— 那是在看，不是在想，同样不进 STUCK。
+        if s.app.is_producing() && !s.display_video {
             Tempo::Stuck
         } else {
             Tempo::Resting
@@ -184,6 +222,7 @@ pub fn derive_with(s: Snapshot, mood: Mood, activity: Activity) -> PetState {
         keystrokes_per_min: s.keystrokes_per_min,
         mood,
         activity,
+        dnd_on: s.dnd_on,
     }
 }
 
@@ -197,6 +236,7 @@ mod tests {
             keyboard_idle_secs: 1.0,
             keystrokes_per_min: 30.0,
             hour: 14,
+            ..Default::default()
         }
     }
 
@@ -329,6 +369,67 @@ mod tests {
             ..editing()
         });
         assert_eq!(st.keystrokes_per_min, 173.5);
+    }
+
+    #[test]
+    fn 锁屏立即判离开_不等十分钟() {
+        // 锁屏是系统级事实，比空闲阈值准且即时 —— 刚锁上就该睡觉
+        let st = derive(Snapshot {
+            screen_locked: true,
+            keyboard_idle_secs: 3.0,
+            ..editing()
+        });
+        assert_eq!(st.doing, Doing::Away, "锁屏即离开，无需等空闲阈值");
+        assert_eq!(st.tempo, Tempo::Resting);
+    }
+
+    #[test]
+    fn 锁屏判定优先于输入与应用类别() {
+        // 锁屏瞬间可能残留「3 秒前还按着键、前台还是编辑器」的采样，
+        // 不该因此误判为还在干活
+        let st = derive(Snapshot {
+            screen_locked: true,
+            keystrokes_per_min: 200.0,
+            keyboard_idle_secs: 0.5,
+            ..editing()
+        });
+        assert_eq!(st.doing, Doing::Away);
+        assert_ne!(st.tempo, Tempo::Flow);
+    }
+
+    #[test]
+    fn 解锁后恢复原判定() {
+        let st = derive(Snapshot {
+            screen_locked: false,
+            ..editing()
+        });
+        assert_eq!(st.doing, Doing::Editing);
+        assert_eq!(st.tempo, Tempo::Normal);
+    }
+
+    #[test]
+    fn 全屏播视频不算发呆() {
+        // 显示休眠被阻止 = 大概率全屏在看视频。
+        // 即便前台恰好是产出型工具（如在编辑器里全屏看录屏），
+        // 也不该判 STUCK 让宠物陪你盯屏幕 —— 那是在看，不是在想。
+        let st = derive(Snapshot {
+            display_video: true,
+            keyboard_idle_secs: 150.0,
+            keystrokes_per_min: 0.0,
+            ..editing()
+        });
+        assert_eq!(st.tempo, Tempo::Resting, "看视频不进 STUCK");
+    }
+
+    #[test]
+    fn 显示休眠断言不影响正常敲键判定() {
+        // 断言存在但仍在活跃敲键（比如边播视频边干活）→ 判定照旧
+        let st = derive(Snapshot {
+            display_video: true,
+            keyboard_idle_secs: 2.0,
+            ..editing()
+        });
+        assert_eq!(st.tempo, Tempo::Normal);
     }
 
     #[test]

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { Pet, SIZE_STEPS } from "../src/pet";
+import { Pet, SIZE_STEPS, frameVisualKey } from "../src/pet";
 
 interface Cleared {
   w: number;
@@ -39,10 +39,14 @@ function probeSteadyState(sizeIndex: number): Probe {
   for (let i = 0; i < sizeIndex; i++) pet.cycleSize();
   pet.setActivity("active");
 
-  // 首帧允许整屏清除（画布状态未知），从第二帧起进入稳定态
+  // 首帧允许整屏清除（画布状态未知），从第二帧起进入稳定态。
+  // 无变化跳帧：画面静止的 tick 不会触发 clearRect，因此驱动到
+  // 收满 5 个真实绘制帧为止（呼吸/眨眼/扫视保证一定会发生）。
   pet.tick(1000);
   recording = true;
-  for (let t = 40; t <= 400; t += 40) pet.tick(1000 + t);
+  for (let t = 40; t <= 10000 && cleared.length < 5; t += 40) {
+    pet.tick(1000 + t);
+  }
 
   return { fills, cleared };
 }
@@ -125,5 +129,98 @@ describe("渲染开销预算", () => {
       }),
     );
     expect(worst).toBeLessThanOrEqual(120);
+  });
+});
+
+/** 睡眠状态（人已离开）：眼型 closed、不眨眼，是最「静止」的状态。 */
+const AWAY_STATE = {
+  doing: "away" as const,
+  tempo: "resting" as const,
+  late_night: false,
+  keystrokes_per_min: 0,
+  mood: "focused" as const,
+  activity: "working" as const,
+  dnd_on: false,
+};
+
+describe("无变化跳帧", () => {
+  /**
+   * 视觉指纹：量化参数相同 ⇒ 逐像素相同 ⇒ 可整帧跳过。
+   * 这是空闲 CPU 的关键路径 —— 不触碰 canvas 就不触发 WebKit 层合成。
+   */
+  it("frameVisualKey：相同参数同指纹，亚像素级微变不触发", () => {
+    const base = {
+      px: 100,
+      py: 200,
+      w: 96,
+      h: 96,
+      bob: 0,
+      shape: "round",
+      lid: 0,
+      gazeX: 0.3,
+      gazeY: -0.2,
+      glow: false,
+      tired: false,
+    };
+    expect(frameVisualKey(base)).toBe(frameVisualKey({ ...base }));
+    // 亚像素级变化（跨不过量化档位）不改变指纹
+    expect(frameVisualKey({ ...base, gazeX: 0.301 })).toBe(
+      frameVisualKey(base),
+    );
+    // 跨过量化档位则指纹变化
+    expect(frameVisualKey({ ...base, gazeX: 0.4 })).not.toBe(
+      frameVisualKey(base),
+    );
+    expect(frameVisualKey({ ...base, lid: 0.1 })).not.toBe(
+      frameVisualKey(base),
+    );
+    expect(frameVisualKey({ ...base, px: 101 })).not.toBe(frameVisualKey(base));
+    expect(frameVisualKey({ ...base, glow: true })).not.toBe(
+      frameVisualKey(base),
+    );
+    expect(frameVisualKey({ ...base, shape: "closed" })).not.toBe(
+      frameVisualKey(base),
+    );
+    expect(frameVisualKey({ ...base, tired: true })).not.toBe(
+      frameVisualKey(base),
+    );
+  });
+
+  it("完全静止的画面大部分帧被跳过（不触碰 canvas）", () => {
+    // 睡眠态：眼型恒为 closed、不眨眼；scope=still：呼吸幅度为 0。
+    // 期间唯一的像素变化源是随机扫视 —— 大部分预算帧应被跳过。
+    let draws = 0;
+    const ctx = {
+      globalAlpha: 1,
+      shadowBlur: 0,
+      shadowColor: "",
+      fillStyle: "",
+      clearRect: () => {
+        draws++;
+      },
+      fillRect: () => {},
+    } as unknown as CanvasRenderingContext2D;
+    const canvas = { width: CANVAS_W, height: CANVAS_H } as HTMLCanvasElement;
+    const pet = new Pet(canvas, ctx);
+    pet.applyState(AWAY_STATE);
+    pet.setScope("still");
+
+    // 安定：进入睡眠、视线平滑收敛
+    let t = 0;
+    for (let i = 0; i < 900; i++) {
+      t += 16;
+      pet.tick(t);
+    }
+
+    // 提到 active 预算（33ms），模拟 60Hz rAF 跑 4 秒。
+    // 无跳帧时应绘制约 120 帧；有跳帧时只剩扫视引发的少数几帧。
+    draws = 0;
+    for (let i = 0; i < 240; i++) {
+      t += 1000 / 60;
+      pet.tick(t);
+    }
+    // 4 秒内平均扫视间隔 1.6s → 至多 5 次扫视，每次平滑收敛只影响
+    // 少数几帧。给足余量：远小于 120（无跳帧基线）即视为跳帧生效。
+    expect(draws).toBeLessThan(60);
   });
 });

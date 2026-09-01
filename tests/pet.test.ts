@@ -85,6 +85,7 @@ const AWAY_STATE = {
   keystrokes_per_min: 0,
   mood: "focused" as const,
   activity: "working" as const,
+  dnd_on: false,
 };
 
 /**
@@ -136,6 +137,7 @@ describe("穿透约束：绝不产生半透明像素", () => {
       keystrokes_per_min: 220,
       mood: "focused",
       activity: "working",
+      dnd_on: false,
     });
     pet.tick(1000);
 
@@ -154,6 +156,7 @@ describe("穿透约束：绝不产生半透明像素", () => {
       keystrokes_per_min: 10,
       mood: "focused",
       activity: "working",
+      dnd_on: false,
     });
     pet.tick(1000);
 
@@ -327,7 +330,7 @@ describe("出场与走动范围", () => {
     pet.setScope("still");
     pet.applyState(AWAY_STATE);
     for (let i = 0; i < 600; i++) pet.tick(i * 16);
-    expect(pet.debugIntervalMs).toBeCloseTo(250, 5);
+    expect(pet.debugIntervalMs).toBeCloseTo(500, 5);
   });
 
   it("范围越大活动跨度越大", () => {
@@ -353,20 +356,20 @@ describe("出场与走动范围", () => {
 });
 
 describe("帧率预算", () => {
-  it("待机态按 12fps 间隔绘制", () => {
+  it("待机态按 8fps 间隔绘制", () => {
     const { pet } = makePet();
     pet.setActivity("idle");
-    expect(pet.debugIntervalMs).toBeCloseTo(1000 / 12, 6);
+    expect(pet.debugIntervalMs).toBeCloseTo(1000 / 8, 6);
   });
 
   it("睡眠态跳过过密的 tick", () => {
     const { pet } = makePet();
     pet.applyState(AWAY_STATE);
     const t = settle(pet);
-    // 睡眠态间隔 250ms
-    expect(pet.tick(t + 300)).toBe(true);
-    expect(pet.tick(t + 320)).toBe(false);
+    // 睡眠态间隔 500ms
     expect(pet.tick(t + 600)).toBe(true);
+    expect(pet.tick(t + 620)).toBe(false);
+    expect(pet.tick(t + 1100)).toBe(true);
   });
 
   it("拖动中强制提到 active 档位，避免拖动掉帧", () => {
@@ -386,7 +389,7 @@ describe("帧率预算", () => {
     expect(pet.tick(5020)).toBe(true);
   });
 
-  it("睡眠态一秒内只绘制约 4 次（CPU 预算的直接体现）", () => {
+  it("睡眠态一秒内只绘制约 2 次（CPU 预算的直接体现）", () => {
     const { pet } = makePet();
     pet.applyState(AWAY_STATE);
     const t = settle(pet);
@@ -395,7 +398,7 @@ describe("帧率预算", () => {
     for (let i = 0; i < 60; i++) {
       if (pet.tick(t + i * (1000 / 60))) drawn++;
     }
-    expect(drawn).toBeLessThanOrEqual(5);
+    expect(drawn).toBeLessThanOrEqual(3);
   });
 
   it("睡眠时不漫游，因此不会被提帧", () => {
@@ -403,7 +406,7 @@ describe("帧率预算", () => {
     pet.applyState(AWAY_STATE);
     settle(pet);
     expect(pet.currentMotion).toBe("sleep");
-    expect(pet.debugIntervalMs).toBeCloseTo(250, 5);
+    expect(pet.debugIntervalMs).toBeCloseTo(500, 5);
   });
 
   it("动作结束后不再持续提帧（否则会永久 30fps 烧 CPU）", () => {
@@ -452,6 +455,7 @@ describe("形象系统", () => {
       keystrokes_per_min: 220,
       mood: "focused",
       activity: "working",
+      dnd_on: false,
     });
     pet.tick(1000);
     const focusedColor = applyTint(CUSTOM.bodyColor, "focused");

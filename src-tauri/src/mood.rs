@@ -127,6 +127,7 @@ mod tests {
             keystrokes_per_min: kpm,
             keyboard_idle_secs: idle,
             hour,
+            ..Default::default()
         }
     }
 

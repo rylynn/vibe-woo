@@ -2,12 +2,12 @@ import { describe, expect, it } from "vitest";
 import { frameIntervalMs, shouldRender } from "../src/anim/frame-budget";
 
 describe("frameIntervalMs", () => {
-  it("睡眠态最省电（4fps）", () => {
-    expect(frameIntervalMs("sleep")).toBeCloseTo(250, 6);
+  it("睡眠态最省电（2fps）", () => {
+    expect(frameIntervalMs("sleep")).toBeCloseTo(500, 6);
   });
 
-  it("待机态中等（12fps）", () => {
-    expect(frameIntervalMs("idle")).toBeCloseTo(1000 / 12, 6);
+  it("待机态中等（8fps）", () => {
+    expect(frameIntervalMs("idle")).toBeCloseTo(1000 / 8, 6);
   });
 
   it("活跃态最流畅（30fps）", () => {
@@ -26,7 +26,7 @@ describe("shouldRender", () => {
   });
 
   it("刚好达到间隔时绘制", () => {
-    expect(shouldRender(250, 0, "sleep")).toBe(true);
+    expect(shouldRender(500, 0, "sleep")).toBe(true);
   });
 
   it("超过间隔时绘制", () => {

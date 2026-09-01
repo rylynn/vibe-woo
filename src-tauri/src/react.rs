@@ -9,6 +9,7 @@
 
 use std::time::Instant;
 
+use crate::activity::Activity;
 use crate::config::Persona;
 use crate::memory::{self, DayMemory, Fatigue};
 use crate::state::{Doing, PetState, Tempo};
@@ -28,6 +29,14 @@ pub enum Reaction {
     LateNight,
     /// 连续工作太久，该起来走走。
     LongSit,
+    /// 麦克风被占用 —— 进会议 / 语音了。
+    MeetingStart,
+    /// 麦克风释放 —— 散会了。
+    MeetingEnd,
+    /// 前台开始跑构建 / 测试 / AI。
+    BuildStart,
+    /// 构建 / AI 跑完了。
+    BuildEnd,
 }
 
 /// 每类反应的冷却（秒）。
@@ -38,6 +47,10 @@ const COOLDOWN_SECS: &[(Reaction, u64)] = &[
     (Reaction::Back, 3 * 60),
     (Reaction::LateNight, 6 * 3600), // 每晚一次
     (Reaction::LongSit, 45 * 60),    // 提醒了就该去休息，别连环催
+    (Reaction::MeetingStart, 10 * 60),
+    (Reaction::MeetingEnd, 10 * 60),
+    (Reaction::BuildStart, 10 * 60),
+    (Reaction::BuildEnd, 5 * 60),
 ];
 
 /// 任意两次反应之间的最小间隔（秒）。
@@ -119,6 +132,50 @@ const LINES: &[(Reaction, Persona, &[&str])] = &[
         Persona::Chatty,
         &["你至少一小时没离开椅子了。站起来晃晃，我看着屏幕。"],
     ),
+    (Reaction::MeetingStart, Persona::Quiet, &["（悄悄趴下了）"]),
+    (
+        Reaction::MeetingStart,
+        Persona::Occasional,
+        &["开会呢？我装死。", "（自觉闭麦）"],
+    ),
+    (
+        Reaction::MeetingStart,
+        Persona::Chatty,
+        &["你开会，我装看不见你，你也装看不见我。"],
+    ),
+    (Reaction::MeetingEnd, Persona::Quiet, &["（探出头来）"]),
+    (
+        Reaction::MeetingEnd,
+        Persona::Occasional,
+        &["开完了？", "（从桌子底下钻出来）"],
+    ),
+    (
+        Reaction::MeetingEnd,
+        Persona::Chatty,
+        &["散会了散会了，刚才憋死我了。"],
+    ),
+    (Reaction::BuildStart, Persona::Quiet, &["（搬了个小板凳）"]),
+    (
+        Reaction::BuildStart,
+        Persona::Occasional,
+        &["跑起来了，一起等。", "等着吧。"],
+    ),
+    (
+        Reaction::BuildStart,
+        Persona::Chatty,
+        &["又跑起来了？行，我帮你盯着。", "等着吧，急也没用。"],
+    ),
+    (Reaction::BuildEnd, Persona::Quiet, &["（耳朵动了一下）"]),
+    (
+        Reaction::BuildEnd,
+        Persona::Occasional,
+        &["跑完了。", "（看了一眼结果）"],
+    ),
+    (
+        Reaction::BuildEnd,
+        Persona::Chatty,
+        &["好了好了，回来干活。", "跑完了，结果好坏你自己看。"],
+    ),
 ];
 
 fn lines_for(r: Reaction, persona: Persona) -> Option<&'static [&'static str]> {
@@ -181,6 +238,31 @@ impl Reactor {
                 // 离开的瞬间不说话（对空气说）；同时连续计时归零
                 None
             }
+            // 会议与构建的进出：场景层迁移，比节奏层（Flow）更有信息量，
+            // 放在前面避免同轮的节奏变化把更有意义的一句挤掉。
+            Some(prev)
+                if prev.activity != Activity::Meeting && cur.activity == Activity::Meeting =>
+            {
+                Some(Reaction::MeetingStart)
+            }
+            Some(prev)
+                if prev.activity == Activity::Meeting && cur.activity != Activity::Meeting =>
+            {
+                Some(Reaction::MeetingEnd)
+            }
+            Some(prev)
+                if prev.activity != Activity::Waiting && cur.activity == Activity::Waiting =>
+            {
+                Some(Reaction::BuildStart)
+            }
+            Some(prev)
+                if prev.activity == Activity::Waiting && cur.activity != Activity::Waiting =>
+            {
+                Some(Reaction::BuildEnd)
+            }
+            // 会议进行中安静是硬要求：节奏起伏、久坐提醒一律不说。
+            // 进出的问候已在上面处理，这里吞掉其余全部候选。
+            _ if cur.activity == Activity::Meeting => None,
             Some(prev) if prev.tempo != Tempo::Flow && cur.tempo == Tempo::Flow => {
                 Some(Reaction::FlowStart)
             }
@@ -270,6 +352,7 @@ mod tests {
             keystrokes_per_min: 0.0,
             mood: Mood::Focused,
             activity: Activity::Working,
+            dnd_on: false,
         }
     }
 
@@ -429,5 +512,76 @@ mod tests {
             .unwrap();
         // 冷却内不会再触发，这里只验证计数器推进不 panic
         assert!(!first.is_empty());
+    }
+
+    fn state_with(doing: Doing, tempo: Tempo, activity: Activity) -> PetState {
+        PetState {
+            activity,
+            ..state(doing, tempo)
+        }
+    }
+
+    #[test]
+    fn 进入会议触发反应() {
+        let mut r = Reactor::new();
+        let prev = state_with(Doing::Other, Tempo::Normal, Activity::Working);
+        let cur = state_with(Doing::Other, Tempo::Normal, Activity::Meeting);
+        let line = r
+            .feed(Persona::Occasional, Some(&prev), &cur, &DayMemory::default())
+            .unwrap();
+        assert!(!line.is_empty());
+    }
+
+    #[test]
+    fn 散会触发反应() {
+        let mut r = Reactor::new();
+        let prev = state_with(Doing::Other, Tempo::Normal, Activity::Meeting);
+        let cur = state_with(Doing::Other, Tempo::Normal, Activity::Working);
+        assert!(r
+            .feed(Persona::Chatty, Some(&prev), &cur, &DayMemory::default())
+            .is_some());
+    }
+
+    #[test]
+    fn 开始构建触发反应() {
+        let mut r = Reactor::new();
+        let prev = state_with(Doing::Editing, Tempo::Normal, Activity::Working);
+        let cur = state_with(Doing::Editing, Tempo::Normal, Activity::Waiting);
+        assert!(r
+            .feed(Persona::Occasional, Some(&prev), &cur, &DayMemory::default())
+            .is_some());
+    }
+
+    #[test]
+    fn 构建结束触发反应() {
+        let mut r = Reactor::new();
+        let prev = state_with(Doing::Editing, Tempo::Normal, Activity::Waiting);
+        let cur = state_with(Doing::Editing, Tempo::Normal, Activity::Working);
+        assert!(r
+            .feed(Persona::Occasional, Some(&prev), &cur, &DayMemory::default())
+            .is_some());
+    }
+
+    #[test]
+    fn 会议场景内不因节奏变化说话() {
+        // 会议期间安静是硬要求：Flow 起伏不该让宠物插嘴
+        let mut r = Reactor::new();
+        let prev = state_with(Doing::Editing, Tempo::Normal, Activity::Meeting);
+        let cur = state_with(Doing::Editing, Tempo::Flow, Activity::Meeting);
+        assert!(r
+            .feed(Persona::Chatty, Some(&prev), &cur, &DayMemory::default())
+            .is_none());
+    }
+
+    #[test]
+    fn 离开优先于会议结束判定() {
+        // 锁屏同时麦克风释放（人走了挂断会议）→ 离开不说话，
+        // 不该对空气宣布「散会了」
+        let mut r = Reactor::new();
+        let prev = state_with(Doing::Editing, Tempo::Normal, Activity::Meeting);
+        let cur = state_with(Doing::Away, Tempo::Resting, Activity::Working);
+        assert!(r
+            .feed(Persona::Chatty, Some(&prev), &cur, &DayMemory::default())
+            .is_none());
     }
 }

@@ -26,7 +26,14 @@ export function isProducing(doing: Doing): boolean {
 
 export type Tempo = "flow" | "normal" | "stuck" | "resting";
 export type Mood = "content" | "focused" | "bored" | "frustrated";
-export type ActivityKind = "thinking" | "listening" | "slacking" | "working";
+/** 更细的活动场景。meeting/waiting 由零授权环境信号推导（麦克风占用 / 构建检测）。 */
+export type ActivityKind =
+  | "thinking"
+  | "listening"
+  | "slacking"
+  | "meeting"
+  | "waiting"
+  | "working";
 
 export interface PetState {
   doing: Doing;
@@ -35,6 +42,8 @@ export interface PetState {
   keystrokes_per_min: number;
   mood: Mood;
   activity: ActivityKind;
+  /** 系统专注模式 / 勿扰开启。不是「在干什么」，是「别打扰」开关。 */
+  dnd_on: boolean;
 }
 
 export const DEFAULT_STATE: PetState = {
@@ -44,6 +53,7 @@ export const DEFAULT_STATE: PetState = {
   keystrokes_per_min: 0,
   mood: "focused",
   activity: "working",
+  dnd_on: false,
 };
 
 /** 订阅 Rust 推送的状态。返回取消订阅函数。 */

@@ -66,6 +66,57 @@ const TIRED_COLOR = "#4a5a7a";
 /** dither 辉光的圈数。 */
 const GLOW_RINGS = 2;
 
+/**
+ * 一帧的全部「影响像素」参数（均已或近似量化到整数像素）。
+ *
+ * 供 frameVisualKey 组成跳帧判据 —— 渲染层（eyes/body/brows）全部用
+ * Math.round 量化输出，因此量化参数相同 ⇒ 逐像素相同。
+ */
+export interface VisualFrame {
+  /** 身体左上角（已取整）。 */
+  px: number;
+  py: number;
+  /** 形变后宽高（已取整）。 */
+  w: number;
+  h: number;
+  /** 走动起伏（0 或整数格）。 */
+  bob: number;
+  /** 眼型。 */
+  shape: string;
+  /** 眼皮 0..1。 */
+  lid: number;
+  /** 视线 -1..1。 */
+  gazeX: number;
+  gazeY: number;
+  /** 是否画辉光。 */
+  glow: boolean;
+  /** 是否画黑眼圈。 */
+  tired: boolean;
+}
+
+/**
+ * 组成一帧的视觉指纹：相同指纹 ⇒ 这一帧画出来与上一帧逐像素相同。
+ *
+ * lid / gaze 是连续量，按渲染粒度量化后进指纹 —— 眼高约 20-30px、
+ * 眼球行程约 5px，1/32 的眼皮档与 1/16 的视线档都在亚像素级，
+ * 不会产生可感知的跳变。
+ */
+export function frameVisualKey(f: VisualFrame): string {
+  return [
+    f.px,
+    f.py,
+    f.w,
+    f.h,
+    f.bob,
+    f.shape,
+    Math.round(f.lid * 32),
+    Math.round(f.gazeX * 16),
+    Math.round(f.gazeY * 16),
+    f.glow ? 1 : 0,
+    f.tired ? 1 : 0,
+  ].join(",");
+}
+
 /** 整数 → 0..1 的确定性伪随机。星星特效的位置由它决定，无需维护状态。 */
 function pseudoRandom(seed: number): number {
   // Math.imul 保证 32 位乘法不丢精度（seed 来自 nowMs，可能超出 2^32）
@@ -93,6 +144,8 @@ export class Pet {
   private currentSide = BASE_CELL * SIZE_STEPS[DEFAULT_SIZE_INDEX];
   /** 上一帧实际画过的区域，用于脏矩形清除。null 表示需整屏清除。 */
   private dirty: Box | null = null;
+  /** 上一帧的视觉指纹。相同则整帧跳过（不触碰 canvas）。 */
+  private lastDrawKey: string | null = null;
   /** 由 Rust 传感器推送的状态推导出的外观。 */
   private look: Appearance = appearanceFor(DEFAULT_STATE);
   /** 形象（长相）：形状/眼风/眉/基色/动作偏好。 */
@@ -138,6 +191,7 @@ export class Pet {
     this.y = Math.round(h * 0.72);
     this.behavior.placeAt(this.x, this.y);
     this.dirty = null;
+    this.lastDrawKey = null;
   }
 
   /** 基准边长，恒为 BASE_CELL 的整数倍。 */
@@ -267,6 +321,7 @@ export class Pet {
       this.drag = onPointerUp(this.drag);
     } else {
       this.lastRenderMs = 0;
+      this.lastDrawKey = null; // 画布已清空多时，回家必须整帧重画
     }
   }
 
@@ -283,8 +338,11 @@ export class Pet {
   private stepBehavior(nowMs: number): void {
     const dt = this.lastTickMs === 0 ? 0 : (nowMs - this.lastTickMs) / 1000;
     this.lastTickMs = nowMs;
-    // 切窗口/休眠回来时 dt 可能极大，钳制避免宠物瞬移或穿透地面
-    const safeDt = Math.min(dt, 0.05);
+    // 切窗口/休眠回来时 dt 可能极大，钳制避免宠物瞬移或穿透地面。
+    // 上限须 ≥ 渲染预算的最慢帧间隔（idle 12fps ≈ 83ms），否则低帧率档
+    // 下行为引擎的内部时钟会比真实时间慢。走动/眨眼等动态场景在 active
+    // 档（30fps ≈ 33ms），不受此钳制影响。
+    const safeDt = Math.min(dt, 0.12);
     if (safeDt <= 0) return;
 
     const s = this.behavior.update({
@@ -359,6 +417,31 @@ export class Pet {
       gazeTarget: this.gazeTarget(px, py, w, h),
     });
     this.pokeEdge = false;
+
+    // 无变化跳帧：视觉指纹与上一帧相同 ⇒ 输出逐像素相同，整帧跳过。
+    // 不触碰 canvas 就不会触发 WebKit 层合成（RemoteLayerTree 事务会
+    // 一路走到 GPU 进程）—— 这是空闲 CPU 的关键路径：idle 档 12fps 里，
+    // 相邻两帧的呼吸/视线多数停在同一个像素上。特效是常驻动画，
+    // 激活期间不做跳帧。
+    if (this.effects.size === 0) {
+      const key = frameVisualKey({
+        px,
+        py,
+        w,
+        h,
+        bob,
+        shape: this.eye.shape,
+        lid: this.eye.lid,
+        // 闭眼时眼球位移不产生任何像素（visibleH=0），
+        // 扫视照常发生但不必为之重绘
+        gazeX: this.eye.shape === "closed" ? 0 : this.eye.gazeX,
+        gazeY: this.eye.shape === "closed" ? 0 : this.eye.gazeY,
+        glow: this.look.tint === "focused",
+        tired: this.look.tired,
+      });
+      if (key === this.lastDrawKey) return;
+      this.lastDrawKey = key;
+    }
 
     // 脏矩形清除：只擦上一帧画过的区域，不整屏 clearRect。
     // 全屏清除（1440×900 ≈ 130 万像素）会让 GPU 每帧重新合成整个透明层。
@@ -639,6 +722,8 @@ export class Pet {
     this.lastRenderMs = 0;
     // 画布已被清空，上一帧的脏矩形失效
     this.dirty = null;
+    // 画布已被清空，视觉指纹同样失效
+    this.lastDrawKey = null;
 
     if (first) {
       this.placeInitial();
@@ -654,6 +739,7 @@ export class Pet {
     this.sizeIndex = (this.sizeIndex + 1) % SIZE_STEPS.length;
     // 尺寸变化后旧脏矩形范围不足以覆盖新尺寸，会留下残影
     this.dirty = null;
+    this.lastDrawKey = null;
   }
 
   /** 设置形象。联动动作风格到行为层，并立即重绘。 */
@@ -662,6 +748,7 @@ export class Pet {
     this.behavior.setActionStyle(a.actionStyle);
     this.dirty = null;
     this.lastRenderMs = 0;
+    this.lastDrawKey = null; // 配色/五官已变，指纹必然失效
   }
 
   /** 当前形象（供测试与设置面板回显）。 */
@@ -675,6 +762,7 @@ export class Pet {
     if (next === this.sizeIndex) return;
     this.sizeIndex = next;
     this.dirty = null;
+    this.lastDrawKey = null;
   }
 
   get sizeIndexValue(): number {
@@ -691,6 +779,7 @@ export class Pet {
     // 特效范围与身体不同（泡泡往上飘），脏矩形策略要跟着变
     this.dirty = null;
     this.lastRenderMs = 0;
+    this.lastDrawKey = null;
   }
 
   /** 当前生效的特效（供测试断言）。 */
@@ -704,6 +793,8 @@ export class Pet {
     this.activity = this.look.activity;
     // 表情与配色已变，立即重绘而非等下一个帧率周期
     this.lastRenderMs = 0;
+    // 配色（tint）/ 黑眼圈（tired）/ 眼型（mood→shape）都随状态变
+    this.lastDrawKey = null;
   }
 
   get appearance(): Appearance {

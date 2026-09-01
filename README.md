@@ -3,8 +3,10 @@
 一只常驻桌面的像素宠物，在 vibe coding 期间提供低打扰的陪伴、轻量捕获与小圈子社交。
 
 它知道你在写代码、进入状态、卡住了、还是已经离开 —— 但**不读你的任何内容**：
-只查询「距上次按键多少秒」和「前台应用是谁」，不接触键位、窗口标题、文件名。
-因此它不需要辅助功能权限，装上即用，没有授权弹窗。
+只查询「距上次按键多少秒」「前台应用是谁」，以及若干**零授权的结构性信号** ——
+麦克风是否被占用（开会检测，不碰音频数据）、屏幕是否锁定、是否在全屏播视频、
+前台是否在跑构建/AI 工具（只看可执行名，不看参数）、专注模式是否开启 ——
+不接触键位、窗口标题、文件名，因此不需要辅助功能/录屏/麦克风权限，装上即用，没有授权弹窗。
 
 - 平台：macOS 13+（Apple Silicon / Intel）
 - 技术栈：Tauri 2（Rust）+ TypeScript，Canvas 像素渲染，无前端框架
@@ -330,10 +332,16 @@ bash scripts/install.sh
 
 确认装的是哪个版本：
 
+在应用里看：右键宠物 → 设置 → 最底部的「关于」，里面是版本号、构建时间、Git 提交、构建档（debug/release）与平台，还有一颗「复制版本信息」按钮，报障时直接粘走。
+
+在终端看：
+
 ```bash
 # /Applications 里实际装的版本，应与 src-tauri/tauri.conf.json 的 version 一致
 defaults read /Applications/vibe-pet.app/Contents/Info.plist CFBundleShortVersionString
 ```
+
+版本号的真源是 `src-tauri/tauri.conf.json` 的 `version`（`Cargo.toml` 与 `package.json` 同步同一个值），改版本只改这三处，代码不用动。
 
 更新后若被系统提示「已损坏 / 无法打开」：右键应用 → 打开，或 系统设置 → 隐私与安全性 → 仍要打开。重装等于换了一个 ad-hoc 签名，系统需要重新确认一次。
 
@@ -344,8 +352,14 @@ defaults read /Applications/vibe-pet.app/Contents/Info.plist CFBundleShortVersio
 这是产品的红线，不是配置项：
 
 - **不申请任何系统授权**。用 `CGEventSourceSecondsSinceLastEventType` 只取「距上次按键 / 鼠标事件多少秒」，用 `NSWorkspace` 只取前台应用的 bundle id —— 都不需要辅助功能权限。
-- **绝不接触**键位内容、窗口标题、文件名、项目名、任何截屏。
-- **社交上报走白名单构造**：不是「从状态里删掉敏感字段」，而是从零构造只含允许字段的新结构，只上报 `coding / idle / away / offline` 四态、昵称、宠物名、好友度。见 `src-tauri/src/share.rs`。
+- **Tier-0 环境信号同样零授权、零内容**（见 `src-tauri/src/envsense.rs`）：
+  - 麦克风占用：只查默认输入设备的「正在运行」布尔，**不知道是谁在用、碰不到音频数据**
+  - 锁屏判定：只读会话字典的「已锁定」布尔
+  - 视频检测：只查「是否有进程在阻止显示休眠」断言（全屏播放的痕迹），不知道在播什么
+  - 构建/AI 检测：只看前台进程树下进程的**可执行文件名**（cargo/vitest/claude 等），不看命令行参数、不读输出
+  - 专注模式：读系统私有 JSON 判断开/关，解析失败按未开启
+- **绝不接触**键位内容、窗口标题、文件名、项目名、任何截屏、任何音频。
+- **社交上报走白名单构造**：不是「从状态里删掉敏感字段」，而是从零构造只含允许字段的新结构，只上报 `coding / idle / away / offline` 四态、昵称、宠物名、好友度。见 `src-tauri/src/share.rs`。Tier-0 信号（在开会/在等构建/专注模式）**不上报**。
 - 速记与 LLM 请求都只在你主动使用时发生，且可完全关闭（关掉即纯本地运行）。
 
 ---
@@ -414,6 +428,8 @@ src/                          前端（TypeScript，无框架）
 
 src-tauri/src/               Rust 后端
 ├── sensedrive.rs            传感器 → 状态机 → 前端（120ms 循环）
+├── sensor.rs                基础采集：输入空闲秒数、前台应用
+├── envsense.rs              Tier-0 环境信号：锁屏/麦克风/视频断言/构建/专注模式（零授权零内容）
 ├── state.rs                 状态机：Doing × Tempo + 深夜修饰符
 ├── mood.rs / activity.rs    心情积分器 / 活动识别（发呆、听歌、摸鱼）
 ├── talkdrive.rs             定时说话（人格频率硬性要求）

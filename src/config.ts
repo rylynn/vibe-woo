@@ -28,6 +28,8 @@ export interface ConfigView {
   pomodoro_enabled: boolean;
   pomodoro_work_mins: number;
   pomodoro_break_mins: number;
+  /** 习惯记忆开关：每 12 小时用 LLM 归纳一次作息与风格，作为宠物说话的物料。 */
+  habit_enabled: boolean;
   coding_apps: string[];
   browsing_apps: string[];
   excluded_apps: string[];
@@ -61,6 +63,7 @@ export interface ConfigPatch {
   pomodoro_enabled?: boolean;
   pomodoro_work_mins?: number;
   pomodoro_break_mins?: number;
+  habit_enabled?: boolean;
   coding_apps?: string[];
   browsing_apps?: string[];
   excluded_apps?: string[];
@@ -86,6 +89,7 @@ export const FALLBACK_CONFIG: ConfigView = {
   pomodoro_enabled: false,
   pomodoro_work_mins: 25,
   pomodoro_break_mins: 5,
+  habit_enabled: true,
   coding_apps: [],
   browsing_apps: [],
   excluded_apps: [],

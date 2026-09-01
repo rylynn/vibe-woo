@@ -3,6 +3,7 @@ import { startBoxReporter, requestQuit, type EventCounters } from "./bridge";
 import type { Box } from "./interact/hit-test";
 import { ContextMenu } from "./overlay/context-menu";
 import { SettingsPanel } from "./overlay/settings";
+import { AboutPanel } from "./overlay/about";
 import { QuickNote, onQuickNoteOpen } from "./overlay/quick-note";
 import { TodayPanel } from "./overlay/today";
 import { Bubble, Banner } from "./overlay/bubble";
@@ -55,14 +56,24 @@ const avatarPicker = new AvatarPicker({
   analyzeImage: analyzeImageFile,
 });
 
-const settings = new SettingsPanel(applyConfig, {
-  openPicker: (initial) => {
-    // 弹窗与设置面板不叠放：先关设置，选定后改动已由 picker 持久化
-    settings.hide();
-    avatarPicker.show(initial);
+const about = new AboutPanel();
+
+const settings = new SettingsPanel(
+  applyConfig,
+  {
+    openPicker: (initial) => {
+      // 弹窗与设置面板不叠放：先关设置，选定后改动已由 picker 持久化
+      settings.hide();
+      avatarPicker.show(initial);
+    },
+    analyzeImage: analyzeImageFile,
   },
-  analyzeImage: analyzeImageFile,
-});
+  // 关于是设置的二级面板：两个面板都居中，叠放会互相遮挡，进二级先收一级
+  () => {
+    settings.hide();
+    void about.show(() => void settings.show());
+  },
+);
 
 const quickNote = new QuickNote();
 const today = new TodayPanel();
@@ -93,6 +104,7 @@ const friendsPanel = new FriendsPanel();
 const dismiss = new DismissManager();
 dismiss.register(menu);
 dismiss.register(settings);
+dismiss.register(about);
 dismiss.register(quickNote);
 dismiss.register(today);
 dismiss.register(remindersPanel);
@@ -118,7 +130,7 @@ window.addEventListener("resize", fit);
 
 window.addEventListener("contextmenu", (e) => {
   e.preventDefault();
-  if (settings.isOpen) return;
+  if (settings.isOpen || about.isOpen) return;
   if (pet.hitTest(e.clientX, e.clientY)) {
     menu.show(e.clientX, e.clientY);
   } else {
@@ -139,6 +151,7 @@ window.addEventListener("pointerdown", (e) => {
   if (settings.isOpen && settings.contains(e.clientX, e.clientY)) return;
   if (avatarPicker.isOpen && avatarPicker.contains(e.clientX, e.clientY))
     return;
+  if (about.isOpen && about.contains(e.clientX, e.clientY)) return;
   if (quickNote.isOpen) return;
   if (today.isOpen && today.contains(e.clientX, e.clientY)) return;
   if (today.isOpen && !today.contains(e.clientX, e.clientY)) today.hide();
@@ -150,6 +163,8 @@ window.addEventListener("pointerdown", (e) => {
   if (bubble.isOpen && bubble.contains(e.clientX, e.clientY)) return;
   if (banner.isOpen && banner.contains(e.clientX, e.clientY)) return;
   pet.pointerDown(e.clientX, e.clientY);
+  // 点击/拖动需要立刻起帧（自调度循环可能正在 idle 档熟睡）
+  wakeFrame();
 });
 
 window.addEventListener("pointermove", (e) => {
@@ -164,6 +179,8 @@ window.addEventListener("pointermove", (e) => {
     return;
   }
   pet.pointerMove(e.clientX, e.clientY);
+  // 拖动/视线跟随需要立刻起帧；穿透时不会收到该事件，无高频风险
+  wakeFrame();
 });
 
 window.addEventListener("pointerup", () => {
@@ -191,6 +208,7 @@ window.addEventListener(
     if (e.key === "Escape") {
       menu.hide();
       settings.hide();
+      about.hide();
       quickNote.hide();
       today.hide();
       remindersPanel.hide();
@@ -224,6 +242,8 @@ void onReminderPanelOpen(() => {
 // 接收 Rust 传感器推送的状态。宠物的表情、配色、呼吸节奏都由它驱动。
 void onStateChange((s) => {
   pet.applyState(s);
+  // 表情已变：立即起帧，不等下一个帧率预算周期
+  wakeFrame();
   console.log(`[pet] ${describeState(s)}  kpm=${Math.round(s.keystrokes_per_min)}`);
 });
 
@@ -246,6 +266,8 @@ startBoxReporter(() => {
   if (settingsBox) boxes.push(settingsBox);
   const errorBox = settings.errorBox;
   if (errorBox) boxes.push(errorBox);
+  const aboutBox = about.box;
+  if (aboutBox) boxes.push(aboutBox);
   const noteBox = quickNote.box;
   if (noteBox) boxes.push(noteBox);
   const todayBox = today.box;
@@ -267,6 +289,7 @@ startBoxReporter(() => {
       pet.isDragging ||
       menu.isOpen ||
       settings.isOpen ||
+      about.isOpen ||
       quickNote.isOpen ||
       today.isOpen ||
       remindersPanel.isOpen ||
@@ -409,14 +432,48 @@ void onReminderFired((r) => {
   });
 });
 
-function loop(now: number): void {
-  pet.tick(now);
-  // 气泡与贴宠物通知条跟随宠物身体
-  bubble.follow(pet.body);
-  banner.follow(pet.body);
-  requestAnimationFrame(loop);
+// —— 渲染主循环：按帧率预算自调度，不再以 60fps 空转 ——
+//
+// 原实现 rAF 每帧（60fps）执行 stepBehavior + follow，即使渲染预算只有
+// idle 12fps / sleep 4fps —— 多出来的唤醒是 WebContent 进程常驻 CPU 的
+// 大头。改为：绘制完一帧后按当前活跃度档位睡到下一拍；指针事件与状态
+// 变更立即补拍唤醒，交互实时性不受影响。
+//
+// 穿透开启时 webview 收不到任何指针事件，无交互期的唤醒全部来自这里。
+let frameScheduled = false;
+
+function wakeFrame(): void {
+  if (frameScheduled) return;
+  frameScheduled = true;
+  requestAnimationFrame(onFrame);
 }
-requestAnimationFrame(loop);
+
+function onFrame(now: number): void {
+  frameScheduled = false;
+  const drew = pet.tick(now);
+  // 气泡与贴宠物通知条跟随宠物身体：只在真正绘制了新画面时同步。
+  // 位置量化到整数像素 —— 不绘制则位置必然未变，DOM 写纯属浪费。
+  if (drew) {
+    bubble.follow(pet.body);
+    banner.follow(pet.body);
+  }
+
+  if (pet.isHidden) {
+    // 不在家：零绘制零行为，500ms 一拍兜底；回家事件会立即唤醒
+    setTimeout(wakeFrame, 500);
+    return;
+  }
+
+  // 下一拍按活跃度档位调度：active 档（拖动/走动/眨眼）对齐显示刷新，
+  // idle/sleep 档先睡够再拍。留 4ms 余量避免长期欠帧。
+  const delay = pet.debugIntervalMs - (performance.now() - now) - 4;
+  if (delay > 4) {
+    setTimeout(wakeFrame, delay);
+  } else {
+    wakeFrame();
+  }
+}
+wakeFrame();
 
 // SIZE_STEPS 供调试查看当前档位含义
 Object.assign(window as unknown as Record<string, unknown>, {

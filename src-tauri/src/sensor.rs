@@ -76,6 +76,14 @@ mod platform {
         })
     }
 
+    /// 快层采集：仅键盘空闲秒数（单次 CGEventSource C 调用，无 ObjC、无分配）。
+    ///
+    /// 击键检测需要 120ms 粒度，但 hour / mouse_idle 属于慢层信号 ——
+    /// 把最便宜的采集拆出来，让快层不必为整份 RawSample 付 NSCalendar 的钱。
+    pub fn keyboard_idle_secs() -> Option<f64> {
+        keyboard_idle()
+    }
+
     /// 距上次键盘按下事件的秒数。
     ///
     /// 用 CGEventSourceSecondsSinceLastEventType —— 它只返回时间间隔，
@@ -118,14 +126,22 @@ mod platform {
         }
     }
 
-    /// 前台应用的 bundle id。
+    /// 前台应用信息。
+    pub struct FrontmostApp {
+        /// bundle id，供分类。
+        pub bundle_id: String,
+        /// 主进程 pid，供 envsense 扫进程树。
+        pub pid: i32,
+    }
+
+    /// 前台应用（bundle id + pid）。
     ///
-    /// 用 NSWorkspace.frontmostApplication.bundleIdentifier —— 只拿标识符，
+    /// 用 NSWorkspace.frontmostApplication —— 只拿标识符与进程号，
     /// **不读窗口标题**（那会泄漏文件名与项目名），无需授权。
     ///
     /// 用 objc2-app-kit 的类型安全绑定而非裸 msg_send!：后者对返回
     /// retained 对象的方法容易拿到无效指针（实测得到空 bundle id）。
-    pub fn frontmost_bundle_id() -> Option<String> {
+    pub fn frontmost_app() -> Option<FrontmostApp> {
         use objc2_app_kit::NSWorkspace;
 
         // objc2 0.6 中这些方法均为安全接口，无需 unsafe
@@ -146,7 +162,10 @@ mod platform {
                 diag_once("前台应用没有 bundle id，按未知处理");
                 None
             }
-            Some(b) => Some(b.to_string()),
+            Some(b) => Some(FrontmostApp {
+                bundle_id: b.to_string(),
+                pid,
+            }),
         }
     }
 
@@ -174,16 +193,19 @@ mod platform {
     use super::RawSample;
 
     pub fn sample() -> Option<RawSample> {
-        // Windows 实现见 M2 后续：GetLastInputInfo + GetForegroundWindow
         None
     }
 
-    pub fn frontmost_bundle_id() -> Option<String> {
+    pub fn keyboard_idle_secs() -> Option<f64> {
+        None
+    }
+
+    pub fn frontmost_app() -> Option<super::FrontmostApp> {
         None
     }
 }
 
-pub use platform::{frontmost_bundle_id, sample};
+pub use platform::{frontmost_app, keyboard_idle_secs, sample};
 
 #[cfg(test)]
 mod tests {

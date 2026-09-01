@@ -283,6 +283,12 @@ pub struct Config {
     pub reminders: Vec<crate::reminder::Reminder>,
     /// 番茄工作法。
     pub pomodoro: PomodoroConfig,
+    /// 习惯记忆：每 12 小时用 LLM 归纳一次作息规律、生活习惯与应用风格，
+    /// 作为宠物说话的物料。关掉只停分析，已积累的日志保留。
+    ///
+    /// 默认开 —— 但它只在 LLM 已启用时才真正发请求，不会凭空花钱。
+    #[serde(default = "default_true")]
+    pub habit_enabled: bool,
     /// 用户自定义的应用分类规则。
     pub coding_apps: Vec<String>,
     pub browsing_apps: Vec<String>,
@@ -291,6 +297,11 @@ pub struct Config {
     pub social: SocialConfig,
     /// 已领养的形象。None 表示首次安装尚未选择，前端据此弹选择窗。
     pub avatar: Option<AvatarConfig>,
+}
+
+/// 布尔字段的默认值：新功能默认开（详见 `Config::habit_enabled` 的注释）。
+fn default_true() -> bool {
+    true
 }
 
 impl Default for Config {
@@ -304,6 +315,7 @@ impl Default for Config {
             notes_vault: String::new(),
             reminders: Vec::new(),
             pomodoro: PomodoroConfig::default(),
+            habit_enabled: true,
             coding_apps: Vec::new(),
             browsing_apps: Vec::new(),
             excluded_apps: Vec::new(),
@@ -440,6 +452,15 @@ mod tests {
         assert_eq!(c.size_index, 2);
         assert_eq!(c.persona, Persona::Quiet);
         assert_eq!(c.roam_scope, RoamScope::Nearby);
+        assert!(c.habit_enabled, "旧配置升级后习惯记忆应默认开启");
+    }
+
+    #[test]
+    fn 习惯开关可关闭且能往返() {
+        let mut c = Config::default();
+        c.habit_enabled = false;
+        let back: Config = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
+        assert!(!back.habit_enabled);
     }
 
     #[test]

@@ -218,6 +218,68 @@
         font-size: 11px;
       }
 
+      /* 关于面板：与设置面板同源样式，只是稍宽一点放得下构建时间与标识符 */
+      .pet-about {
+        width: 360px;
+      }
+
+      .pet-about-head-left {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+
+      .pet-about-back {
+        padding: 1px 8px;
+        border: 1px solid rgba(255, 255, 255, 0.16);
+        border-radius: 6px;
+        background: rgba(255, 255, 255, 0.06);
+        color: #a8b0c2;
+        font: 11px/1.5 ui-sans-serif, -apple-system, sans-serif;
+        cursor: default;
+      }
+
+      .pet-about-back:hover {
+        color: #fff;
+        border-color: rgba(124, 245, 196, 0.55);
+      }
+
+      .pet-about-brand {
+        padding: 14px 14px 6px;
+      }
+
+      .pet-about-name {
+        font-size: 16px;
+        font-weight: 600;
+        color: #e8ecf4;
+      }
+
+      .pet-about-meta {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        margin-top: 3px;
+        color: #7cf5c4;
+        font-size: 12px;
+      }
+
+      .pet-about-copy {
+        padding: 1px 8px;
+        font-size: 11px;
+        flex: 0 0 auto;
+      }
+
+      /* 只读行的值：过长时省略号截断，完整值在 title 里 */
+      .pet-about-value {
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: #c6cddd;
+      }
+
       /* 速记输入条：必须能接收点击与键盘输入 */
       .pet-quicknote {
         position: fixed;

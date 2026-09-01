@@ -34,6 +34,8 @@ pub fn add_note(app: AppHandle, text: String) -> NoteSaved {
     let written_to = note::persist(&app, &note);
     // 当日记忆 +1（供疲劳叙述与 system prompt 的「今天」段使用）
     crate::memory::note_added();
+    // 习惯记忆 +1（记速记本身也是一种习惯信号）
+    crate::habitmemory::note_added();
     // 用量计数：至少一个落点写成功才算一条速记
     if !written_to.is_empty() {
         crate::usage::bump(crate::usage::Kind::Note);

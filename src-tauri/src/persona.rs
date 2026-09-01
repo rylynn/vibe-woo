@@ -350,6 +350,11 @@ pub struct PromptCtx<'a> {
     pub keystrokes_per_min: f64,
     /// 主人自述的「平时在忙什么」。空串 = 未填写，不预设任何身份。
     pub user_kind: &'a str,
+    /// 习惯记忆：LLM 归纳出的作息规律与生活习惯（置信度不足时为 None）。
+    ///
+    /// 与 `user_kind` 的区别：那是主人**自己说的**，这是宠物**观察久了
+    /// 总结的** —— 后者只能当熟稔感的来源，不能当事实陈述。
+    pub habit: Option<&'a str>,
 }
 
 /// LLM 的 system prompt。
@@ -411,6 +416,8 @@ pub fn system_prompt(ctx: &PromptCtx, memory: Option<&str>) -> String {
         Activity::Thinking => "工具在前台但很久没有输入，大概率在想问题",
         Activity::Listening => "在听音乐",
         Activity::Slacking => "在浏览器里闲逛，大概率在摸鱼",
+        Activity::Meeting => "在开会或语音通话，不方便说话",
+        Activity::Waiting => "在等构建、测试或AI跑完",
         Activity::Working => "正常在忙",
     };
     let pace = if ctx.keystrokes_per_min >= 180.0 {
@@ -437,6 +444,10 @@ pub fn system_prompt(ctx: &PromptCtx, memory: Option<&str>) -> String {
     }
     if let Some(m) = memory {
         p.push_str(&format!("\n今天你们一起度过：{m}"));
+    }
+    if let Some(h) = ctx.habit {
+        // 熟悉感，不是事实：只说「你习惯了…」，不许拿来下判断
+        p.push_str(&format!("\n你们相处久了，知道主人的习惯：{h}。"));
     }
     p.push_str(&format!(
         "\n说一句你当下的感受或想说的话。要求：{length_rule}；不用emoji；\
@@ -601,6 +612,7 @@ mod tests {
             late_night: false,
             keystrokes_per_min: 30.0,
             user_kind,
+            habit: None,
         }
     }
 
