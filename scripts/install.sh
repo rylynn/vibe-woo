@@ -329,8 +329,9 @@ ensure_pnpm() {
   if command -v npm >/dev/null 2>&1; then
     npm install -g "$PNPM_SPEC" >/dev/null 2>&1 || true
     pnpm_runs && return 0
-    # 系统级 Node 装全局包常要权限，输入密码时屏幕不回显是正常的
-    if [[ $EUID -ne 0 ]] && command -v sudo >/dev/null 2>&1; then
+    # 系统级 Node 装全局包常要权限，输入密码时屏幕不回显是正常的。
+    # 只在有终端（-t 0）时才走 sudo，否则会卡在等密码上
+    if [[ $EUID -ne 0 ]] && command -v sudo >/dev/null 2>&1 && [[ -t 0 ]]; then
       warn "  权限不足，改用 sudo 安装（要输开机密码，输入时不显示是正常现象）"
       sudo npm install -g "$PNPM_SPEC" >/dev/null 2>&1 || true
       pnpm_runs && return 0
@@ -339,7 +340,7 @@ ensure_pnpm() {
   # 最后一招：corepack 缓存里可能留着与当前 Node 不匹配的 pnpm，清掉重来
   if command -v corepack >/dev/null 2>&1; then
     warn "  清理 corepack 缓存后重试"
-    rm -rf "$HOME/.cache/node/corepack" 2>/dev/null || true
+    rm -rf "$HOME/.cache/node/corepack" "$HOME/Library/Caches/node/corepack" 2>/dev/null || true
     corepack prepare "$PNPM_SPEC" --activate >/dev/null 2>&1 || true
   fi
   pnpm_runs
