@@ -210,13 +210,13 @@ export class SettingsPanel {
       this.el.appendChild(this.rowAvatar(c));
     }
 
-    this.el.appendChild(this.divider("速记"));
-    this.el.appendChild(
-      this.rowText("Obsidian 目录", c.notes_vault, (v) =>
-        this.patch({ notes_vault: v }),
-      ),
-    );
-    this.el.appendChild(this.hint("留空则只存内置目录"));
+    // Obsidian 落点暂时从设置隐藏（0.3.x）：速记功能与 notes_vault
+    // 配置字段都保留，将来收拢为插件功能后再以插件表单回归。
+    // this.el.appendChild(this.divider("速记"));
+    // this.el.appendChild(this.rowText("Obsidian 目录", c.notes_vault, (v) =>
+    //   this.patch({ notes_vault: v }),
+    // ));
+    // this.el.appendChild(this.hint("留空则只存内置目录"));
 
     // 插件：入口行 → 二级页（插件清单）→ 三级页（各自配置）。
     // 表单由各插件自己的 renderSettings 提供。

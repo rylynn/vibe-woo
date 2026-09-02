@@ -147,6 +147,11 @@ export const stockFrontend: PluginFrontend = {
     symRow.append(symLabel, symbols);
     el.appendChild(symRow);
 
+    const symHint = document.createElement("div");
+    symHint.className = "pet-plugin-form-hint";
+    symHint.textContent = "最多 10 只；A股加 sh/sz 前缀，港股 hk，美股 us（如 sh600519 / hk00700 / usAAPL）";
+    el.appendChild(symHint);
+
     const numRow = document.createElement("div");
     numRow.className = "pet-plugin-form-row";
     const threshold = document.createElement("input");
