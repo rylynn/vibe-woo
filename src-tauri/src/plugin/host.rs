@@ -35,8 +35,12 @@ pub fn spawn(app: &AppHandle) {
     std::thread::spawn(move || {
         let mut plugins = registry(&app);
         let mut panics: HashMap<String, u32> = HashMap::new();
+        // 每插件的下次到期时刻（next_tick 语义：距「需要被 tick」的时长）。
+        // 必须由宿主记账 —— 轮询型插件每次都返回固定间隔，若每次都
+        // 重新询问会无限顺延，插件永远不会被 tick（0.3.0 之前的致命 bug）。
+        let mut deadlines: Vec<Option<Instant>> = plugins.iter().map(|_| None).collect();
         loop {
-            let sleep_for = run_once(&mut plugins, &mut panics, &app);
+            let sleep_for = run_once(&mut plugins, &mut deadlines, &mut panics, &app);
             std::thread::sleep(sleep_for);
         }
     });
@@ -44,29 +48,16 @@ pub fn spawn(app: &AppHandle) {
 
 /// 一轮调度：先重试仲裁队列，再收集到期插件逐个 tick。
 /// 返回本轮应睡眠的时长；有插件刚被 tick 过则返回零（立刻下轮 ——
-/// tick 可能有副作用，next_tick 的旧值不能再用）。
+/// tick 可能有副作用，deadline 旧值不能再用）。
 fn run_once(
     plugins: &mut [Box<dyn Plugin>],
+    deadlines: &mut [Option<Instant>],
     panics: &mut HashMap<String, u32>,
     app: &AppHandle,
 ) -> Duration {
     arbiter::retry(app);
 
-    let ctx = ScheduleCtx {
-        now: Instant::now(),
-    };
-    let mut sleep_for = IDLE_POLL;
-    let mut due: Vec<usize> = Vec::new();
-    for (i, p) in plugins.iter().enumerate() {
-        if panics.get(p.id()).copied().unwrap_or(0) >= MAX_CONSECUTIVE_PANICS {
-            continue; // 连续 panic 达上限，本进程内禁用
-        }
-        match p.next_tick(&ctx) {
-            None => {}
-            Some(d) if d == Duration::ZERO => due.push(i),
-            Some(d) => sleep_for = sleep_for.min(d),
-        }
-    }
+    let Plan { due, sleep: sleep_for } = plan_schedule(plugins, deadlines, panics);
 
     if due.is_empty() {
         return sleep_for;
@@ -82,6 +73,48 @@ fn run_once(
         arbiter::offer(app, cards);
     }
     Duration::ZERO
+}
+
+/// 一轮的调度决策（纯查询，单测入口）：哪些插件到期、本轮睡多久。
+struct Plan {
+    due: Vec<usize>,
+    sleep: Duration,
+}
+
+/// deadline 语义见 `spawn` 的注释：next_tick 返回 d>0 只记一次账，
+/// 到期直接 tick 不再询问 —— 轮询型插件恒返回固定间隔，重问会无限顺延。
+fn plan_schedule(
+    plugins: &[Box<dyn Plugin>],
+    deadlines: &mut [Option<Instant>],
+    panics: &HashMap<String, u32>,
+) -> Plan {
+    let now = Instant::now();
+    let ctx = ScheduleCtx { now };
+    let mut sleep = IDLE_POLL;
+    let mut due = Vec::new();
+    for (i, p) in plugins.iter().enumerate() {
+        if panics.get(p.id()).copied().unwrap_or(0) >= MAX_CONSECUTIVE_PANICS {
+            continue; // 连续 panic 达上限，本进程内禁用
+        }
+        if let Some(d) = deadlines[i] {
+            if now < d {
+                sleep = sleep.min(d - now);
+                continue;
+            }
+            deadlines[i] = None;
+            due.push(i);
+            continue;
+        }
+        match p.next_tick(&ctx) {
+            None => {}
+            Some(d) if d == Duration::ZERO => due.push(i),
+            Some(d) => {
+                deadlines[i] = Some(now + d);
+                sleep = sleep.min(d);
+            }
+        }
+    }
+    Plan { due, sleep }
 }
 
 /// 记录一次 tick 的结果：成功清零连续 panic 计数并返回产出的卡；
@@ -149,32 +182,54 @@ mod tests {
     #[test]
     fn 全部不参与时睡空闲轮询() {
         let mut plugins: Vec<Box<dyn Plugin>> = vec![Box::new(probe(None))];
-        let plan = plan_schedule(&plugins, &HashMap::new());
+        let mut deadlines = vec![None];
+        let plan = plan_schedule(&plugins, &mut deadlines, &HashMap::new());
         assert_eq!(plan.sleep, IDLE_POLL);
         assert!(plan.due.is_empty());
     }
 
     #[test]
-    fn 零延迟立即到期_正延迟取最小值() {
-        // 注意：睡眠以 IDLE_POLL（60s）为上限 —— 保证仲裁队列重试粒度，
-        // 所以这里用小于上限的延迟值来验证「取最小」本身
+    fn 零延迟立即到期_正延迟记deadline() {
         let mut plugins: Vec<Box<dyn Plugin>> = vec![
             Box::new(probe(Some(Duration::from_secs(30)))),
             Box::new(probe(Some(Duration::ZERO))),
-            Box::new(probe(Some(Duration::from_secs(5)))),
         ];
-        let plan = plan_schedule(&plugins, &HashMap::new());
-        assert_eq!(plan.due, vec![1], "只有零延迟的插件立即到期");
-        assert_eq!(plan.sleep, Duration::from_secs(5), "取最小正延迟");
+        let mut deadlines = vec![None, None];
+        let plan = plan_schedule(&plugins, &mut deadlines, &HashMap::new());
+        assert_eq!(plan.due, vec![1], "零延迟的插件立即到期");
+        assert!(deadlines[0].is_some(), "正延迟必须记 deadline");
+        assert_eq!(plan.sleep, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn deadline到期直接tick_不重新询问() {
+        // 0.3.0 之前的致命 bug：轮询型插件恒返回 30s，旧逻辑只认 d==0
+        // 为到期 → 永远不会 tick。现在 deadline 到期即 tick。
+        let mut plugins: Vec<Box<dyn Plugin>> = vec![Box::new(probe(Some(Duration::from_secs(30))))];
+        let mut deadlines = vec![Some(Instant::now() - Duration::from_secs(1))]; // 已到期
+        let plan = plan_schedule(&plugins, &mut deadlines, &HashMap::new());
+        assert_eq!(plan.due, vec![0], "deadline 过期必须 tick");
+        assert!(deadlines[0].is_none(), "tick 后 deadline 清空，下轮重新询问");
+    }
+
+    #[test]
+    fn deadline未到只贡献睡眠() {
+        let mut plugins: Vec<Box<dyn Plugin>> = vec![Box::new(probe(Some(Duration::from_secs(30))))];
+        let mut deadlines = vec![Some(Instant::now() + Duration::from_secs(7))];
+        let plan = plan_schedule(&plugins, &mut deadlines, &HashMap::new());
+        assert!(plan.due.is_empty(), "未到期不 tick");
+        assert!(plan.sleep <= Duration::from_secs(7), "睡到 deadline（剩 7s 左右）");
+        assert!(deadlines[0].is_some(), "deadline 保留");
     }
 
     #[test]
     fn 连续panic达上限的插件被跳过() {
         let mut plugins: Vec<Box<dyn Plugin>> =
             vec![Box::new(probe(Some(Duration::ZERO)))];
+        let mut deadlines = vec![None];
         let mut panics: HashMap<String, u32> = HashMap::new();
         panics.insert("probe".into(), MAX_CONSECUTIVE_PANICS);
-        let plan = plan_schedule(&plugins, &panics);
+        let plan = plan_schedule(&plugins, &mut deadlines, &panics);
         assert!(plan.due.is_empty(), "禁用的插件即使零延迟也不 tick");
     }
 
@@ -198,33 +253,5 @@ mod tests {
         // 成功一次就翻身
         record_result("p", Ok(Vec::new()), &mut panics);
         assert_eq!(panics.get("p"), Some(&0));
-    }
-
-    /// 调度决策（从 run_once 抽出的纯查询，便于单测）。
-    struct Plan {
-        due: Vec<usize>,
-        sleep: Duration,
-    }
-
-    fn plan_schedule(
-        plugins: &[Box<dyn Plugin>],
-        panics: &HashMap<String, u32>,
-    ) -> Plan {
-        let ctx = ScheduleCtx {
-            now: Instant::now(),
-        };
-        let mut sleep = IDLE_POLL;
-        let mut due = Vec::new();
-        for (i, p) in plugins.iter().enumerate() {
-            if panics.get(p.id()).copied().unwrap_or(0) >= MAX_CONSECUTIVE_PANICS {
-                continue;
-            }
-            match p.next_tick(&ctx) {
-                None => {}
-                Some(d) if d == Duration::ZERO => due.push(i),
-                Some(d) => sleep = sleep.min(d),
-            }
-        }
-        Plan { due, sleep }
     }
 }

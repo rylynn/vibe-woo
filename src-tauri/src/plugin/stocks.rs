@@ -371,6 +371,22 @@ impl Plugin for StocksPlugin {
         // —— 收盘总结：到点、有当日快照、未发过 ——
         if !cfg.summarize_after.is_empty() {
             if let Some(after) = parse_hhmm(&cfg.summarize_after) {
+                // 到了总结时刻但今天还没拉到行情（比如应用第一次在时段外
+                // 启动）：主动拉一次 —— 总结和面板数据不能依赖用户恰好
+                // 在展示时段内运行过应用。
+                if now_min >= after {
+                    let need_pull = with_state(|s| {
+                        s.date != today
+                            || (s.quotes.is_empty() && now.saturating_sub(s.last_fetch_mins) >= FETCH_GAP_MINS)
+                    });
+                    if need_pull {
+                        with_state(|s| {
+                            s.date = today.clone();
+                            s.last_fetch_mins = now;
+                        });
+                        spawn_fetch(cfg.clone(), today.clone(), ctx.app.clone());
+                    }
+                }
                 let llm_off = {
                     let llm = crate::configcmd::current().llm;
                     !llm.enabled || llm.api_key.is_empty()
