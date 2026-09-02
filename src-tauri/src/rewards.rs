@@ -16,6 +16,9 @@ use tauri::{AppHandle, Manager};
 pub const EVENT_REWARDS: &str = "pet://rewards";
 
 /// 特效种类。前端按小写名渲染对应动画。
+///
+/// 池子 3 → 10（2026-08-31 设计 7.4）：新增 7 个均为少量 fillRect 可完成、
+/// 符合像素风的图样。隔天失效的规则不变 —— 稀有感来自「今天集齐了什么」。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RewardEffect {
@@ -25,11 +28,36 @@ pub enum RewardEffect {
     Bubbles,
     /// 身上偶尔闪星星。
     Sparkle,
+    /// 头顶小芽。
+    Leaf,
+    /// 头顶光环。
+    Halo,
+    /// 头顶小王冠。
+    Crown,
+    /// 身旁飘音符。
+    Music,
+    /// 身旁冒爱心。
+    Heart,
+    /// 身后燃火苗。
+    Fire,
+    /// 戴上小眼镜。
+    Glasses,
 }
 
 impl RewardEffect {
-    pub fn all() -> [RewardEffect; 3] {
-        [RewardEffect::Tomato, RewardEffect::Bubbles, RewardEffect::Sparkle]
+    pub fn all() -> [RewardEffect; 10] {
+        [
+            RewardEffect::Tomato,
+            RewardEffect::Bubbles,
+            RewardEffect::Sparkle,
+            RewardEffect::Leaf,
+            RewardEffect::Halo,
+            RewardEffect::Crown,
+            RewardEffect::Music,
+            RewardEffect::Heart,
+            RewardEffect::Fire,
+            RewardEffect::Glasses,
+        ]
     }
 
     /// 中文名，供提示文案。
@@ -38,6 +66,13 @@ impl RewardEffect {
             RewardEffect::Tomato => "吃番茄",
             RewardEffect::Bubbles => "吐泡泡",
             RewardEffect::Sparkle => "星星闪",
+            RewardEffect::Leaf => "头顶小芽",
+            RewardEffect::Halo => "头顶光环",
+            RewardEffect::Crown => "小王冠",
+            RewardEffect::Music => "飘音符",
+            RewardEffect::Heart => "冒爱心",
+            RewardEffect::Fire => "身后燃",
+            RewardEffect::Glasses => "小眼镜",
         }
     }
 
@@ -47,6 +82,13 @@ impl RewardEffect {
             RewardEffect::Tomato => "🍅",
             RewardEffect::Bubbles => "🫧",
             RewardEffect::Sparkle => "✨",
+            RewardEffect::Leaf => "🌱",
+            RewardEffect::Halo => "😇",
+            RewardEffect::Crown => "👑",
+            RewardEffect::Music => "🎵",
+            RewardEffect::Heart => "💗",
+            RewardEffect::Fire => "🔥",
+            RewardEffect::Glasses => "👓",
         }
     }
 }

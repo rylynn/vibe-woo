@@ -26,6 +26,12 @@ const PHASE_LABELS: Record<string, string> = {
   break: "休息中",
 };
 
+function fmtHours(secs: number): string {
+  return secs >= 3600
+    ? `${(secs / 3600).toFixed(1)} 小时`
+    : `${Math.round(secs / 60)} 分钟`;
+}
+
 const ENABLE_HINT =
   "开启后进入工作/休息循环；休息期间键鼠活动累计不超过 1 分钟算认真休息，会得到当天限定的外观特效（隔天失效）";
 
@@ -50,12 +56,32 @@ export const pomodoroFrontend: PluginFrontend = {
   },
 
   renderSection(data) {
-    const s = data as { enabled: boolean; phase: string; pomodoros_today: number };
+    const s = data as {
+      enabled: boolean;
+      phase: string;
+      pomodoros_today: number;
+      deep_count: number;
+      bond: number;
+      week_active: number;
+      focus_secs?: number;
+    };
     const el = document.createElement("div");
     el.className = "pet-card-pomodoro-section";
-    el.textContent = s.enabled
-      ? `${PHASE_LABELS[s.phase] ?? s.phase} · 今天 ${s.pomodoros_today} 个番茄`
-      : "未启用";
+    if (!s.enabled) {
+      el.textContent = "未启用";
+      return el;
+    }
+    const line1 = document.createElement("div");
+    line1.textContent = `${PHASE_LABELS[s.phase] ?? s.phase} · 今天 ${s.pomodoros_today} 个番茄（深度 ${s.deep_count}）`;
+    el.appendChild(line1);
+    const line2 = document.createElement("div");
+    line2.textContent = `成长值 ${s.bond} · 本周活跃 ${s.week_active}/7 天`;
+    el.appendChild(line2);
+    if (s.focus_secs && s.focus_secs > 0) {
+      const line3 = document.createElement("div");
+      line3.textContent = `今日专注 ${fmtHours(s.focus_secs)}`;
+      el.appendChild(line3);
+    }
     return el;
   },
 

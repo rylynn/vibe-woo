@@ -58,7 +58,18 @@ const POKE_FEEDBACK_MS = 400;
 const GAZE_RANGE = 3.2;
 
 /** 今日特效奖励（认真休息所得，隔天失效）。 */
-export type RewardEffect = "tomato" | "bubbles" | "sparkle";
+/** 特效池（与 Rust rewards::RewardEffect 对齐，2026-08-31 设计 7.4 扩到 10）。 */
+export type RewardEffect =
+  | "tomato"
+  | "bubbles"
+  | "sparkle"
+  | "leaf"
+  | "halo"
+  | "crown"
+  | "music"
+  | "heart"
+  | "fire"
+  | "glasses";
 
 /** 深夜黑眼圈颜色。 */
 const TIRED_COLOR = "#4a5a7a";
@@ -571,6 +582,98 @@ export class Pet {
         ctx.fillRect(sx, sy - size, size, size);
         ctx.fillRect(sx, sy + size, size, size);
       }
+    }
+
+    // —— 特效池扩容（2026-08-31 设计 7.4）：全部少量 fillRect、
+    // 无状态、由 nowMs 确定性驱动，与既有三个同一套约束。 ——
+
+    if (this.effects.has("leaf")) {
+      // 头顶小芽：茎 + 两片叶，随风摆动（1.6s 一周期左右各 1px）
+      const sway = Math.sin((nowMs / 1600) * Math.PI * 2) > 0 ? 1 : 0;
+      const bx = Math.round(px + w / 2 - cell / 2);
+      const by = Math.round(py - cell * 2);
+      ctx.fillStyle = "#5ccc6a";
+      ctx.fillRect(bx + sway, by, cell, cell * 2); // 茎
+      ctx.fillRect(bx - cell + sway, by, cell, cell); // 左叶
+      ctx.fillRect(bx + cell + sway, by, cell, cell); // 右叶
+    }
+
+    if (this.effects.has("halo")) {
+      // 头顶光环：点阵椭圆环（棋盘 alpha=1，沿用 dither 手法）
+      const cy = Math.round(py - cell * 2);
+      const cx = Math.round(px + w / 2);
+      ctx.fillStyle = "#ffe066";
+      const rx = Math.max(3, Math.round(w / 5));
+      for (let i = -rx; i <= rx; i += cell) {
+        if ((i / cell) % 2 !== 0) continue; // 棋盘点阵
+        const dy = Math.round(Math.sqrt(Math.max(0, rx * rx - i * i)) / 2);
+        ctx.fillRect(cx + i, cy - dy, cell, cell);
+        if (dy !== 0) ctx.fillRect(cx + i, cy + dy, cell, cell);
+      }
+    }
+
+    if (this.effects.has("crown")) {
+      // 头顶小王冠：底沿 + 三个尖齿，金色
+      const cw = cell * 5;
+      const cx = Math.round(px + w / 2 - cw / 2);
+      const cy = Math.round(py - cell * 2);
+      ctx.fillStyle = "#ffd24a";
+      ctx.fillRect(cx, cy + cell, cw, cell); // 底沿
+      ctx.fillRect(cx, cy, cell, cell); // 左齿
+      ctx.fillRect(cx + cell * 2, cy, cell, cell); // 中齿
+      ctx.fillRect(cx + cell * 4, cy, cell, cell); // 右齿
+    }
+
+    if (this.effects.has("music")) {
+      // 身旁飘音符：四分音符（符头 + 符干），2.4s 一轮上浮消散
+      const p = ((nowMs / 2400) % 1 + 1) % 1;
+      if (p < 0.7) {
+        const size = cell;
+        const nx = Math.round(px - cell - p * w * 0.15);
+        const ny = Math.round(py + h * 0.4 - p * h * 0.6);
+        ctx.fillStyle = "#a8c0ff";
+        ctx.fillRect(nx, ny, size, size); // 符头
+        ctx.fillRect(nx + size, ny - cell * 3, Math.max(1, size - 1), cell * 3); // 符干
+      }
+    }
+
+    if (this.effects.has("heart")) {
+      // 身旁冒爱心：2s 一轮，两格宽的心形像素图样
+      const p = ((nowMs / 2000) % 1 + 1) % 1;
+      if (p < 0.6) {
+        const size = cell;
+        const hx = Math.round(px + w - cell + p * w * 0.1);
+        const hy = Math.round(py + h * 0.35 - p * h * 0.5);
+        ctx.fillStyle = "#ff8fab";
+        ctx.fillRect(hx, hy, size, size);
+        ctx.fillRect(hx + size * 2, hy, size, size);
+        ctx.fillRect(hx - 0, hy + size, size * 3, size);
+        ctx.fillRect(hx + size, hy + size * 2, size, size);
+      }
+    }
+
+    if (this.effects.has("fire")) {
+      // 身后燃火苗：两段焰心错相位跳动（0.3s 一拍），暖色
+      const flick = Math.floor(nowMs / 300) % 2;
+      const fx = Math.round(px - cell * 3);
+      const fy = Math.round(py + h - cell * 3);
+      ctx.fillStyle = "#ff7a3c";
+      ctx.fillRect(fx, fy, cell, cell * 2);
+      ctx.fillRect(fx - cell, fy + cell, cell * 3, cell);
+      ctx.fillStyle = "#ffd24a";
+      ctx.fillRect(fx, fy + cell + (flick ? 0 : cell), cell, cell); // 焰心闪动
+    }
+
+    if (this.effects.has("glasses")) {
+      // 戴上小眼镜：两镜框 + 鼻梁，画在眼睛行（身体上 1/3 处）
+      const gs = Math.max(2, cell * 2);
+      const gy = Math.round(py + h * 0.3);
+      const gap = Math.max(1, cell);
+      const lx = Math.round(px + w / 2 - gs - gap / 2 - cell);
+      ctx.fillStyle = "#bfe9ff";
+      ctx.fillRect(lx, gy, gs, gs);
+      ctx.fillRect(lx + gs + gap + cell * 2, gy, gs, gs);
+      ctx.fillRect(lx + gs, gy + gs / 2, gs + gap + cell * 2, Math.max(1, cell - 1)); // 鼻梁
     }
   }
 

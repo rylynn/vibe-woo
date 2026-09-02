@@ -191,6 +191,16 @@ pub fn spawn(app: &AppHandle) {
             // 当日记忆推进（跨天自动清零）
             if slow_dt > 0.0 {
                 memory::update(&next, slow_dt, day_secs(hour));
+                // 专注判定喂数（2026-08-31 设计 P1）：番茄工作期才累计，
+                // 未激活时是空操作，无番茄的用户零成本。
+                crate::focus::sample(
+                    crate::focus::on_task_now(
+                        snap.app.is_producing(),
+                        snap.keyboard_idle_secs,
+                    ),
+                    bundle,
+                    slow_dt,
+                );
                 // 习惯记忆推进（跨天落盘，滚动保留 14 天）
                 if let Some(ctx) = crate::reminddrive::local_now() {
                     habitmemory::observe(

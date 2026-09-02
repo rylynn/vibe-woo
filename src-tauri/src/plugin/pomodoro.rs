@@ -268,22 +268,50 @@ impl Plugin for PomodoroPlugin {
                 // 阶段切换卡全部 High：番茄的每个相位迁移都是用户显式开启的、
                 // 必须立刻送达的时刻。尤其 work_start —— tick 里刚置位「工作期」，
                 // host 随后才 offer 卡，Normal 会被自己设的闸门吞到休息期才补发。
-                Transition::WorkStart { mins } => cards.push(make_card(
-                    "work_start",
-                    mins,
-                    format!("番茄开始：专注 {mins} 分钟，我在旁边盯着你"),
-                    Priority::High,
-                    8,
-                )),
+                Transition::WorkStart { mins } => {
+                    // 专注判定开始累计（sensedrive 持续喂数，见 focus.rs）
+                    crate::focus::start();
+                    cards.push(make_card(
+                        "work_start",
+                        mins,
+                        format!("番茄开始：专注 {mins} 分钟，我在旁边盯着你"),
+                        Priority::High,
+                        8,
+                    ))
+                }
                 Transition::BreakStart { mins } => {
                     // 一个工作期完成（进入休息）—— 用量计数（原语义）
                     crate::usage::bump(crate::usage::Kind::Pomodoro);
+                    // 专注判定出口（2026-08-31 设计 P1/P2）：Deep 发成长值
+                    //（无穷尽），Normal 只计数 —— 判定只用于发奖励，绝不惩罚。
+                    let (grade, focus_secs) = crate::focus::finish();
+                    let today = crate::reminddrive::local_now()
+                        .map(|c| c.date)
+                        .unwrap_or_default();
+                    let gained =
+                        crate::stats::on_pomodoro(grade, focus_secs, &today, ctx.app);
+                    // Deep 的 12% 稀有掉落：额外掉一个未拥有的特效
+                    //（池满时 grant_random 返回 None，自然退化为只给成长值）
+                    let rare = if crate::stats::rare_drop_rolled(grade) {
+                        crate::rewards::grant_random(ctx.app, &today)
+                    } else {
+                        None
+                    };
+                    if rare.is_some() {
+                        push_rewards(ctx.app, &today, rare);
+                    }
+                    let deep_note = match grade {
+                        crate::focus::Grade::Deep => {
+                            format!("这轮专注得很深！成长值 +{gained}\n")
+                        }
+                        crate::focus::Grade::Normal => String::new(),
+                    };
                     // 停留 10 分钟：休息开始是必须被看见的时刻，
                     // 无人互动也别提前消失（原通知条语义）
                     cards.push(make_card(
                         "break_start",
                         mins,
-                        format!("番茄时间到！休息 {mins} 分钟：别碰键盘和鼠标，喝口水活动一下"),
+                        format!("{deep_note}番茄时间到！休息 {mins} 分钟：别碰键盘和鼠标，喝口水活动一下"),
                         Priority::High,
                         600,
                     ));
@@ -385,6 +413,10 @@ pub fn meta(app: &tauri::AppHandle) -> PluginMeta {
         Some(v) => (v.phase, v.pomodoros_today),
         None => ("idle", 0),
     };
+    let today = crate::reminddrive::local_now()
+        .map(|c| c.date)
+        .unwrap_or_default();
+    let st = crate::stats::snapshot(&today);
     PluginMeta {
         id: ID.into(),
         name: "番茄工作法".into(),
@@ -393,6 +425,10 @@ pub fn meta(app: &tauri::AppHandle) -> PluginMeta {
             "enabled": cfg.enabled,
             "phase": phase,
             "pomodoros_today": pomodoros,
+            "deep_count": st.deep_count,
+            "bond": st.bond,
+            "focus_secs": st.focus_secs,
+            "week_active": st.active_days.iter().filter(|d| **d).count(),
         }),
     }
 }

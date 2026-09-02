@@ -728,8 +728,14 @@ mod tests {
                 for w in &book.words {
                     assert!(!w.term.is_empty(), "term 为空：{lang}/{id}");
                     assert!(!w.meaning.is_empty(), "释义为空：{}", w.term);
-                    assert!(!w.example.is_empty(), "例句为空：{}", w.term);
                     assert!(!w.domain.is_empty(), "领域为空：{}", w.term);
+                    // 例句与音标允许为空：ECDICT 扩展词书（*_x）无例句，
+                    // 例句由 LLM 异步增强补；音标缺失的词照常出卡。
+                    assert!(
+                        !w.example.is_empty() || id.ends_with("_x"),
+                        "例句为空且非扩展词书：{}（{lang}/{id}）",
+                        w.term
+                    );
                     assert!(
                         matches!(w.level.as_str(), "beginner" | "intermediate" | "advanced"),
                         "水平非法：{} -> {}",
@@ -746,8 +752,9 @@ mod tests {
         let d = dict();
         let en: usize = d.english.values().map(|b| b.words.len()).sum();
         let ja: usize = d.japanese.values().map(|b| b.words.len()).sum();
-        assert!(en >= 100, "英语词量 {en} 应不少于 100");
-        assert!(ja >= 90, "日语词量 {ja} 应不少于 90");
+        // 2026-09-02 扩容基线：手写英 474 / 日 481 + ECDICT 扩展 1300
+        assert!(en >= 1700, "英语词量 {en} 应不少于 1700");
+        assert!(ja >= 450, "日语词量 {ja} 应不少于 450");
 
         let daily = &d.english["daily"];
         let domains: std::collections::HashSet<&str> =

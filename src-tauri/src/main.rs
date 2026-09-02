@@ -7,6 +7,7 @@ mod appclass;
 mod config;
 mod configcmd;
 mod envsense;
+mod focus;
 mod habitdrive;
 mod habitmemory;
 mod hittest;
@@ -26,6 +27,7 @@ mod reminddrive;
 mod rewards;
 mod sensedrive;
 mod socialdrive;
+mod stats;
 mod share;
 mod social;
 mod socialcmd;
@@ -120,6 +122,7 @@ fn main() {
 
             let cfg = configcmd::init(app.handle());
             rewards::init(app.handle());
+            stats::init(app.handle());
             eprintln!(
                 "[config] 已载入：尺寸档位={} 范围={:?} 人格={:?}",
                 cfg.size_index, cfg.roam_scope, cfg.persona

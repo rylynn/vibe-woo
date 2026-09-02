@@ -1,4 +1,4 @@
-import { Pet, SIZE_STEPS } from "./pet";
+import { Pet, SIZE_STEPS, type RewardEffect } from "./pet";
 import { startBoxReporter, requestQuit, type EventCounters } from "./bridge";
 import type { Box } from "./interact/hit-test";
 import { ContextMenu } from "./overlay/context-menu";
@@ -443,18 +443,28 @@ function notifyNearPet(text: string): void {
 
 // —— 番茄工作法已迁为插件：阶段通知走 pet://plugin-card（见上方监听） ——
 
-// —— 今日特效奖励：认真休息所得，隔天失效 ——
+// —— 今日特效奖励：认真休息所得，隔天失效（池子 10 种） ——
 interface RewardsEvent {
-  effects: ("tomato" | "bubbles" | "sparkle")[];
-  granted: "tomato" | "bubbles" | "sparkle" | null;
+  effects: string[];
+  granted: string | null;
 }
 const REWARD_LABELS: Record<string, string> = {
   tomato: "吃番茄 🍅",
   bubbles: "吐泡泡 🫧",
   sparkle: "星星闪 ✨",
+  leaf: "头顶小芽 🌱",
+  halo: "头顶光环 😇",
+  crown: "小王冠 👑",
+  music: "飘音符 🎵",
+  heart: "冒爱心 💗",
+  fire: "身后燃 🔥",
+  glasses: "小眼镜 👓",
 };
 void listen<RewardsEvent>("pet://rewards", (e) => {
-  pet.setEffects(e.payload.effects);
+  // 未知特效名丢弃（前端老、后端新时向前兼容）
+  pet.setEffects(
+    e.payload.effects.filter((x): x is RewardEffect => x in REWARD_LABELS),
+  );
   if (e.payload.granted) {
     // 刚获得新特效：宠物高兴地宣布（重要时刻，用通知条）
     notifyNearPet(

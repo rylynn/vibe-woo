@@ -77,10 +77,13 @@ export const wordFrontend: PluginFrontend = {
       el.appendChild(hook);
     }
 
-    const example = document.createElement("div");
-    example.className = "pet-word-example";
-    example.textContent = p.example;
-    el.appendChild(example);
+    // 例句可为空（ECDICT 扩展词书无例句，由 LLM 异步增强补）
+    if (p.example) {
+      const example = document.createElement("div");
+      example.className = "pet-word-example";
+      example.textContent = p.example;
+      el.appendChild(example);
+    }
 
     // 反馈闭环：认识 / 没印象（点击后由 cardHost 关闭气泡）
     const actions = document.createElement("div");
