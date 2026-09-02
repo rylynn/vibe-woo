@@ -32,13 +32,15 @@ pub const ID: &str = "words";
 /// 学习状态文件名（与配置分开：配置是用户域，状态是程序域）。
 const STATE_FILE: &str = "words-srs";
 
-/// 「休息时」判定（纯函数，单测入口）：歇着、走开、或在前台刷网页。
-/// 首版只认 Resting/Browsing —— 实测人走开时 tempo 未必到 Resting，
-/// 把 Away 也算上，否则「走开等词卡」永远等不到。
-fn is_resting(s: &crate::state::PetState) -> bool {
-    s.tempo == crate::state::Tempo::Resting
-        || s.doing == crate::state::Doing::Browsing
-        || s.doing == crate::state::Doing::Away
+/// 「休息时」的键盘静默阈值（秒）。
+/// 一个信号统一表达「手离开键盘了」：走开、歇着、刷网页、盯着屏幕
+/// 想事情 —— 比多状态判定（Resting/Browsing/Away）更准也更简单。
+const REST_IDLE_SECS: f64 = 60.0;
+
+/// 「休息时」判定（纯函数，单测入口）。采样不可用（None）视为不休息
+/// —— 测不准就别打扰，与 pomodoro 的 Unknown 原则一致。
+fn idle_is_resting(idle_secs: Option<f64>) -> bool {
+    idle_secs.is_some_and(|i| i >= REST_IDLE_SECS)
 }
 
 /// 预览接下来要学的词（面板展示用）：连续 pick，已选的标记远期防止重复。
@@ -418,12 +420,10 @@ impl Plugin for WordsPlugin {
             }
             // 首卡不设防：启用后当日第一张立即出现 —— 开了插件却什么都
             // 看不到是最差的默认体验，先让用户确认它在工作，再进入
-            // 「只在休息时弹」的节奏（时间窗是插件业务，不进仲裁器）。
+            // 「键盘静默 1 分钟才弹」的节奏（时间窗是插件业务，不进仲裁器）。
             if cfg.only_resting && s.served_count > 0 {
-                let Some(st) = ctx.state() else {
-                    return None;
-                };
-                if !is_resting(&st) {
+                let idle = crate::sensor::keyboard_idle_secs();
+                if !idle_is_resting(idle) {
                     return None;
                 }
             }
@@ -756,22 +756,12 @@ mod tests {
     }
 
     #[test]
-    fn 休息判定覆盖歇着走开与刷网页() {
-        use crate::state::{Doing, Tempo};
-        let pstate = |doing, tempo| crate::state::PetState {
-            doing,
-            tempo,
-            late_night: false,
-            keystrokes_per_min: 0.0,
-            mood: crate::mood::Mood::Focused,
-            activity: crate::activity::Activity::Working,
-            dnd_on: false,
-        };
-        assert!(is_resting(&pstate(Doing::Browsing, Tempo::Normal)), "刷网页算休息");
-        assert!(is_resting(&pstate(Doing::Away, Tempo::Normal)), "走开算休息");
-        assert!(is_resting(&pstate(Doing::Other, Tempo::Resting)), "歇着算休息");
-        assert!(!is_resting(&pstate(Doing::Editing, Tempo::Flow)), "心流中不打扰");
-        assert!(!is_resting(&pstate(Doing::Editing, Tempo::Normal)), "干活时不打扰");
+    fn 休息判定以键盘静默一分钟为准() {
+        assert!(idle_is_resting(Some(60.0)), "静默满 1 分钟算休息");
+        assert!(idle_is_resting(Some(600.0)), "走开（长时间静默）算休息");
+        assert!(!idle_is_resting(Some(59.9)), "差一秒都不算");
+        assert!(!idle_is_resting(Some(0.0)), "正在敲键盘不算");
+        assert!(!idle_is_resting(None), "采样不可用视为不休息 —— 测不准就别打扰");
     }
 
     #[test]

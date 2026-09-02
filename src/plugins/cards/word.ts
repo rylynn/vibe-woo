@@ -207,14 +207,14 @@ export const wordFrontend: PluginFrontend = {
     rest.type = "checkbox";
     rest.checked = c.only_resting;
     const restLabel = document.createElement("span");
-    restLabel.textContent = "只在休息时弹";
+    restLabel.textContent = "静默 1 分钟才弹";
     numRow.append(limitLabel, limit, rest, restLabel);
     el.appendChild(numRow);
 
     const hint = document.createElement("div");
     hint.className = "pet-plugin-form-hint";
     hint.textContent =
-      "开启后第一张立即出现；之后只在休息时（走开、歇着或刷网页）弹。词与释义来自内置词库（雅思/托福/日常 × 英日）；配置 AI 后例句与记忆钩子按你的目标定制。没印象的词 10 分钟后会再回来";
+      "开启后第一张立即出现；之后在键盘静默 1 分钟后才弹（走开、歇着、刷网页、想事情都算）。词与释义来自内置词库（雅思/托福/日常 × 英日）；配置 AI 后例句与记忆钩子按你的目标定制。没印象的词 10 分钟后会再回来";
     el.appendChild(hint);
 
     const save = document.createElement("button");
