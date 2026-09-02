@@ -12,6 +12,7 @@ import {
 import { enablePanelDrag } from "./panel-drag";
 import { avatarFromView, type PetAvatar } from "../avatar/types";
 import { drawAvatarStill } from "./avatar-picker";
+import { PluginSettingsShell } from "../plugins/settings";
 
 /** 形象相关操作流（由 main.ts 装配，避免设置面板直接依赖弹窗与持久化）。 */
 export interface AvatarFlow {
@@ -54,6 +55,8 @@ export class SettingsPanel {
   private readonly el: HTMLDivElement;
   private open = false;
   private cfg: ConfigView | null = null;
+  /** 当前页：main = 主表单；plugins = 插件清单（二级）；plugin:<id> = 插件表单（三级）。 */
+  private page: string = "main";
 
   constructor(
     private readonly onApply: (c: ConfigView) => void,
@@ -108,6 +111,8 @@ export class SettingsPanel {
     }
     this.el.style.display = "none";
     this.open = false;
+    // 关闭即回主表单 —— 下次打开不留在深层页面
+    this.page = "main";
   }
 
   get isOpen(): boolean {
@@ -143,8 +148,18 @@ export class SettingsPanel {
     const c = this.cfg;
     if (!c) return;
 
+    // 页面分发：插件清单（二级）/ 插件表单（三级）/ 主表单
+    if (this.page === "plugins") {
+      this.renderPluginsPage();
+      return;
+    }
+    if (this.page.startsWith("plugin:")) {
+      this.renderPluginPage(this.page.slice("plugin:".length));
+      return;
+    }
+
     this.el.replaceChildren();
-    this.el.appendChild(this.header());
+    this.el.appendChild(this.header("Vibe Pet 设置"));
 
     this.el.appendChild(
       this.rowSelect("大小", SIZE_LABELS, c.size_index, (i) =>
@@ -203,24 +218,14 @@ export class SettingsPanel {
     );
     this.el.appendChild(this.hint("留空则只存内置目录"));
 
-    this.el.appendChild(this.divider("番茄工作法"));
+    // 插件：入口行 → 二级页（插件清单）→ 三级页（各自配置）。
+    // 表单由各插件自己的 renderSettings 提供。
+    this.el.appendChild(this.divider("插件"));
     this.el.appendChild(
-      this.rowCheck(
-        "启用",
-        c.pomodoro_enabled,
-        (v) => this.patch({ pomodoro_enabled: v }),
-        "开启后进入工作/休息循环；休息期间键鼠活动累计不超过 1 分钟算认真休息，会得到当天限定的外观特效（隔天失效）",
-      ),
-    );
-    this.el.appendChild(
-      this.rowNumber("工作分钟", c.pomodoro_work_mins, (v) =>
-        this.patch({ pomodoro_work_mins: v }),
-      ),
-    );
-    this.el.appendChild(
-      this.rowNumber("休息分钟", c.pomodoro_break_mins, (v) =>
-        this.patch({ pomodoro_break_mins: v }),
-      ),
+      this.entryRow("插件配置", () => {
+        this.page = "plugins";
+        this.render();
+      }),
     );
 
     this.el.appendChild(this.divider("AI 接入"));
@@ -331,11 +336,23 @@ export class SettingsPanel {
     return r;
   }
 
-  private header(): HTMLElement {
+  /** 标题栏。onBack 提供时左侧出现返回按钮（二级/三级页）。 */
+  private header(title: string, onBack?: () => void): HTMLElement {
     const h = document.createElement("div");
     h.className = "pet-settings-head";
+    if (onBack) {
+      const back = document.createElement("button");
+      back.className = "pet-settings-back";
+      back.textContent = "‹ 返回";
+      back.title = "返回上一页";
+      back.addEventListener("pointerdown", (e) => {
+        e.stopPropagation();
+        onBack();
+      });
+      h.appendChild(back);
+    }
     const t = document.createElement("span");
-    t.textContent = "Vibe Pet 设置";
+    t.textContent = title;
     const x = document.createElement("button");
     x.className = "pet-settings-close";
     x.textContent = "×";
@@ -345,6 +362,51 @@ export class SettingsPanel {
     });
     h.append(t, x);
     return h;
+  }
+
+  /** 二级页：插件清单，点选进入三级页。 */
+  private renderPluginsPage(): void {
+    this.el.replaceChildren();
+    this.el.appendChild(
+      this.header("插件配置", () => {
+        this.page = "main";
+        this.render();
+      }),
+    );
+    const box = document.createElement("div");
+    this.el.appendChild(box);
+    new PluginSettingsShell().renderList(box, (id) => {
+      this.page = `plugin:${id}`;
+      this.render();
+    });
+  }
+
+  /** 三级页：单个插件的配置表单。 */
+  private renderPluginPage(id: string): void {
+    this.el.replaceChildren();
+    this.el.appendChild(
+      this.header("插件配置", () => {
+        this.page = "plugins";
+        this.render();
+      }),
+    );
+    const box = document.createElement("div");
+    this.el.appendChild(box);
+    new PluginSettingsShell().renderPlugin(box, id);
+  }
+
+  /** 可点击的入口行（主表单 → 二级页）。 */
+  private entryRow(label: string, onOpen: () => void): HTMLElement {
+    const r = this.row(label);
+    const btn = document.createElement("button");
+    btn.className = "pet-settings-entry";
+    btn.textContent = "配置 ›";
+    btn.addEventListener("pointerdown", (e) => {
+      e.stopPropagation();
+      onOpen();
+    });
+    r.appendChild(btn);
+    return r;
   }
 
   private divider(text: string): HTMLElement {
@@ -421,37 +483,6 @@ export class SettingsPanel {
     if (maxLength !== undefined) input.maxLength = maxLength;
     const commit = () => {
       if (input.value !== value) onCommit(input.value);
-    };
-    input.addEventListener("change", commit);
-    input.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") commit();
-      e.stopPropagation();
-    });
-    r.appendChild(input);
-    return r;
-  }
-
-  /** 数字输入行（分钟数等）。非法输入不提交。 */
-  private rowNumber(
-    label: string,
-    value: number,
-    onCommit: (v: number) => void,
-  ): HTMLElement {
-    const r = this.row(label);
-    const input = document.createElement("input");
-    input.type = "number";
-    input.value = String(value);
-    input.spellcheck = false;
-    input.style.width = "72px";
-    const commit = () => {
-      const n = Math.floor(Number(input.value));
-      // 非法输入（空/非数字/小于 1）回显为当前配置值，
-      // 避免输入框显示与实际配置静默不一致；合法但超范围值由后端钳制后经 patch 重渲染回显
-      if (!Number.isFinite(n) || n < 1 || n === value) {
-        input.value = String(value);
-        return;
-      }
-      onCommit(n);
     };
     input.addEventListener("change", commit);
     input.addEventListener("keydown", (e) => {

@@ -423,6 +423,7 @@ src/                          前端（TypeScript，无框架）
 ├── anim/                     行为、呼吸、微表情、帧率预算
 ├── interact/                 拖动、命中判定
 ├── overlay/                  速记、设置、提醒、今日速记、好友、气泡与通知条、菜单
+├── plugins/                  插件前端：渲染器注册表 / 左键插件面板 / 各插件卡片与设置
 ├── bridge.ts                 穿透区域上报（50ms 心跳）
 └── state.ts                  Rust 推送状态的类型定义
 
@@ -435,7 +436,11 @@ src-tauri/src/               Rust 后端
 ├── talkdrive.rs             定时说话（人格频率硬性要求）
 ├── react.rs                 事件驱动的即时反应（本地语料，带冷却）
 ├── reminddrive.rs           每日提醒触发与稍后重响
-├── pomodorodrive.rs         番茄循环 + 休息验证
+├── plugin/                  插件系统：契约 / 单线程宿主 / 打扰仲裁器 / 每插件配置
+│   ├── pomodoro.rs          番茄钟（循环 + 休息验证 + 认真休息奖励）
+│   ├── words.rs             学外语（内置词库 + SRS 间隔重复 + LLM 增强）
+│   ├── news.rs              每日资讯（RSS 抓取 + 当日缓存 + LLM 一句点评）
+│   └── stocks.rs            股市投资（腾讯行情 + 时段过滤 + 收盘小结）
 ├── rewards.rs               当日特效奖励（隔天失效）
 ├── persona.rs / llm.rs      人格语料与 prompt / 三种 LLM 协议
 ├── socialdrive.rs           心跳、好友、自动串门

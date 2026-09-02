@@ -19,7 +19,7 @@ mod note;
 mod notecmd;
 mod passthrough;
 mod persona;
-mod pomodorodrive;
+mod plugin;
 mod react;
 mod reminder;
 mod reminddrive;
@@ -99,7 +99,11 @@ fn main() {
             configcmd::get_config,
             configcmd::update_config,
             appinfo::get_app_info,
-            reminddrive::snooze_reminder
+            reminddrive::snooze_reminder,
+            plugin::plugin_summary,
+            plugin::plugin_get_config,
+            plugin::plugin_set_config,
+            plugin::words::words_feedback
         ])
         .setup(|app| {
             // 不出现在 Dock 与 Cmd+Tab。等价于 LSUIElement，
@@ -129,8 +133,7 @@ fn main() {
             reminddrive::spawn(app.handle());
             talkdrive::spawn(app.handle());
             socialdrive::spawn(app.handle());
-            pomodorodrive::spawn(app.handle());
-            pomodorodrive::push_initial_rewards(app.handle());
+            plugin::host::spawn(app.handle());
 
             eprintln!("[pet] ready. kill switch: Ctrl+Alt+Cmd+Q");
             Ok(())

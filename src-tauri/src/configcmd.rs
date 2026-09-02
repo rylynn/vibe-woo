@@ -62,9 +62,6 @@ pub struct ConfigView {
     pub autostart: bool,
     pub notes_vault: String,
     pub reminders: Vec<crate::reminder::Reminder>,
-    pub pomodoro_enabled: bool,
-    pub pomodoro_work_mins: u32,
-    pub pomodoro_break_mins: u32,
     /// 习惯记忆开关。关掉后不再用 LLM 归纳作息与风格。
     pub habit_enabled: bool,
     pub coding_apps: Vec<String>,
@@ -99,9 +96,6 @@ fn to_view(c: &Config) -> ConfigView {
         autostart: c.autostart,
         notes_vault: c.notes_vault.clone(),
         reminders: c.reminders.clone(),
-        pomodoro_enabled: c.pomodoro.enabled,
-        pomodoro_work_mins: c.pomodoro.work_mins,
-        pomodoro_break_mins: c.pomodoro.break_mins,
         habit_enabled: c.habit_enabled,
         coding_apps: c.coding_apps.clone(),
         browsing_apps: c.browsing_apps.clone(),
@@ -141,9 +135,6 @@ pub struct ConfigPatch {
     pub autostart: Option<bool>,
     pub notes_vault: Option<String>,
     pub reminders: Option<Vec<crate::reminder::Reminder>>,
-    pub pomodoro_enabled: Option<bool>,
-    pub pomodoro_work_mins: Option<u32>,
-    pub pomodoro_break_mins: Option<u32>,
     pub habit_enabled: Option<bool>,
     pub coding_apps: Option<Vec<String>>,
     pub browsing_apps: Option<Vec<String>>,
@@ -184,16 +175,6 @@ pub fn update_config(app: AppHandle, patch: ConfigPatch) -> Result<ConfigView, S
     }
     if let Some(v) = patch.reminders {
         cfg.reminders = v;
-    }
-    if let Some(v) = patch.pomodoro_enabled {
-        cfg.pomodoro.enabled = v;
-    }
-    if let Some(v) = patch.pomodoro_work_mins {
-        // 钳制到合理区间：太短失去意义，太长形同虚设
-        cfg.pomodoro.work_mins = v.clamp(1, 120);
-    }
-    if let Some(v) = patch.pomodoro_break_mins {
-        cfg.pomodoro.break_mins = v.clamp(1, 60);
     }
     if let Some(v) = patch.habit_enabled {
         cfg.habit_enabled = v;

@@ -137,31 +137,6 @@ impl Default for RoamScope {
     }
 }
 
-/// 番茄工作法配置。
-///
-/// 开启后进入「工作 → 休息」循环；休息期间键鼠累计活跃不超过一分钟
-/// 视为认真休息，宠物发当天特效奖励。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct PomodoroConfig {
-    /// 总开关。关闭即完全静默，不进入循环。
-    pub enabled: bool,
-    /// 工作时长（分钟）。
-    pub work_mins: u32,
-    /// 休息时长（分钟）。
-    pub break_mins: u32,
-}
-
-impl Default for PomodoroConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            work_mins: 25,
-            break_mins: 5,
-        }
-    }
-}
-
 /// 身体形状（形象维度，与前端 BodyShape 对齐）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -281,8 +256,6 @@ pub struct Config {
     pub notes_vault: String,
     /// 每日提醒列表。
     pub reminders: Vec<crate::reminder::Reminder>,
-    /// 番茄工作法。
-    pub pomodoro: PomodoroConfig,
     /// 习惯记忆：每 12 小时用 LLM 归纳一次作息规律、生活习惯与应用风格，
     /// 作为宠物说话的物料。关掉只停分析，已积累的日志保留。
     ///
@@ -314,7 +287,6 @@ impl Default for Config {
             autostart: false,
             notes_vault: String::new(),
             reminders: Vec::new(),
-            pomodoro: PomodoroConfig::default(),
             habit_enabled: true,
             coding_apps: Vec::new(),
             browsing_apps: Vec::new(),

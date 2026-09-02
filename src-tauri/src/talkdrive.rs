@@ -75,6 +75,14 @@ pub fn spawn(app: &AppHandle) {
                 continue;
             }
 
+            // 番茄工作期 / 刚展示过插件卡片：插件信息优先，闲聊让位
+            //（2026-08-31 番茄设计 2.2：跳过不排队，本来就是闲聊，不积压）。
+            // 同样只做短重试，不消耗说话间隔 —— 休息期只补一句，不连珠炮。
+            if !crate::plugin::arbiter::allow_ambient() {
+                next_at = now + Duration::from_secs(RETRY_SECS);
+                continue;
+            }
+
             let source;
             let text = match rt.block_on(async {
                 if cfg.llm.api_key.is_empty() {

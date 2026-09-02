@@ -678,6 +678,352 @@
         color: #6d768c;
       }
 
+      /* 插件卡片气泡内容 */
+      .pet-bubble-card {
+        max-width: 260px;
+        max-height: 180px;
+        overflow-y: auto;
+        font: 12px/1.5 ui-sans-serif, -apple-system, system-ui, sans-serif;
+        color: #e8ecf4;
+      }
+
+      .pet-card-tag {
+        font-size: 10px;
+        color: #7cf5c4;
+        margin-bottom: 4px;
+      }
+
+      .pet-card-text {
+        white-space: pre-line;
+        word-break: break-word;
+      }
+
+      .pet-card-pomodoro.phase-break_start .pet-card-tag {
+        color: #ffe066;
+      }
+
+      /* 学外语词卡 */
+      .pet-word-term {
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+
+      .pet-word-term-text {
+        font-size: 16px;
+        font-weight: 700;
+        color: #fff;
+      }
+
+      .pet-word-reading {
+        font-size: 11px;
+        color: #8b93a7;
+      }
+
+      .pet-word-meaning {
+        margin-top: 2px;
+        color: #7cf5c4;
+      }
+
+      .pet-word-hook {
+        margin-top: 4px;
+        font-size: 11px;
+        color: #ffe066;
+      }
+
+      .pet-word-example {
+        margin-top: 4px;
+        font-size: 11px;
+        color: #a8c0ff;
+      }
+
+      .pet-word-actions {
+        display: flex;
+        gap: 8px;
+        margin-top: 8px;
+      }
+
+      .pet-word-btn {
+        flex: 1;
+        padding: 3px 0;
+        border-radius: 6px;
+        border: 1px solid rgba(124, 245, 196, 0.35);
+        background: transparent;
+        color: #7cf5c4;
+        font-size: 12px;
+        cursor: default;
+      }
+
+      .pet-word-btn.bad {
+        border-color: rgba(255, 150, 130, 0.35);
+        color: #ffab9d;
+      }
+
+      .pet-word-btn:hover {
+        background: rgba(124, 245, 196, 0.12);
+      }
+
+      .pet-word-btn.bad:hover {
+        background: rgba(255, 150, 130, 0.12);
+      }
+
+      .pet-word-recent {
+        padding: 2px 0;
+      }
+
+      .pet-word-recent-row {
+        display: flex;
+        justify-content: space-between;
+        gap: 8px;
+        padding: 2px 0;
+      }
+
+      .pet-word-recent-row span:last-child {
+        color: #8b93a7;
+      }
+
+      /* 每日资讯卡 */
+      .pet-news-headline {
+        font-size: 13px;
+        font-weight: 600;
+        color: #fff;
+        line-height: 1.45;
+      }
+
+      .pet-news-digest {
+        margin-top: 4px;
+        font-size: 11px;
+        color: #ffe066;
+      }
+
+      .pet-news-link {
+        margin-top: 8px;
+        padding: 2px 10px;
+        border-radius: 6px;
+        border: 1px solid rgba(124, 245, 196, 0.35);
+        background: transparent;
+        color: #7cf5c4;
+        font-size: 11px;
+        cursor: default;
+      }
+
+      .pet-news-link:hover {
+        background: rgba(124, 245, 196, 0.12);
+      }
+
+      .pet-news-section-head {
+        color: #8b93a7;
+        margin-bottom: 2px;
+      }
+
+      .pet-news-row {
+        padding: 3px 0;
+        color: #a8c0ff;
+        text-decoration: underline dotted;
+        cursor: default;
+      }
+
+      .pet-news-cat {
+        display: inline-flex;
+        align-items: center;
+        gap: 3px;
+        margin-right: 8px;
+      }
+
+      /* 股市行情卡（红涨绿跌，国内配色） */
+      .pet-stock-row {
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+        padding: 2px 0;
+      }
+
+      .pet-stock-name {
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .pet-stock-up {
+        color: #ff6b6b;
+      }
+
+      .pet-stock-down {
+        color: #5ad8a8;
+      }
+
+      .pet-stock-digest {
+        margin-bottom: 4px;
+        font-size: 11px;
+        color: #ffe066;
+      }
+
+      /* 插件设置表单（设置面板「插件」分区内） */
+      .pet-plugin-settings {
+        padding: 4px 14px 10px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+      }
+
+      .pet-plugin-settings-head {
+        font-size: 11px;
+        color: #8b93a7;
+        padding: 6px 0 4px;
+      }
+
+      /* 设置面板导航：返回按钮 / 入口行 / 插件清单行 */
+      .pet-settings-back {
+        border: 0;
+        background: transparent;
+        color: #8b93a7;
+        font-size: 12px;
+        cursor: default;
+        padding: 0 4px 0 0;
+      }
+
+      .pet-settings-back:hover {
+        color: #7cf5c4;
+      }
+
+      .pet-settings-entry {
+        border: 1px solid rgba(124, 245, 196, 0.35);
+        border-radius: 6px;
+        background: transparent;
+        color: #7cf5c4;
+        font-size: 11px;
+        padding: 2px 10px;
+        cursor: default;
+      }
+
+      .pet-settings-entry:hover {
+        background: rgba(124, 245, 196, 0.12);
+      }
+
+      .pet-plugin-list-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        width: calc(100% - 28px);
+        margin: 4px 14px;
+        padding: 8px 10px;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 8px;
+        background: transparent;
+        color: #e8ecf4;
+        font: 12px/1 ui-sans-serif, -apple-system, system-ui, sans-serif;
+        cursor: default;
+      }
+
+      .pet-plugin-list-row:hover {
+        border-color: rgba(124, 245, 196, 0.4);
+        background: rgba(124, 245, 196, 0.06);
+      }
+
+      .pet-plugin-list-state {
+        font-size: 11px;
+      }
+
+      .pet-plugin-list-state.on {
+        color: #7cf5c4;
+      }
+
+      .pet-plugin-list-state.off {
+        color: #6d768c;
+      }
+
+      .pet-plugin-form-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 3px 0;
+        font-size: 12px;
+      }
+
+      .pet-plugin-form-row input[type="number"] {
+        width: 52px;
+      }
+
+      .pet-plugin-form-hint {
+        font-size: 11px;
+        color: #6d768c;
+        margin: 2px 0 6px;
+      }
+
+      .pet-plugin-form-save {
+        margin-top: 6px;
+        padding: 3px 14px;
+        border-radius: 6px;
+        border: 1px solid rgba(124, 245, 196, 0.4);
+        background: rgba(124, 245, 196, 0.12);
+        color: #7cf5c4;
+        font-size: 12px;
+        cursor: default;
+      }
+
+      .pet-plugin-form-save:hover {
+        background: rgba(124, 245, 196, 0.22);
+      }
+
+      /* 左键插件面板（视觉对齐今日速记） */
+      .pet-hub {
+        position: fixed;
+        z-index: 25;
+        pointer-events: auto;
+        max-height: 360px;
+        overflow-y: auto;
+        border-radius: 10px;
+        background: rgba(16, 20, 30, 0.97);
+        border: 1px solid rgba(124, 245, 196, 0.28);
+        box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
+        font: 12px/1.5 ui-sans-serif, -apple-system, system-ui, sans-serif;
+        color: #e8ecf4;
+      }
+
+      .pet-hub-head {
+        position: sticky;
+        top: 0;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 9px 12px;
+        background: inherit;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        font-weight: 600;
+        color: #7cf5c4;
+      }
+
+      .pet-hub-close {
+        border: 0;
+        background: transparent;
+        color: #8b93a7;
+        font-size: 16px;
+        line-height: 1;
+        cursor: default;
+        padding: 0 2px;
+      }
+
+      .pet-hub-close:hover {
+        color: #fff;
+      }
+
+      .pet-hub-empty {
+        padding: 16px 12px;
+        color: #6d768c;
+        text-align: center;
+      }
+
+      .pet-hub-section {
+        border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+      }
+
+      .pet-hub-section-head {
+        padding: 7px 12px 3px;
+        font-size: 11px;
+        color: #8b93a7;
+      }
+
       /* 今日速记回看 */
       .pet-today {
         position: fixed;

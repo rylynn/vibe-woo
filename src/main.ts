@@ -28,6 +28,17 @@ import { getConfig, updateConfig, type ConfigView } from "./config";
 import { AvatarPicker } from "./overlay/avatar-picker";
 import { avatarFromView, avatarToView } from "./avatar/types";
 import { analyzeImageFile } from "./avatar/from-image";
+import { PluginHubPanel } from "./plugins/hub";
+import { pomodoroFrontend } from "./plugins/cards/pomodoro";
+import { wordFrontend } from "./plugins/cards/word";
+import { newsFrontend } from "./plugins/cards/news";
+import { stockFrontend } from "./plugins/cards/stock";
+import {
+  getPluginFrontend,
+  registerPlugin,
+  type CardHost,
+  type PluginCard,
+} from "./plugins/registry";
 
 const canvas = document.getElementById("pet-canvas") as HTMLCanvasElement | null;
 if (!canvas) throw new Error("#pet-canvas not found");
@@ -101,6 +112,33 @@ const banner = new Banner();
 const remindersPanel = new RemindersPanel(() => {});
 const friendsPanel = new FriendsPanel();
 
+// 插件卡片的受控操作：openUrl 由 P4 接 opener 插件（当前 window.open 兜底），
+// markTerm 走 SRS 反馈命令并顺手收起气泡。渲染器不直接 invoke（registry.ts 的约定）。
+const cardHost: CardHost = {
+  openUrl: (url) => {
+    try {
+      window.open(url, "_blank");
+    } catch {
+      // webview 拦截时静默 —— 跳不出去不是值得弹窗的事
+    }
+  },
+  markTerm: (term, known) => {
+    void invoke("words_feedback", { term, known }).catch((e) =>
+      console.warn("[words] 反馈失败", e),
+    );
+    bubble.dismiss();
+  },
+};
+
+// 左键插件面板：单击宠物打开（设计文档 7.3）
+const hub = new PluginHubPanel(cardHost);
+
+// 注册内建插件的前端渲染器（气泡卡 / 面板分区 / 设置表单）
+registerPlugin("pomodoro", pomodoroFrontend);
+registerPlugin("words", wordFrontend);
+registerPlugin("news", newsFrontend);
+registerPlugin("stocks", stockFrontend);
+
 const dismiss = new DismissManager();
 dismiss.register(menu);
 dismiss.register(settings);
@@ -110,6 +148,7 @@ dismiss.register(today);
 dismiss.register(remindersPanel);
 dismiss.register(friendsPanel);
 dismiss.register(avatarPicker);
+dismiss.register(hub);
 dismiss.setPetBox(() => (pet.isHidden ? null : pet.body));
 
 const counters: EventCounters = {
@@ -119,6 +158,11 @@ const counters: EventCounters = {
   cancel: 0,
   orphanDrag: 0,
 };
+
+/** 判定「单击（开插件面板）」与「拖动」的位移阈值（CSS 像素）。 */
+const CLICK_SLOP_PX = 6;
+/** 本次按下的起点（命中宠物时记录，pointerup 时消费后清空）。 */
+let petPress: { x: number; y: number } | null = null;
 
 function fit(): void {
   pet.resize(window.innerWidth, window.innerHeight);
@@ -162,7 +206,9 @@ window.addEventListener("pointerdown", (e) => {
   // 点气泡/通知条内部不拖宠物 —— 气泡按钮、通知条点击关闭由其自身处理
   if (bubble.isOpen && bubble.contains(e.clientX, e.clientY)) return;
   if (banner.isOpen && banner.contains(e.clientX, e.clientY)) return;
-  pet.pointerDown(e.clientX, e.clientY);
+  const hit = pet.pointerDown(e.clientX, e.clientY);
+  // 命中宠物时记下起点，pointerup 时按位移区分单击（开面板）与拖动
+  if (hit) petPress = { x: e.clientX, y: e.clientY };
   // 点击/拖动需要立刻起帧（自调度循环可能正在 idle 档熟睡）
   wakeFrame();
 });
@@ -183,9 +229,18 @@ window.addEventListener("pointermove", (e) => {
   wakeFrame();
 });
 
-window.addEventListener("pointerup", () => {
+window.addEventListener("pointerup", (e) => {
   counters.up++;
+  const press = petPress;
+  petPress = null;
   pet.pointerUp();
+  // 按下与抬起位移极小 → 单击：切换插件面板；拖动（位移大）不触发
+  if (
+    press &&
+    Math.hypot(e.clientX - press.x, e.clientY - press.y) < CLICK_SLOP_PX
+  ) {
+    void hub.toggle();
+  }
 });
 
 window.addEventListener("pointercancel", () => {
@@ -214,6 +269,7 @@ window.addEventListener(
       remindersPanel.hide();
       friendsPanel.hide();
       avatarPicker.hide();
+      hub.hide();
       bubble.dismiss();
       banner.dismiss();
     }
@@ -278,6 +334,8 @@ startBoxReporter(() => {
   if (friendsBox) boxes.push(friendsBox);
   const pickerBox = avatarPicker.box;
   if (pickerBox) boxes.push(pickerBox);
+  const hubBox = hub.box;
+  if (hubBox) boxes.push(hubBox);
   // 气泡与通知条：可交互（「知道了」按钮 / 整条点击关闭），必须参与命中判定
   const bubbleBox = bubble.box;
   if (bubbleBox) boxes.push(bubbleBox);
@@ -295,6 +353,7 @@ startBoxReporter(() => {
       remindersPanel.isOpen ||
       friendsPanel.isOpen ||
       avatarPicker.isOpen ||
+      hub.isOpen ||
       bubble.isOpen ||
       banner.isOpen,
     counters,
@@ -355,6 +414,17 @@ void listen<{ text: string; source: "llm" | "local" }>("pet://talk", (e) => {
   });
 }).catch(() => {});
 
+// 插件卡片：按 kind 找渲染器画进气泡。未知 kind 丢弃
+//（前端版本落后于插件时向前兼容）。不在家时不展示。
+void listen<PluginCard>("pet://plugin-card", (e) => {
+  const card = e.payload;
+  if (pet.isHidden) return;
+  const fe = getPluginFrontend(card.kind);
+  if (!fe) return;
+  const el = fe.renderCard(card, cardHost);
+  bubble.showCard(el, { autoDismissMs: card.ttl_secs * 1000 });
+}).catch(() => {});
+
 /**
  * 贴着宠物头顶的通知条。
  *
@@ -371,21 +441,7 @@ function notifyNearPet(text: string): void {
   banner.follow(pet.body);
 }
 
-// —— 番茄工作法：阶段通知 ——
-interface PomodoroEvent {
-  phase: string;
-  mins: number;
-  text: string;
-}
-void listen<PomodoroEvent>("pet://pomodoro", (e) => {
-  const { phase, text } = e.payload;
-  if (phase === "break_start") {
-    // 该休息了：停在头顶等确认，不自动消失；也不怕被闲聊气泡盖掉
-    notifyNearPet(text);
-  } else {
-    bubble.show(text, { autoDismissMs: 8000 });
-  }
-}).catch(() => {});
+// —— 番茄工作法已迁为插件：阶段通知走 pet://plugin-card（见上方监听） ——
 
 // —— 今日特效奖励：认真休息所得，隔天失效 ——
 interface RewardsEvent {

@@ -1,6 +1,6 @@
 [package]
 name = "vibe-pet"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.77"
 
@@ -17,6 +17,10 @@ rand = "0.8"
 reqwest = { version = "0.12", features = ["json", "stream"] }
 futures-util = "0.3"
 tokio = { version = "1", features = ["rt"] }
+# 插件 RSS 解析（每日资讯）。成熟解析器，避免手写 CDATA/实体的坑。
+rss = "2"
+# 腾讯行情接口返回 GBK 编码（A 股中文名），需要解码。
+encoding_rs = "0.8"
 
 # 安全兜底：全局快捷键提供不依赖 UI 的强制退出通道；
 # 单实例锁避免多开导致多层全屏透明窗叠加。

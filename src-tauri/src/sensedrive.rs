@@ -213,14 +213,21 @@ pub fn spawn(app: &AppHandle) {
                     &next,
                     &memory::snapshot(),
                 ) {
-                    eprintln!("[react] {line}");
-                    let _ = app.emit(
-                        crate::talkdrive::EVENT_TALK,
-                        crate::talkdrive::Talk {
-                            text: line.to_string(),
-                            source: crate::talkdrive::TalkSource::Local,
-                        },
-                    );
+                    // 番茄工作期 / 刚展示过插件卡片：即时反应让位并直接丢弃 ——
+                    //「你进入心流了」延迟 25 分钟再说毫无意义（番茄设计 2.2）。
+                    // feed 的状态跟踪（stuck 计时等）不受影响，只是不说话。
+                    if !crate::plugin::arbiter::allow_ambient() {
+                        eprintln!("[react] 仲裁静默期，丢弃：{line}");
+                    } else {
+                        eprintln!("[react] {line}");
+                        let _ = app.emit(
+                            crate::talkdrive::EVENT_TALK,
+                            crate::talkdrive::Talk {
+                                text: line.to_string(),
+                                source: crate::talkdrive::TalkSource::Local,
+                            },
+                        );
+                    }
                 }
             }
             prev_state = Some(next);

@@ -17,6 +17,8 @@ export class Bubble {
   private readonly textEl: HTMLSpanElement;
   private readonly aiEl: HTMLSpanElement;
   private readonly actionsEl: HTMLDivElement;
+  /** 插件卡片内容元素（showCard 模式）。show() 时清除并回到文字模式。 */
+  private cardEl: HTMLElement | null = null;
   private open = false;
   /** 自动消失的定时器。 */
   private timer: ReturnType<typeof setTimeout> | null = null;
@@ -62,6 +64,10 @@ export class Bubble {
       ai?: boolean;
     } = {},
   ): void {
+    // 从卡片模式回到文字模式
+    this.cardEl?.remove();
+    this.cardEl = null;
+    this.textEl.style.display = "";
     this.textEl.textContent = text;
     this.aiEl.style.display = opts.ai ? "inline-block" : "none";
     this.actionsEl.replaceChildren();
@@ -87,6 +93,34 @@ export class Bubble {
     // 立刻按上次已知的身体位置定位，避免上屏第一帧闪在别处
     if (this.body) this.follow(this.body);
     // 点气泡本身不关闭（避免误触），只有按钮或超时才关
+    this.el.onclick = null;
+  }
+
+  /**
+   * 显示插件卡片气泡。
+   *
+   * 内容区是渲染器生成的任意 DOM；外壳（跟随 / 尾巴 / 越界翻转 /
+   * 命中上报 / 穿透 lock）与文字模式完全一致。
+   */
+  showCard(card: HTMLElement, opts: { autoDismissMs?: number } = {}): void {
+    this.textEl.style.display = "none";
+    this.aiEl.style.display = "none";
+    this.cardEl?.remove();
+    this.cardEl = card;
+    card.classList.add("pet-bubble-card");
+    this.el.insertBefore(card, this.actionsEl);
+    this.actionsEl.replaceChildren();
+
+    if (this.timer) clearTimeout(this.timer);
+    if (opts.autoDismissMs) {
+      this.timer = setTimeout(() => this.dismiss(), opts.autoDismissMs);
+    }
+
+    this.el.style.display = "block";
+    this.open = true;
+    if (this.body) this.follow(this.body);
+    // 卡片模式：点整卡关闭（与通知条的直觉一致；长停留的休息卡尤其需要）
+    this.el.onclick = () => this.dismiss();
   }
 
   dismiss(): void {
