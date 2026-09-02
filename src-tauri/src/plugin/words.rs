@@ -32,6 +32,47 @@ pub const ID: &str = "words";
 /// 学习状态文件名（与配置分开：配置是用户域，状态是程序域）。
 const STATE_FILE: &str = "words-srs";
 
+/// 「休息时」判定（纯函数，单测入口）：歇着、走开、或在前台刷网页。
+/// 首版只认 Resting/Browsing —— 实测人走开时 tempo 未必到 Resting，
+/// 把 Away 也算上，否则「走开等词卡」永远等不到。
+fn is_resting(s: &crate::state::PetState) -> bool {
+    s.tempo == crate::state::Tempo::Resting
+        || s.doing == crate::state::Doing::Browsing
+        || s.doing == crate::state::Doing::Away
+}
+
+/// 预览接下来要学的词（面板展示用）：连续 pick，已选的标记远期防止重复。
+/// 在 SRS 副本上操作，不污染真实学习状态。
+fn preview(
+    pool: &[WordEntry],
+    srs: &HashMap<String, SrsEntry>,
+    now: u64,
+    user_rank: u8,
+    last_domain: &str,
+    count: usize,
+) -> Vec<WordEntry> {
+    let mut srs = srs.clone();
+    let mut last = last_domain.to_string();
+    let mut out = Vec::new();
+    for _ in 0..count {
+        let Some(w) = pick(&pool, &srs, now, user_rank, &last) else {
+            break;
+        };
+        last = w.domain.clone();
+        srs.insert(
+            w.term.clone(),
+            SrsEntry {
+                due_mins: u64::MAX / 2,
+                step: 0,
+                reps: 0,
+                lapses: 0,
+            },
+        );
+        out.push(w);
+    }
+    out
+}
+
 /// 内置词库（编译进二进制）。
 const DICT_JSON: &str = include_str!("words-dict.json");
 
@@ -375,14 +416,14 @@ impl Plugin for WordsPlugin {
             if now.saturating_sub(s.last_card_mins) < WORD_GAP_MINS {
                 return None;
             }
-            if cfg.only_resting {
-                // 时间窗是插件自己的业务判断，不进仲裁器（设计 5.4 分工红线）
+            // 首卡不设防：启用后当日第一张立即出现 —— 开了插件却什么都
+            // 看不到是最差的默认体验，先让用户确认它在工作，再进入
+            // 「只在休息时弹」的节奏（时间窗是插件业务，不进仲裁器）。
+            if cfg.only_resting && s.served_count > 0 {
                 let Some(st) = ctx.state() else {
                     return None;
                 };
-                let resting = st.tempo == crate::state::Tempo::Resting
-                    || st.doing == crate::state::Doing::Browsing;
-                if !resting {
+                if !is_resting(&st) {
                     return None;
                 }
             }
@@ -397,9 +438,6 @@ impl Plugin for WordsPlugin {
             // 记账：今日配额、频率闸、领域、SRS 首见（10 分钟后复习）
             s.served_count += 1;
             s.served_terms.push(word.term.clone());
-            if s.served_terms.len() > 20 {
-                s.served_terms.remove(0);
-            }
             s.last_card_mins = now;
             s.last_domain = word.domain.clone();
             s.srs.insert(
@@ -449,32 +487,51 @@ fn make_card(w: &WordEntry, enhanced: Option<&Enhanced>) -> PluginCard {
     }
 }
 
-/// 左键面板 / 设置用元信息。
+/// 左键面板 / 设置用元信息：当天全部学习信息 ——
+/// 已学列表 + 接下来要学的预览（due 复习词优先，再补新词）。
 pub fn meta(app: &tauri::AppHandle) -> PluginMeta {
     let cfg = load_config(app);
     let s = STATE.lock().ok().and_then(|g| g.clone());
     let today = crate::reminddrive::local_now()
         .map(|c| c.date)
         .unwrap_or_default();
-    let (count, terms): (u32, Vec<String>) = match s {
+    let (count, terms, srs, last_domain) = match s {
         Some(mut s) => {
             rollover(&mut s, &today);
-            (s.served_count, s.served_terms.clone())
+            (
+                s.served_count,
+                s.served_terms.clone(),
+                s.srs.clone(),
+                s.last_domain.clone(),
+            )
         }
-        None => (0, Vec::new()),
+        None => (0, Vec::new(), HashMap::new(), String::new()),
     };
-    // 最近词条带释义（从词库反查；两语言都查一遍）
-    let recent: Vec<serde_json::Value> = terms
+    let pool = pool_for(&cfg.language, &[]);
+    let look_up = |t: &str| {
+        pool.iter()
+            .find(|w| w.term == t)
+            .map(|w| serde_json::json!({ "term": w.term, "meaning": w.meaning }))
+    };
+    // 今日已学（全量，最新的在前）
+    let learned: Vec<serde_json::Value> = terms
         .iter()
         .rev()
-        .take(6)
-        .filter_map(|t| {
-            let pool = pool_for(&cfg.language, &[]);
-            pool.iter()
-                .find(|w| &w.term == t)
-                .map(|w| serde_json::json!({ "term": w.term, "meaning": w.meaning }))
-        })
+        .filter_map(|t| look_up(t))
         .collect();
+    // 接下来要学的（剩余配额的预览，最多 8 个）
+    let remaining = cfg.daily_limit.saturating_sub(count).min(8) as usize;
+    let upcoming: Vec<serde_json::Value> = preview(
+        &pool,
+        &srs,
+        now_epoch_mins(),
+        level_rank(&cfg.level),
+        &last_domain,
+        remaining,
+    )
+    .iter()
+    .map(|w| serde_json::json!({ "term": w.term, "meaning": w.meaning }))
+    .collect();
     PluginMeta {
         id: ID.into(),
         name: "学外语".into(),
@@ -484,7 +541,8 @@ pub fn meta(app: &tauri::AppHandle) -> PluginMeta {
             "language": cfg.language,
             "today_count": count,
             "daily_limit": cfg.daily_limit,
-            "recent": recent,
+            "learned": learned,
+            "upcoming": upcoming,
         }),
     }
 }
@@ -695,6 +753,41 @@ mod tests {
         let domains: std::collections::HashSet<&str> =
             daily.words.iter().map(|w| w.domain.as_str()).collect();
         assert!(domains.len() >= 4, "日常词书应覆盖生活/食物/职场/旅行多领域");
+    }
+
+    #[test]
+    fn 休息判定覆盖歇着走开与刷网页() {
+        use crate::state::{Doing, Tempo};
+        let pstate = |doing, tempo| crate::state::PetState {
+            doing,
+            tempo,
+            late_night: false,
+            keystrokes_per_min: 0.0,
+            mood: crate::mood::Mood::Focused,
+            activity: crate::activity::Activity::Working,
+            dnd_on: false,
+        };
+        assert!(is_resting(&pstate(Doing::Browsing, Tempo::Normal)), "刷网页算休息");
+        assert!(is_resting(&pstate(Doing::Away, Tempo::Normal)), "走开算休息");
+        assert!(is_resting(&pstate(Doing::Other, Tempo::Resting)), "歇着算休息");
+        assert!(!is_resting(&pstate(Doing::Editing, Tempo::Flow)), "心流中不打扰");
+        assert!(!is_resting(&pstate(Doing::Editing, Tempo::Normal)), "干活时不打扰");
+    }
+
+    #[test]
+    fn 预览不重复且到期词优先_不污染真实srs() {
+        let pool = vec![
+            word("a", "life", "beginner"),
+            word("b", "food", "beginner"),
+            word("c", "life", "beginner"),
+        ];
+        let mut srs = HashMap::new();
+        srs.insert("a".into(), entry(0, 1)); // a 到期
+        let out = preview(&pool, &srs, 1000, 0, "", 3);
+        let terms: Vec<&str> = out.iter().map(|w| w.term.as_str()).collect();
+        assert_eq!(terms, vec!["a", "b", "c"], "到期词优先、不重复、按序给满");
+        // 预览只动副本：真实 SRS 不被改写
+        assert_eq!(srs.get("a").unwrap().due_mins, 0);
     }
 
     #[test]

@@ -106,7 +106,8 @@ export const wordFrontend: PluginFrontend = {
       language: string;
       today_count: number;
       daily_limit: number;
-      recent: { term: string; meaning: string }[];
+      learned: { term: string; meaning: string }[];
+      upcoming: { term: string; meaning: string }[];
     };
     const el = document.createElement("div");
     el.className = "pet-card-word-section";
@@ -115,12 +116,14 @@ export const wordFrontend: PluginFrontend = {
       return el;
     }
     const head = document.createElement("div");
+    head.className = "pet-word-section-head";
     head.textContent = `今日 ${s.today_count}/${s.daily_limit} 张`;
     el.appendChild(head);
-    if (s.recent.length > 0) {
+
+    const renderList = (items: { term: string; meaning: string }[]) => {
       const list = document.createElement("div");
       list.className = "pet-word-recent";
-      for (const r of s.recent) {
+      for (const r of items) {
         const row = document.createElement("div");
         row.className = "pet-word-recent-row";
         const t = document.createElement("span");
@@ -130,7 +133,21 @@ export const wordFrontend: PluginFrontend = {
         row.append(t, m);
         list.appendChild(row);
       }
-      el.appendChild(list);
+      return list;
+    };
+
+    // 当天全部学习信息：已学全量 + 接下来要学的预览（due 复习词优先）
+    if (s.learned.length > 0) {
+      const h = document.createElement("div");
+      h.className = "pet-word-subhead";
+      h.textContent = "已学";
+      el.append(h, renderList(s.learned));
+    }
+    if (s.upcoming.length > 0) {
+      const h = document.createElement("div");
+      h.className = "pet-word-subhead";
+      h.textContent = "接下来";
+      el.append(h, renderList(s.upcoming));
     }
     return el;
   },
@@ -197,7 +214,7 @@ export const wordFrontend: PluginFrontend = {
     const hint = document.createElement("div");
     hint.className = "pet-plugin-form-hint";
     hint.textContent =
-      "词与释义来自内置词库（雅思/托福/日常 × 英日）；配置 AI 后例句与记忆钩子按你的目标定制。没印象的词 10 分钟后会再回来";
+      "开启后第一张立即出现；之后只在休息时（走开、歇着或刷网页）弹。词与释义来自内置词库（雅思/托福/日常 × 英日）；配置 AI 后例句与记忆钩子按你的目标定制。没印象的词 10 分钟后会再回来";
     el.appendChild(hint);
 
     const save = document.createElement("button");
