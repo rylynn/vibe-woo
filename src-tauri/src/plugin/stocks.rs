@@ -3,9 +3,12 @@
 //! 三条原则：
 //! - **数字永远来自接口**，LLM 只把收盘总结的数字翻译成一句人话 ——
 //!   模型编不出可信行情，幻觉数字等于害人。
-//! - **盘中/工作时间不出卡**：先查展示时段（默认午休 + 收盘后），
-//!   在时段内才拉行情；与上次出卡快照比较，全部在阈值内就不出卡
+//! - **数据要实时**：2 分钟一拉、不受展示时段限制；**盘中/工作时间
+//!   不出卡**：展示时段（默认午休 + 收盘后）只闸门出卡，不闸门拉取；
+//!   与上次出卡快照比较，全部在阈值内就不出卡
 //!  （频率控制第一道闸；第二道是出卡间隔 45 分钟）。
+//! - **没配置标的也有得看**：默认展示上证/恒指/纳指三大指数；
+//!   配置个股后高优展示个股，指数退到卡片二级视图（「查看指数」）。
 //! - 每天收盘后出一次「收盘总结」卡（`summarized_after` 时刻，
 //!   `summarized_date` 防重启重复发）。
 //!
@@ -31,8 +34,14 @@ const STATE_FILE: &str = "stocks-cache";
 /// 两张股票卡之间的最小间隔（分钟）。设计 5.1：股票 45min。
 const STOCKS_GAP_MINS: u64 = 45;
 
-/// 行情拉取节流（分钟）。
-const FETCH_GAP_MINS: u64 = 10;
+/// 行情拉取节流（分钟）。数据要实时：2 分钟一拉（腾讯行情秒级刷新，
+/// 节流只为不自残），且不受展示时段限制 —— 时段只闸门出卡，
+/// 面板里的数字任何时候打开都应该是活的。
+const FETCH_GAP_MINS: u64 = 2;
+
+/// 内置指数（腾讯行情格式）：上证 / 恒指 / 纳指。
+/// 未配置关注标的时默认展示；配置后作为卡片二级视图（「查看指数」按钮）。
+const INDICES: [&str; 3] = ["sh000001", "hkHSI", "usIXIC"];
 
 /// 最多关注的标的数（防配置里粘一整屏代码）。
 const MAX_SYMBOLS: usize = 10;
@@ -207,6 +216,37 @@ fn parse_line(line: &str) -> Option<Quote> {
     })
 }
 
+/// 拉取目标：关注标的 + 内置指数（去重）。永远非空 —— 未配置标的时
+/// 也有三大指数可看，插件不该因为没配置就装死。
+fn fetch_targets(cfg: &StocksConfig) -> Vec<String> {
+    let mut v = cfg.symbols.clone();
+    for i in INDICES {
+        if !v.iter().any(|s| s == i) {
+            v.push(i.into());
+        }
+    }
+    v
+}
+
+/// 拆分主从视图：配置了标的 → 主=个股、从=指数（卡片二级按钮查看）；
+/// 未配置 → 主=指数（此时只拉了指数），无从。
+fn split_views(quotes: &[Quote], symbols: &[String]) -> (Vec<Quote>, Vec<Quote>) {
+    if symbols.is_empty() {
+        return (quotes.to_vec(), Vec::new());
+    }
+    let primary: Vec<Quote> = quotes
+        .iter()
+        .filter(|q| symbols.iter().any(|s| s == &q.symbol))
+        .cloned()
+        .collect();
+    let secondary: Vec<Quote> = quotes
+        .iter()
+        .filter(|q| INDICES.contains(&q.symbol.as_str()) && !symbols.iter().any(|s| s == &q.symbol))
+        .cloned()
+        .collect();
+    (primary, secondary)
+}
+
 /// 与上次出卡快照比较，返回值得说的变动（涨跌幅变化 ≥ 阈值）。
 /// 基准为空表示尚未建立（首拉取，只建基准不出卡）。
 fn significant_changes(cur: &[Quote], baseline: &[Quote], threshold: f64) -> Option<Vec<Quote>> {
@@ -244,7 +284,8 @@ fn spawn_fetch(cfg: StocksConfig, today: String, app: tauri::AppHandle) {
         else {
             return;
         };
-        let url = format!("{}{}", cfg.endpoint, cfg.symbols.join(","));
+        let targets = fetch_targets(&cfg);
+        let url = format!("{}{}", cfg.endpoint, targets.join(","));
         let fetched: Result<Vec<u8>, reqwest::Error> = rt.block_on(async {
             let resp = client.get(&url).send().await?.error_for_status()?;
             Ok(resp.bytes().await?.to_vec())
@@ -261,7 +302,7 @@ fn spawn_fetch(cfg: StocksConfig, today: String, app: tauri::AppHandle) {
         let quotes: Vec<Quote> = text
             .lines()
             .filter_map(parse_line)
-            .filter(|q| cfg.symbols.iter().any(|s| s == &q.symbol))
+            .filter(|q| targets.iter().any(|s| s == &q.symbol))
             .collect();
         if quotes.is_empty() {
             eprintln!("[plugin:{ID}] 行情解析为空（symbols 或接口格式可能有变）");
@@ -285,7 +326,9 @@ fn spawn_fetch(cfg: StocksConfig, today: String, app: tauri::AppHandle) {
         };
         save_state(&app);
         if digest_needed {
-            spawn_digest(quotes, today, app);
+            // 点评只针对主视图（个股优先，未配置时即指数）
+            let (primary, _) = split_views(&quotes, &cfg.symbols);
+            spawn_digest(primary, today, app);
         }
     });
 }
@@ -356,7 +399,7 @@ impl Plugin for StocksPlugin {
 
     fn tick(&mut self, ctx: &mut TickCtx) -> Vec<PluginCard> {
         let cfg = load_config(ctx.app);
-        if !cfg.enabled || cfg.symbols.is_empty() {
+        if !cfg.enabled {
             return Vec::new();
         }
         let Some(now_ctx) = crate::reminddrive::local_now() else {
@@ -367,6 +410,15 @@ impl Plugin for StocksPlugin {
         let now_min = now_ctx.minutes;
 
         with_state(|s| rollover(s, &today));
+
+        // —— 实时数据：拉取不受展示时段限制（时段只闸门出卡）。
+        // 面板与卡片任何时候看到的都该是活行情，不是「窗口内的旧快照」。
+        let need_fetch =
+            with_state(|s| now.saturating_sub(s.last_fetch_mins) >= FETCH_GAP_MINS);
+        if need_fetch {
+            with_state(|s| s.last_fetch_mins = now); // 防重复触发
+            spawn_fetch(cfg.clone(), today.clone(), ctx.app.clone());
+        }
 
         // —— 收盘总结：到点、有当日快照、未发过 ——
         if !cfg.summarize_after.is_empty() {
@@ -398,29 +450,22 @@ impl Plugin for StocksPlugin {
                         && (llm_off || !s.digest.is_empty())
                 });
                 if now_min >= after && ready {
-                    let (items, digest) = with_state(|s| {
+                    let (items, indices, digest) = with_state(|s| {
                         s.summarized_date = today.clone();
                         s.last_card_mins = now;
-                        s.last_card_quotes = s.quotes.clone();
-                        (s.quotes.clone(), s.digest.clone())
+                        let (primary, secondary) = split_views(&s.quotes, &cfg.symbols);
+                        s.last_card_quotes = primary.clone();
+                        (primary, secondary, s.digest.clone())
                     });
                     save_state(ctx.app);
-                    return vec![make_card(&items, &digest, true)];
+                    return vec![make_card(&items, &indices, &digest, true)];
                 }
             }
         }
 
-        // —— 展示时段内：拉取节流 + 变动判定 ——
+        // —— 展示时段内：变动判定出卡（拉取已在时段外持续进行）——
         if !in_windows(now_min, &cfg.windows) {
-            return Vec::new(); // 盘中/工作时间不出卡也不拉取
-        }
-
-        let need_fetch = with_state(|s| {
-            s.date == today && now.saturating_sub(s.last_fetch_mins) >= FETCH_GAP_MINS
-        });
-        if need_fetch {
-            with_state(|s| s.last_fetch_mins = now); // 防重复触发
-            spawn_fetch(cfg.clone(), today.clone(), ctx.app.clone());
+            return Vec::new(); // 盘中/工作时间不出卡
         }
 
         let card = with_state(|s| {
@@ -430,22 +475,23 @@ impl Plugin for StocksPlugin {
             if now.saturating_sub(s.last_card_mins) < STOCKS_GAP_MINS {
                 return None;
             }
-            let hits = significant_changes(&s.quotes, &s.last_card_quotes, cfg.change_threshold_pct)?;
+            let (primary, secondary) = split_views(&s.quotes, &cfg.symbols);
+            let hits = significant_changes(&primary, &s.last_card_quotes, cfg.change_threshold_pct)?;
             s.last_card_mins = now;
-            s.last_card_quotes = s.quotes.clone();
-            Some(hits)
+            s.last_card_quotes = primary;
+            Some((hits, secondary))
         });
         match card {
-            Some(hits) => {
+            Some((hits, indices)) => {
                 save_state(ctx.app);
-                vec![make_card(&hits, "", false)]
+                vec![make_card(&hits, &indices, "", false)]
             }
             None => Vec::new(),
         }
     }
 }
 
-fn make_card(items: &[Quote], digest: &str, summary: bool) -> PluginCard {
+fn make_card(items: &[Quote], indices: &[Quote], digest: &str, summary: bool) -> PluginCard {
     PluginCard {
         plugin_id: ID.into(),
         kind: ID.into(),
@@ -454,6 +500,9 @@ fn make_card(items: &[Quote], digest: &str, summary: bool) -> PluginCard {
         payload: serde_json::json!({
             "summary": summary,
             "items": items,
+            // 二级视图（配置了个股时的「查看指数」按钮）；未配置时为空 ——
+            // 此时主视图本来就是指数
+            "indices": indices,
             "digest": if digest.is_empty() { None } else { Some(digest) },
             "ai": !digest.is_empty(),
         }),
@@ -481,6 +530,7 @@ pub fn meta(app: &tauri::AppHandle) -> PluginMeta {
         }
         _ => Vec::new(),
     };
+    let (primary, indices) = split_views(&quotes, &cfg.symbols);
     PluginMeta {
         id: ID.into(),
         name: "股市投资".into(),
@@ -488,7 +538,8 @@ pub fn meta(app: &tauri::AppHandle) -> PluginMeta {
         summary: serde_json::json!({
             "enabled": cfg.enabled,
             "symbols": cfg.symbols,
-            "quotes": quotes,
+            "quotes": primary,
+            "indices": indices,
         }),
     }
 }
@@ -634,13 +685,66 @@ mod tests {
             price: 1297.5,
             change_pct: -0.16,
         }];
-        let c = make_card(&items, "白酒走弱", true);
+        let indices = vec![Quote {
+            symbol: "hkHSI".into(),
+            name: "恒生指数".into(),
+            price: 25438.8,
+            change_pct: 0.5,
+        }];
+        let c = make_card(&items, &indices, "白酒走弱", true);
         assert_eq!(c.payload["summary"], true);
         assert_eq!(c.payload["ai"], true);
         assert_eq!(c.payload["items"][0]["symbol"], "sh600519");
+        assert_eq!(c.payload["indices"][0]["symbol"], "hkHSI");
 
-        let c2 = make_card(&items, "", false);
+        let c2 = make_card(&items, &indices, "", false);
         assert_eq!(c2.payload["ai"], false);
         assert!(c2.payload["digest"].is_null(), "无点评时 digest 为 null");
+    }
+
+    #[test]
+    fn 拉取目标未配置时默认三大指数() {
+        let c = StocksConfig::default();
+        assert_eq!(
+            fetch_targets(&c),
+            vec!["sh000001".to_string(), "hkHSI".to_string(), "usIXIC".to_string()],
+            "没配置个股也要有默认指数可看"
+        );
+        let c2 = StocksConfig {
+            symbols: vec!["sh600519".into()],
+            ..Default::default()
+        };
+        let t = fetch_targets(&c2);
+        assert_eq!(t.len(), 4, "个股 + 三大指数");
+        assert_eq!(t[0], "sh600519");
+        // 标的与指数重叠时去重
+        let c3 = StocksConfig {
+            symbols: vec!["hkHSI".into()],
+            ..Default::default()
+        };
+        assert_eq!(fetch_targets(&c3).len(), 3);
+    }
+
+    #[test]
+    fn 拆分主从视图() {
+        let q = |s: &str| Quote {
+            symbol: s.into(),
+            name: s.into(),
+            price: 1.0,
+            change_pct: 0.0,
+        };
+        let quotes = vec![q("sh600519"), q("sh000001"), q("hkHSI"), q("usIXIC")];
+        // 配置了个股：主=个股，从=指数
+        let (p, s) = split_views(&quotes, &["sh600519".to_string()]);
+        assert_eq!(p.len(), 1);
+        assert_eq!(s.len(), 3, "指数进二级视图");
+        // 未配置：主=指数，无从
+        let (p2, s2) = split_views(&quotes, &[]);
+        assert_eq!(p2.len(), 4);
+        assert!(s2.is_empty());
+        // 标的与指数重叠：不重复进二级
+        let (p3, s3) = split_views(&quotes, &["hkHSI".to_string()]);
+        assert_eq!(p3.len(), 1);
+        assert_eq!(s3.len(), 2);
     }
 }

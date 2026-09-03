@@ -59,6 +59,8 @@ fn kill_switch() -> Shortcut {
 
 fn main() {
     let builder = tauri::Builder::default()
+        // 打开系统浏览器（资讯卡「阅读原文」；webview 内 window.open 会被拦截）
+        .plugin(tauri_plugin_opener::init())
         // 单实例锁：多开会叠加多层全屏透明窗，点击行为将无法预测
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             eprintln!("[pet] another instance attempted to launch; focusing existing one");

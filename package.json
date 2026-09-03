@@ -1,7 +1,7 @@
 {
   "name": "vibe-pet",
   "private": true,
-  "version": "0.4.0",
+  "version": "0.4.1",
   "type": "module",
   "packageManager": "pnpm@10.34.5",
   "engines": {
@@ -17,7 +17,8 @@
     "stop": "bash scripts/stop-pet.sh"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2"
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-opener": "^2.5.5"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",

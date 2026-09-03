@@ -1,9 +1,19 @@
 import type { PluginFrontend } from "../registry";
 
+/** 行情条目（与 Rust Quote 契约一致）。 */
+interface Quote {
+  symbol: string;
+  name: string;
+  price: number;
+  change_pct: number;
+}
+
 /** 卡片 payload（与 Rust stocks.rs 契约一致）。 */
 interface StockPayload {
   summary: boolean;
-  items: { symbol: string; name: string; price: number; change_pct: number }[];
+  items: Quote[];
+  /** 二级视图（配置了个股时的指数列表）；未配置个股时为空。 */
+  indices: Quote[];
   digest: string | null;
   ai: boolean;
 }
@@ -50,6 +60,45 @@ function fmtPct(v: number): string {
   return `${v >= 0 ? "+" : ""}${v.toFixed(2)}%`;
 }
 
+/** 一组行情行（主视图/指数视图共用）。 */
+function renderRows(list: Quote[]): HTMLDivElement {
+  const box = document.createElement("div");
+  for (const q of list) {
+    const row = document.createElement("div");
+    row.className = "pet-stock-row";
+    const name = document.createElement("span");
+    name.className = "pet-stock-name";
+    name.textContent = q.name || q.symbol;
+    const price = document.createElement("span");
+    price.textContent = q.price.toFixed(2);
+    const pct = document.createElement("span");
+    pct.className = q.change_pct >= 0 ? "pet-stock-up" : "pet-stock-down";
+    pct.textContent = fmtPct(q.change_pct);
+    row.append(name, price, pct);
+    box.appendChild(row);
+  }
+  return box;
+}
+
+/** 主从视图切换：有指数二级视图时挂「查看指数 ›」按钮，点开后可返回。 */
+function withIndexToggle(el: HTMLElement, p: StockPayload): void {
+  const primary = renderRows(p.items);
+  const secondary = p.indices.length > 0 ? renderRows(p.indices) : null;
+  el.appendChild(primary);
+  if (!secondary) return;
+  const btn = document.createElement("button");
+  btn.className = "pet-stock-toggle";
+  btn.textContent = "查看指数 ›";
+  el.appendChild(btn);
+  let showingIndices = false;
+  btn.addEventListener("pointerdown", (e) => {
+    e.stopPropagation();
+    showingIndices = !showingIndices;
+    el.replaceChild(showingIndices ? secondary : primary, showingIndices ? primary : secondary);
+    btn.textContent = showingIndices ? "‹ 返回个股" : "查看指数 ›";
+  });
+}
+
 /** 股市投资的前端三视图。红涨绿跌（国内配色）。 */
 export const stockFrontend: PluginFrontend = {
   renderCard(card) {
@@ -69,20 +118,7 @@ export const stockFrontend: PluginFrontend = {
       el.appendChild(digest);
     }
 
-    for (const q of p.items) {
-      const row = document.createElement("div");
-      row.className = "pet-stock-row";
-      const name = document.createElement("span");
-      name.className = "pet-stock-name";
-      name.textContent = q.name || q.symbol;
-      const price = document.createElement("span");
-      price.textContent = q.price.toFixed(2);
-      const pct = document.createElement("span");
-      pct.className = q.change_pct >= 0 ? "pet-stock-up" : "pet-stock-down";
-      pct.textContent = fmtPct(q.change_pct);
-      row.append(name, price, pct);
-      el.appendChild(row);
-    }
+    withIndexToggle(el, p);
     return el;
   },
 
@@ -90,7 +126,8 @@ export const stockFrontend: PluginFrontend = {
     const s = data as {
       enabled: boolean;
       symbols: string[];
-      quotes: { symbol: string; name: string; price: number; change_pct: number }[];
+      quotes: Quote[];
+      indices: Quote[];
     };
     const el = document.createElement("div");
     el.className = "pet-card-stock-section";
@@ -99,22 +136,19 @@ export const stockFrontend: PluginFrontend = {
       return el;
     }
     if (s.quotes.length === 0) {
-      el.textContent = `关注 ${s.symbols.length} 只 · 今日还没有行情`;
+      el.textContent =
+        s.symbols.length > 0
+          ? `关注 ${s.symbols.length} 只 · 今日还没有行情`
+          : "今日还没有行情（默认展示上证/恒指/纳指）";
       return el;
     }
-    for (const q of s.quotes) {
-      const row = document.createElement("div");
-      row.className = "pet-stock-row";
-      const name = document.createElement("span");
-      name.className = "pet-stock-name";
-      name.textContent = q.name || q.symbol;
-      const price = document.createElement("span");
-      price.textContent = q.price.toFixed(2);
-      const pct = document.createElement("span");
-      pct.className = q.change_pct >= 0 ? "pet-stock-up" : "pet-stock-down";
-      pct.textContent = fmtPct(q.change_pct);
-      row.append(name, price, pct);
-      el.appendChild(row);
+    el.appendChild(renderRows(s.quotes));
+    if (s.indices.length > 0) {
+      const head = document.createElement("div");
+      head.className = "pet-stock-section-head";
+      head.textContent = "指数";
+      el.appendChild(head);
+      el.appendChild(renderRows(s.indices));
     }
     return el;
   },
@@ -149,7 +183,8 @@ export const stockFrontend: PluginFrontend = {
 
     const symHint = document.createElement("div");
     symHint.className = "pet-plugin-form-hint";
-    symHint.textContent = "最多 10 只；A股加 sh/sz 前缀，港股 hk，美股 us（如 sh600519 / hk00700 / usAAPL）";
+    symHint.textContent =
+      "最多 10 只；A股加 sh/sz 前缀，港股 hk，美股 us（如 sh600519 / hk00700 / usAAPL）；留空则默认展示上证/恒指/纳指三大指数，配置后指数退到卡片「查看指数」";
     el.appendChild(symHint);
 
     const numRow = document.createElement("div");
@@ -198,7 +233,7 @@ export const stockFrontend: PluginFrontend = {
     const hint = document.createElement("div");
     hint.className = "pet-plugin-form-hint";
     hint.textContent =
-      "只在展示时段（默认午休+收盘后）提示；与上次快照比较，变动超过阈值才出卡，收盘后一次小结。行情数字永远来自接口；配置 AI 后小结附一句点评";
+      "行情每 2 分钟刷新一次（面板随时是实时数据）；只在展示时段（默认午休+收盘后）出卡提示，变动超过阈值才出，收盘后一次小结。数字永远来自接口；配置 AI 后小结附一句点评";
     el.appendChild(hint);
 
     const save = document.createElement("button");

@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "宠物窗口权限",
   "windows": ["pet"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "opener:default"]
 }

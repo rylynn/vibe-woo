@@ -21,6 +21,7 @@ import {
 } from "./overlay/friends";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { DismissManager } from "./overlay/dismiss";
 import { onStateChange } from "./state";
 import { describe as describeState } from "./appearance";
@@ -112,15 +113,14 @@ const banner = new Banner();
 const remindersPanel = new RemindersPanel(() => {});
 const friendsPanel = new FriendsPanel();
 
-// 插件卡片的受控操作：openUrl 由 P4 接 opener 插件（当前 window.open 兜底），
-// markTerm 走 SRS 反馈命令并顺手收起气泡。渲染器不直接 invoke（registry.ts 的约定）。
+// 插件卡片的受控操作：openUrl 走 opener 插件（透明无框窗里 window.open
+// 会被系统拦截，导致资讯「阅读原文」点不动），markTerm 走 SRS 反馈命令
+// 并顺手收起气泡。渲染器不直接 invoke（registry.ts 的约定）。
 const cardHost: CardHost = {
   openUrl: (url) => {
-    try {
-      window.open(url, "_blank");
-    } catch {
-      // webview 拦截时静默 —— 跳不出去不是值得弹窗的事
-    }
+    void openUrl(url).catch((e) =>
+      console.warn("[news] 打开链接失败", e),
+    );
   },
   markTerm: (term, known) => {
     void invoke("words_feedback", { term, known }).catch((e) =>

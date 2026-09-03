@@ -5,9 +5,9 @@
 //!   例句（按 goal 定制场景）与记忆钩子（词根/谐音/联想）—— 未配置 LLM
 //!   时用词库自带例句，卡片照常工作。
 //! - **SRS 是简化间隔重复**：艾宾浩斯梯度 10min → 1d → 3d → 7d → 21d。
-//!   选词优先级：跨日老词复习 > 新词 > 当日已见词重见（2026-09-03 修订，
-//!   修复复习卡重置导致的当天词汇全重复）；领域打散（连续两卡不同 domain）；
-//!   水平过滤允许挑战高一级。
+//!   选词优先级：有反馈的到期复习 > 新词 > 当日已见重见 > 跨日已读词
+//!  （2026-09-03 两轮修订：复习卡重置 + 已读词霸屏导致「当天词汇全重复」）；
+//!   领域打散（连续两卡不同 domain）；水平过滤允许挑战高一级。
 //! - **反馈闭环**：词卡带「认识 / 没印象」。没印象 10 分钟后重见（lapse+1）；
 //!   认识则梯度推进；20 秒无人理 = 已读，interval 不变（不惩罚不互动）。
 //!
@@ -244,11 +244,14 @@ fn on_feedback(e: &mut SrsEntry, known: bool, now: u64) {
     e.due_mins = now + SRS_STEPS_MINS[e.step as usize];
 }
 
-/// 选词优先级（2026-09-03 修订，修复「当天词汇全重复」）：
-/// 1. **跨日老词的到期复习**（SRS 本意，真·间隔重复）；
+/// 选词优先级（2026-09-03 两轮修订，修复「当天词汇全重复」）：
+/// 1. **有反馈的到期复习**（SRS 本意）：用户点过「认识 / 没印象」的词
+///    （reps ≥ 2）——「没印象 10 分钟后重见」与跨日复习都属此类；
 /// 2. **新词** —— 旧逻辑里复习永远优先，而第一步梯度只有 10 分钟、
 ///    比出卡间隔还短，用户一旦不理卡，同一个词就永远霸屏、新词饿死；
-/// 3. **当日已见词的到期重见** —— 仅当池子里没有新词时才轮到。
+/// 3. **当日已见词的到期重见**（无反馈）；
+/// 4. **跨日已读词**（无反馈）—— 昨天没人理的词今天也排队等新词，
+///    否则每天一开机全是「昨天的词」，用户感受还是「全重复」。
 /// 水平过滤（允许挑战高一级）；领域打散（避开 last_domain，有替代才避开）。
 /// 返回 owned 词条（调用侧的 pool 多为局部变量）。
 fn pick(
@@ -263,7 +266,7 @@ fn pick(
         .filter(|w| level_rank(&w.level) <= user_rank + 1)
         .collect();
 
-    // 到期词按 due 升序；按首见时间分成跨日老词与当日已见两类
+    // 到期词按 due 升序；按「有无反馈」与「是否跨日」分档
     let mut due: Vec<(&WordEntry, u64)> = eligible
         .iter()
         .filter_map(|w| {
@@ -272,6 +275,9 @@ fn pick(
         })
         .collect();
     due.sort_by_key(|(_, due_at)| *due_at);
+    // 点过「认识 / 没印象」才算用户认这个词 —— reps 在首见时为 1，
+    // 每次反馈 +1（见 on_feedback）。已读未理 = 没有学习承诺，不该霸屏。
+    let has_feedback = |t: &str| srs[t].reps >= 2;
     let is_old = |t: &str| now.saturating_sub(srs[t].first_mins) >= DAY_MINS;
     let from = |candidates: &[(&WordEntry, u64)]| {
         candidates
@@ -281,10 +287,10 @@ fn pick(
             .map(|(w, _)| (*w).clone())
     };
 
-    // 1. 跨日老词复习
-    let old: Vec<_> = due.iter().copied().filter(|(w, _)| is_old(&w.term)).collect();
-    if !old.is_empty() {
-        return from(&old);
+    // 1. 有反馈的到期复习（当日「没印象」重见与跨日复习）
+    let review: Vec<_> = due.iter().copied().filter(|(w, _)| has_feedback(&w.term)).collect();
+    if !review.is_empty() {
+        return from(&review);
     }
 
     // 2. 新词：从未见过的
@@ -296,7 +302,17 @@ fn pick(
         return Some((*w).clone());
     }
 
-    // 3. 当日已见词的到期重见（池子学完了才轮到）
+    // 3. 当日已见的到期重见（无反馈）
+    let today_due: Vec<_> = due
+        .iter()
+        .copied()
+        .filter(|(w, _)| !is_old(&w.term))
+        .collect();
+    if !today_due.is_empty() {
+        return from(&today_due);
+    }
+
+    // 4. 跨日已读词（无反馈）：排队等新词学完
     from(&due)
 }
 
@@ -558,10 +574,13 @@ pub fn meta(app: &tauri::AppHandle) -> PluginMeta {
             .find(|w| w.term == t)
             .map(|w| serde_json::json!({ "term": w.term, "meaning": w.meaning }))
     };
-    // 今日已学（全量，最新的在前）
+    // 今日已学（全量，最新的在前；同一词多次重见只显示一次 ——
+    // 历史遗留/复习重见不该把「已学」刷成同一词的一屏）
+    let mut seen = std::collections::HashSet::new();
     let learned: Vec<serde_json::Value> = terms
         .iter()
         .rev()
+        .filter(|t| seen.insert((*t).clone()))
         .filter_map(|t| look_up(t))
         .collect();
     // 接下来要学的（剩余配额的预览，最多 8 个）
@@ -672,13 +691,51 @@ mod tests {
 
     // ---- 选词 ----
 
+    /// 有反馈的条目（用户点过「认识 / 没印象」，reps ≥ 2）。
+    fn entry_reviewed(due: u64, step: u32) -> SrsEntry {
+        SrsEntry {
+            reps: 2,
+            ..entry(due, step)
+        }
+    }
+
     #[test]
-    fn 跨日到期复习词优先于新词() {
+    fn 有反馈的到期复习词优先于新词() {
         let pool = vec![word("new1", "life", "beginner"), word("old1", "life", "beginner")];
         let mut srs = HashMap::new();
-        srs.insert("old1".into(), entry(0, 1)); // 已到期（首见远在一天前）
+        srs.insert("old1".into(), entry_reviewed(0, 1)); // 用户认过，已到期
         let w = pick(&pool, &srs, 10_000, 0, "").unwrap();
         assert_eq!(w.term, "old1");
+    }
+
+    #[test]
+    fn 旧版遗留的锁死状态立刻转向新词() {
+        // 回归（2026-09-03 面板截图：今日 12/12 张全是 eagle）：
+        // 旧 bug 写出来的状态是「同一词反复发卡、reps=1、first_mins 缺省为 0」。
+        // 新逻辑面对这样的状态必须立刻转向没见过的词。
+        let pool = vec![
+            word("eagle", "animal", "beginner"),
+            word("tiger", "animal", "beginner"),
+            word("apple", "food", "beginner"),
+        ];
+        let mut srs = HashMap::new();
+        srs.insert("eagle".into(), entry(0, 0)); // 早已到期、从未有反馈
+        let w = pick(&pool, &srs, 10_000, 0, "").unwrap();
+        assert_ne!(w.term, "eagle", "已读词不该再被选中");
+    }
+
+    #[test]
+    fn 跨日已读词让位新词_防隔天还是老面孔() {
+        // 回归：昨天发了卡但没人理的词，今天到期却排在所有新词前面，
+        // 用户感受就是「每天的词都一样」—— 已读词必须排队等新词。
+        let pool = vec![word("stale", "life", "beginner"), word("fresh", "food", "beginner")];
+        let mut srs = HashMap::new();
+        srs.insert("stale".into(), entry(0, 0)); // 昨天已读（reps=1），今天到期
+        let w = pick(&pool, &srs, 10_000, 0, "").unwrap();
+        assert_eq!(w.term, "fresh", "没人理过的词不该抢在新词前面");
+        // 新词学完了它才兜底
+        let w2 = pick(&pool[..1], &srs, 10_000, 0, "").unwrap();
+        assert_eq!(w2.term, "stale");
     }
 
     #[test]
@@ -863,14 +920,14 @@ mod tests {
     }
 
     #[test]
-    fn 预览不重复且到期词优先_不污染真实srs() {
+    fn 预览不重复且有反馈到期词优先_不污染真实srs() {
         let pool = vec![
             word("a", "life", "beginner"),
             word("b", "food", "beginner"),
             word("c", "life", "beginner"),
         ];
         let mut srs = HashMap::new();
-        srs.insert("a".into(), entry(0, 1)); // a 到期
+        srs.insert("a".into(), entry_reviewed(0, 1)); // a 到期且有反馈
         let out = preview(&pool, &srs, 10_000, 0, "", 3);
         let terms: Vec<&str> = out.iter().map(|w| w.term.as_str()).collect();
         assert_eq!(terms, vec!["a", "b", "c"], "到期词优先、不重复、按序给满");
