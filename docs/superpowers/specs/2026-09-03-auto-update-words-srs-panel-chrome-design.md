@@ -59,8 +59,16 @@
 **配套改动**
 
 - `tauri.conf.json`：`plugins.updater`（pubkey / endpoint）+ `bundle.createUpdaterArtifacts: true`。
+  - minisign 公钥已生成（2026-09-03，key id `E04BD49C1E8D82D7`）：
+    `RWTXgo0enNRL4BIgPXVpuj3PWJbXlIMduaFHIpFqivTivSNy8d8mMq+H`；私钥存于用户本机，绝不入库。
 - capabilities 加 `updater:default` 权限。
 - README 隐私节 + 设置文案：「更新检查仅匿名 GET GitHub Releases，不含用户数据，可关闭」。
+
+**仓库暂不公开的现状（2026-09-03 用户确认）**
+
+- F1 照常实现：release.sh 用 `gh`（带用户鉴权）发布，私有仓库也能创建 Release；
+- 私有期间客户端匿名 GET latest.json 得 404 → 走「检查失败」静默路径（设计的错误行为，无害）；
+- 仓库转公开后无需改代码，更新能力自动生效。
 
 ### 测试
 
