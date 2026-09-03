@@ -88,6 +88,7 @@ pub fn decide_visit(
     }
     let threshold = match persona {
         crate::config::Persona::Quiet => 0.02, // 安静的几乎不出门
+        crate::config::Persona::Reserved => 0.04,
         crate::config::Persona::Occasional => 0.06,
         crate::config::Persona::Chatty => 0.15,
     };

@@ -34,6 +34,51 @@ const LINES: &[(Persona, Mood, Activity, &[&str])] = &[
             "（眯着眼待着）",
         ],
     ),
+    // —— 寡言（第二档：10–15 分钟一句，极简克制）——
+    (
+        Persona::Reserved,
+        Mood::Content,
+        Activity::Working,
+        &[
+            "节奏挺好。",
+            "顺就好。",
+            "（安静陪着）",
+            "（眯着眼看你忙）",
+        ],
+    ),
+    (
+        Persona::Reserved,
+        Mood::Focused,
+        Activity::Working,
+        &[
+            "（不打扰）",
+            "忙吧，我在。",
+            "（趴在旁边）",
+            "这个状态不错。",
+        ],
+    ),
+    (
+        Persona::Reserved,
+        Mood::Frustrated,
+        Activity::Thinking,
+        &[
+            "（陪着你卡）",
+            "缓缓也行。",
+            "别硬磕。",
+            "（把下巴搁在爪子上）",
+        ],
+    ),
+    (
+        Persona::Reserved,
+        Mood::Bored,
+        Activity::Slacking,
+        &[
+            "（看你刷屏）",
+            "摸鱼就摸吧。",
+            "（打了个哈欠）",
+            "刷完记得回来。",
+        ],
+    ),
     (
         Persona::Occasional,
         Mood::Content,
@@ -293,10 +338,10 @@ fn pick_from(pool: &[&[&'static str]], rng: f64) -> Option<&'static str> {
 
 /// 兜底语料：三维选取落空时的保底。
 ///
-/// 说话频率是硬性要求（唠唠 1–3 分钟、其余最多 5 分钟一次），
-/// 选不到「合适」的话也要说点什么 —— 安静人格用极简动作型，
-/// 保持人设的同时不违反频率要求。
-const FALLBACKS: [(Persona, &[&str]); 3] = [
+/// 说话频率是硬性要求（寡言 10–15 分钟、偶尔 5–10 分钟、唠唠 1–5 分钟），
+/// 选不到「合适」的话也要说点什么 —— 安静档根本不会走到这里（talkdrive
+/// 已短路），寡言用极简动作型，保持人设的同时不违反频率要求。
+const FALLBACKS: [(Persona, &[&str]); 4] = [
     (
         Persona::Quiet,
         &[
@@ -304,6 +349,15 @@ const FALLBACKS: [(Persona, &[&str]); 3] = [
             "（甩了甩尾巴）",
             "（看了你一眼）",
             "（换了个姿势趴好）",
+        ],
+    ),
+    (
+        Persona::Reserved,
+        &[
+            "（瞥了一眼屏幕）",
+            "（挪了挪窝）",
+            "嗯，还在。",
+            "（耳朵动了动）",
         ],
     ),
     (
@@ -376,6 +430,10 @@ pub fn system_prompt(ctx: &PromptCtx, memory: Option<&str>) -> String {
         Persona::Quiet => (
             "你话很少，常常只用动作或一两个词表达。括号里写动作。",
             "不超过10个字",
+        ),
+        Persona::Reserved => (
+            "你话不多，隔好一阵子才冒一句，简短、克制、有生活感。",
+            "不超过12个字",
         ),
         Persona::Occasional => (
             "你偶尔说一句，简短、有生活感。",
@@ -465,7 +523,7 @@ mod tests {
     /// 遍历全部（人格 × 心情 × 活动）并多次取样，收集能取到的所有语料。
     fn all_lines() -> Vec<&'static str> {
         let mut out = Vec::new();
-        for persona in [Persona::Quiet, Persona::Occasional, Persona::Chatty] {
+        for persona in [Persona::Quiet, Persona::Reserved, Persona::Occasional, Persona::Chatty] {
             for mood in [Mood::Content, Mood::Focused, Mood::Bored, Mood::Frustrated] {
                 for act in [
                     Activity::Thinking,
@@ -564,7 +622,7 @@ mod tests {
     #[test]
     fn 每个有话说的格子至少四条语料() {
         // 硬编码语料量有限，格子太薄两三轮就听腻了
-        for persona in [Persona::Quiet, Persona::Occasional, Persona::Chatty] {
+        for persona in [Persona::Reserved, Persona::Occasional, Persona::Chatty] {
             for mood in [Mood::Content, Mood::Focused, Mood::Bored, Mood::Frustrated] {
                 for act in [
                     Activity::Thinking,
@@ -590,8 +648,8 @@ mod tests {
 
     #[test]
     fn 兜底池任何人格都有话说() {
-        // 频率硬性要求：三维选取落空时兜底必出话
-        for p in [Persona::Quiet, Persona::Occasional, Persona::Chatty] {
+        // 频率硬性要求：三维选取落空时兜底必出话（安静档不出场，但仍应有料）
+        for p in [Persona::Quiet, Persona::Reserved, Persona::Occasional, Persona::Chatty] {
             assert!(fallback(p, 0.5).is_some(), "{p:?} 兜底池为空");
             // 兜底也不该只有一条 —— 否则重复太快就腻了
             assert!(

@@ -59,14 +59,15 @@ const GLOBAL_GAP_SECS: u64 = 90;
 /// STUCK 至少持续这么久，之后的恢复才算「想通了」（短暂停顿不算）。
 const UNSTUCK_MIN_SECS: u64 = 120;
 
-/// 反应语料（人格 × 反应）。安静人格大多缺席 —— 安静用动作反应。
+/// 反应语料（人格 × 反应）。安静档完全不出场（feed 已短路）；
+/// 寡言档只用极简动作型。
 ///
 /// 与 persona.rs 的主表同样遵守「不提工种」：反应发生在状态迁移的瞬间，
 /// 说错工种的违和感比定时说话更强。
 const LINES: &[(Reaction, Persona, &[&str])] = &[
     (
         Reaction::FlowStart,
-        Persona::Quiet,
+        Persona::Reserved,
         &["（耳朵竖起来了）", "（凑近屏幕）"],
     ),
     (
@@ -89,7 +90,7 @@ const LINES: &[(Reaction, Persona, &[&str])] = &[
         Persona::Chatty,
         &["刚才那段挺顺的，歇口气吧。"],
     ),
-    (Reaction::Unstuck, Persona::Quiet, &["（尾巴摇了一下）"]),
+    (Reaction::Unstuck, Persona::Reserved, &["（尾巴摇了一下）"]),
     (
         Reaction::Unstuck,
         Persona::Occasional,
@@ -100,7 +101,7 @@ const LINES: &[(Reaction, Persona, &[&str])] = &[
         Persona::Chatty,
         &["卡了那么久终于动了，值得。"],
     ),
-    (Reaction::Back, Persona::Quiet, &["（抬头看了你一眼）"]),
+    (Reaction::Back, Persona::Reserved, &["（抬头看了你一眼）"]),
     (
         Reaction::Back,
         Persona::Occasional,
@@ -111,7 +112,7 @@ const LINES: &[(Reaction, Persona, &[&str])] = &[
         Persona::Chatty,
         &["你可算回来了，我都睡了一觉。"],
     ),
-    (Reaction::LateNight, Persona::Quiet, &["（打了个哈欠）"]),
+    (Reaction::LateNight, Persona::Reserved, &["（打了个哈欠）"]),
     (
         Reaction::LateNight,
         Persona::Occasional,
@@ -132,7 +133,7 @@ const LINES: &[(Reaction, Persona, &[&str])] = &[
         Persona::Chatty,
         &["你至少一小时没离开椅子了。站起来晃晃，我看着屏幕。"],
     ),
-    (Reaction::MeetingStart, Persona::Quiet, &["（悄悄趴下了）"]),
+    (Reaction::MeetingStart, Persona::Reserved, &["（悄悄趴下了）"]),
     (
         Reaction::MeetingStart,
         Persona::Occasional,
@@ -143,7 +144,7 @@ const LINES: &[(Reaction, Persona, &[&str])] = &[
         Persona::Chatty,
         &["你开会，我装看不见你，你也装看不见我。"],
     ),
-    (Reaction::MeetingEnd, Persona::Quiet, &["（探出头来）"]),
+    (Reaction::MeetingEnd, Persona::Reserved, &["（探出头来）"]),
     (
         Reaction::MeetingEnd,
         Persona::Occasional,
@@ -154,7 +155,7 @@ const LINES: &[(Reaction, Persona, &[&str])] = &[
         Persona::Chatty,
         &["散会了散会了，刚才憋死我了。"],
     ),
-    (Reaction::BuildStart, Persona::Quiet, &["（搬了个小板凳）"]),
+    (Reaction::BuildStart, Persona::Reserved, &["（搬了个小板凳）"]),
     (
         Reaction::BuildStart,
         Persona::Occasional,
@@ -165,7 +166,7 @@ const LINES: &[(Reaction, Persona, &[&str])] = &[
         Persona::Chatty,
         &["又跑起来了？行，我帮你盯着。", "等着吧，急也没用。"],
     ),
-    (Reaction::BuildEnd, Persona::Quiet, &["（耳朵动了一下）"]),
+    (Reaction::BuildEnd, Persona::Reserved, &["（耳朵动了一下）"]),
     (
         Reaction::BuildEnd,
         Persona::Occasional,
@@ -227,6 +228,12 @@ impl Reactor {
         cur: &PetState,
         mem: &DayMemory,
     ) -> Option<&'static str> {
+        // 第一档（安静）：事件反应也是情感对话 —— 完全静音。
+        // 插件卡片走独立通道，不受此影响。
+        if persona == Persona::Quiet {
+            return None;
+        }
+
         let now = Instant::now();
 
         let candidate = match prev {
@@ -387,14 +394,25 @@ mod tests {
     }
 
     #[test]
-    fn 安静人格进入心流用动作表达() {
+    fn 安静人格不做任何事件反应() {
+        // 第一档硬性要求：完全不会情感对话，仅保留插件卡片
+        let mut r = Reactor::new();
+        let prev = editing(Tempo::Normal);
+        let cur = editing(Tempo::Flow);
+        assert!(r
+            .feed(Persona::Quiet, Some(&prev), &cur, &DayMemory::default())
+            .is_none());
+    }
+
+    #[test]
+    fn 寡言人格用极简动作反应() {
         let mut r = Reactor::new();
         let prev = editing(Tempo::Normal);
         let cur = editing(Tempo::Flow);
         let line = r
-            .feed(Persona::Quiet, Some(&prev), &cur, &DayMemory::default())
+            .feed(Persona::Reserved, Some(&prev), &cur, &DayMemory::default())
             .unwrap();
-        assert!(line.starts_with('（'), "安静人格应是动作描述：{line}");
+        assert!(!line.is_empty());
     }
 
     #[test]

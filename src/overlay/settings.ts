@@ -40,10 +40,13 @@ const SCOPE_LABELS: Record<RoamScope, string> = {
 };
 
 const PERSONA_LABELS: Record<Persona, string> = {
-  quiet: "安静 · 只用动作表达",
-  occasional: "偶尔吐槽 · 低频冒泡",
-  chatty: "唠唠 · 主动关心",
+  quiet: "安静 · 不闲聊，只弹插件卡片",
+  reserved: "寡言 · 十来分钟冒一句",
+  occasional: "偶尔 · 五到十分钟冒一句",
+  chatty: "唠唠 · 一到五分钟冒一句",
 };
+
+const PERSONA_ORDER: Persona[] = ["quiet", "reserved", "occasional", "chatty"];
 
 /**
  * 设置面板。
@@ -179,13 +182,10 @@ export class SettingsPanel {
     this.el.appendChild(
       this.rowSelect(
         "性格",
-        (["quiet", "occasional", "chatty"] as Persona[]).map(
-          (p) => PERSONA_LABELS[p],
-        ),
-        ["quiet", "occasional", "chatty"].indexOf(c.persona),
+        PERSONA_ORDER.map((p) => PERSONA_LABELS[p]),
+        PERSONA_ORDER.indexOf(c.persona),
         (i) => {
-          const list: Persona[] = ["quiet", "occasional", "chatty"];
-          void this.patch({ persona: list[i] });
+          void this.patch({ persona: PERSONA_ORDER[i] });
         },
       ),
     );

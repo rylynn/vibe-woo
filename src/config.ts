@@ -2,7 +2,13 @@ import { invoke } from "@tauri-apps/api/core";
 import type { Reminder } from "./overlay/reminders";
 import type { AvatarConfigView } from "./avatar/types";
 
-export type Persona = "quiet" | "occasional" | "chatty";
+/**
+ * 人格四档（2026-09-03）：档位只约束闲聊（定时说话 + 事件反应）；
+ * 插件卡片走独立通道，不受档位影响。
+ * quiet=第一档（不闲聊）· reserved=第二档（10–15 分钟）
+ * occasional=第三档（5–10 分钟）· chatty=第四档（1–5 分钟）
+ */
+export type Persona = "quiet" | "reserved" | "occasional" | "chatty";
 export type RoamScope = "still" | "nearby" | "halfscreen" | "fullscreen";
 export type LlmProtocol =
   | "openai-completions"

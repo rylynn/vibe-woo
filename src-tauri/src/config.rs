@@ -9,15 +9,20 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
-/// 宠物人格档位。决定它主动说话的频率。
+/// 宠物人格档位。决定它主动说话的频率（2026-09-03 四档修订）。
+///
+/// 档位只约束**闲聊**（talkdrive 定时说话 + react 事件反应）；
+/// 插件卡片（学外语/番茄/新闻等）走独立的仲裁器通道，不受档位影响。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Persona {
-    /// 只用动作表达，永不主动弹文字。默认。
+    /// 第一档：完全不闲聊、不做事件反应，只保留插件卡片。默认。
     Quiet,
-    /// 关键时刻冒一句短气泡。
+    /// 第二档：隔 10–15 分钟冒一句。
+    Reserved,
+    /// 第三档：隔 5–10 分钟冒一句。
     Occasional,
-    /// 主动关心与提问。
+    /// 第四档：隔 1–5 分钟冒一句，主动关心与提问。
     Chatty,
 }
 

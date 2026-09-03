@@ -1,8 +1,9 @@
 //! 宠物说话驱动：按人格频率，结合心情与活动冒一句。
 //!
 //! 双轨制：有 LLM 配置走 LLM，失败或未配置落回本地语料库，
-//! 语料选不到时走兜底池 —— 频率是硬性要求：
-//! 唠唠 1–3 分钟一句，其余人格最多 5 分钟必说一次。
+//! 语料选不到时走兜底池 —— 频率是硬性要求（2026-09-03 四档修订）：
+//! 安静档完全不闲聊（只有插件卡片，插件通道独立且有优先级控制）；
+//! 寡言 10–15 分钟一句；偶尔 5–10 分钟一句；唠唠 1–5 分钟一句。
 
 use std::time::Duration;
 
@@ -29,12 +30,13 @@ pub struct Talk {
     pub source: TalkSource,
 }
 
-/// 各人格的说话间隔（秒）。频率是硬性要求：
-/// 唠唠 1–3 分钟一句；安静/偶尔最多 5 分钟必须冒一次。
+/// 各人格的说话间隔（秒）。频率是硬性要求（四档）：
+/// 安静档完全不闲聊（不在表内，见下方短路）；寡言 10–15 分钟；
+/// 偶尔 5–10 分钟；唠唠 1–5 分钟。
 const TALK_GAP_SECS: [(Persona, u64, u64); 3] = [
-    (Persona::Quiet, 240, 300),      // 4–5 分钟
-    (Persona::Occasional, 180, 300), // 3–5 分钟
-    (Persona::Chatty, 60, 180),      // 1–3 分钟
+    (Persona::Reserved, 600, 900),   // 10–15 分钟
+    (Persona::Occasional, 300, 600), // 5–10 分钟
+    (Persona::Chatty, 60, 300),      // 1–5 分钟
 ];
 
 /// 没说上话（睡觉/串门/彻底无语料）时的短重试间隔。
@@ -58,6 +60,13 @@ pub fn spawn(app: &AppHandle) {
             }
 
             let cfg = configcmd::current();
+
+            // 第一档（安静）：完全不做情感对话 —— 定时闲聊与事件反应
+            // 全部静音，只保留插件卡片（插件通道独立、有自己的优先级）。
+            if cfg.persona == Persona::Quiet {
+                next_at = now + Duration::from_secs(RETRY_SECS);
+                continue;
+            }
 
             let Some(s) = crate::sensedrive::shared_state() else {
                 next_at = now + Duration::from_secs(RETRY_SECS);
