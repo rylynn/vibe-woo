@@ -6,8 +6,10 @@ interface WordPayload {
   reading: string;
   meaning: string;
   example: string;
+  example_zh: string;
   hook: string | null;
   ai: boolean;
+  hard: boolean;
 }
 
 /** 配置（与 Rust WordsConfig 契约一致）。 */
@@ -65,17 +67,21 @@ export const wordFrontend: PluginFrontend = {
     termRow.append(term, reading);
     el.appendChild(termRow);
 
+    // 难词（连续没印象）钩子置顶：紧跟词条，先于释义 —— 越难越要先给记忆抓手
+    const hookEl = () => {
+      const hook = document.createElement("div");
+      hook.className = "pet-word-hook";
+      hook.textContent = `💡 ${p.hook}`;
+      return hook;
+    };
+    if (p.hook && p.hard) el.appendChild(hookEl());
+
     const meaning = document.createElement("div");
     meaning.className = "pet-word-meaning";
     meaning.textContent = p.meaning;
     el.appendChild(meaning);
 
-    if (p.hook) {
-      const hook = document.createElement("div");
-      hook.className = "pet-word-hook";
-      hook.textContent = `💡 ${p.hook}`;
-      el.appendChild(hook);
-    }
+    if (p.hook && !p.hard) el.appendChild(hookEl());
 
     // 例句可为空（ECDICT 扩展词书无例句，由 LLM 异步增强补）
     if (p.example) {
@@ -83,6 +89,12 @@ export const wordFrontend: PluginFrontend = {
       example.className = "pet-word-example";
       example.textContent = p.example;
       el.appendChild(example);
+      if (p.example_zh) {
+        const zh = document.createElement("div");
+        zh.className = "pet-word-example-zh";
+        zh.textContent = p.example_zh;
+        el.appendChild(zh);
+      }
     }
 
     // 反馈闭环：认识 / 没印象（点击后由 cardHost 关闭气泡）
@@ -107,7 +119,8 @@ export const wordFrontend: PluginFrontend = {
     const s = data as {
       enabled: boolean;
       language: string;
-      today_count: number;
+      today_new: number;
+      today_review: number;
       daily_limit: number;
       learned: { term: string; meaning: string }[];
       upcoming: { term: string; meaning: string }[];
@@ -120,7 +133,7 @@ export const wordFrontend: PluginFrontend = {
     }
     const head = document.createElement("div");
     head.className = "pet-word-section-head";
-    head.textContent = `今日 ${s.today_count}/${s.daily_limit} 张`;
+    head.textContent = `今日新学 ${s.today_new}/${s.daily_limit} · 复习 ${s.today_review}`;
     el.appendChild(head);
 
     const renderList = (items: { term: string; meaning: string }[]) => {
@@ -217,7 +230,7 @@ export const wordFrontend: PluginFrontend = {
     const hint = document.createElement("div");
     hint.className = "pet-plugin-form-hint";
     hint.textContent =
-      "开启后第一张立即出现；之后在键盘静默 1 分钟后才弹（走开、歇着、刷网页、想事情都算）。词与释义来自内置词库（雅思/托福/日常 × 英日）；配置 AI 后例句与记忆钩子按你的目标定制。没印象的词 10 分钟后会再回来";
+      "开启后第一张立即出现；之后在键盘静默 1 分钟后才弹。每日上限只数新词，复习卡是额外补充。「没印象」的词当天会按 10 分钟/半小时/2 小时回来，隔天再复习；认识的词当天不再出现，给新词让位。词、释义、例句与翻译都来自内置词库；配置 AI 后例句与记忆钩子按你的目标定制";
     el.appendChild(hint);
 
     const save = document.createElement("button");
