@@ -273,6 +273,14 @@ pub struct Config {
     pub excluded_apps: Vec<String>,
     pub llm: LlmConfig,
     pub social: SocialConfig,
+    /// 自动更新：默认开。每天匿名 GET 一次 GitHub Releases 检查新版本，
+    /// 不上传任何用户数据；下载完成后等用户休息时才安装重启。
+    #[serde(default = "default_true")]
+    pub auto_update: bool,
+    /// 上次运行的版本号。升级后启动据此说一次「更新了什么」，随后回写。
+    /// 空串 = 从未记录（首次安装，不提示）。
+    #[serde(default)]
+    pub last_run_version: String,
     /// 已领养的形象。None 表示首次安装尚未选择，前端据此弹选择窗。
     pub avatar: Option<AvatarConfig>,
 }
@@ -298,6 +306,8 @@ impl Default for Config {
             excluded_apps: Vec::new(),
             llm: LlmConfig::default(),
             social: SocialConfig::default(),
+            auto_update: true,
+            last_run_version: String::new(),
             avatar: None,
         }
     }
@@ -595,5 +605,17 @@ mod tests {
     fn 新形状枚举序列化与前端对齐() {
         assert_eq!(serde_json::to_string(&BodyShape::Shroom).unwrap(), "\"shroom\"");
         assert_eq!(serde_json::to_string(&BodyShape::Drop).unwrap(), "\"drop\"");
+    }
+
+    #[test]
+    fn 旧配置缺失auto_update字段时默认开启() {
+        // 0.4.x 的 config.json 没有 auto_update / last_run_version ——
+        // 升级后必须默认开启更新，而不是永远关着
+        let c: Config = serde_json::from_str(
+            r#"{"size_index":1,"roam_scope":"nearby","persona":"quiet"}"#,
+        )
+        .unwrap();
+        assert!(c.auto_update);
+        assert_eq!(c.last_run_version, "");
     }
 }
