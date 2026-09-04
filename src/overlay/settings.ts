@@ -9,7 +9,7 @@ import {
   type Persona,
   type RoamScope,
 } from "../config";
-import { enablePanelDrag } from "./panel-drag";
+import { panelChrome } from "./chrome";
 import { avatarFromView, type PetAvatar } from "../avatar/types";
 import { drawAvatarStill } from "./avatar-picker";
 import { PluginSettingsShell } from "../plugins/settings";
@@ -71,8 +71,6 @@ export class SettingsPanel {
     this.el.className = "pet-settings";
     this.el.style.display = "none";
     document.body.appendChild(this.el);
-    // 标题栏长按拖动，与宠物拖动手感一致
-    enablePanelDrag(this.el, ".pet-settings-head");
   }
 
   async show(): Promise<void> {
@@ -90,11 +88,7 @@ export class SettingsPanel {
 
   private renderLoading(): void {
     this.el.replaceChildren();
-    const head = document.createElement("div");
-    head.className = "pet-settings-head";
-    const t = document.createElement("span");
-    t.textContent = "Vibe Pet 设置";
-    head.appendChild(t);
+    const head = panelChrome(this.el, "Vibe Pet 设置", () => this.hide());
     this.el.appendChild(head);
     const loading = document.createElement("div");
     loading.className = "pet-settings-hint";
@@ -336,32 +330,9 @@ export class SettingsPanel {
     return r;
   }
 
-  /** 标题栏。onBack 提供时左侧出现返回按钮（二级/三级页）。 */
+  /** 标题栏（panelChrome 统一构建：拖拽 + 返回 + ×）。 */
   private header(title: string, onBack?: () => void): HTMLElement {
-    const h = document.createElement("div");
-    h.className = "pet-settings-head";
-    if (onBack) {
-      const back = document.createElement("button");
-      back.className = "pet-settings-back";
-      back.textContent = "‹ 返回";
-      back.title = "返回上一页";
-      back.addEventListener("pointerdown", (e) => {
-        e.stopPropagation();
-        onBack();
-      });
-      h.appendChild(back);
-    }
-    const t = document.createElement("span");
-    t.textContent = title;
-    const x = document.createElement("button");
-    x.className = "pet-settings-close";
-    x.textContent = "×";
-    x.addEventListener("pointerdown", (e) => {
-      e.stopPropagation();
-      this.hide();
-    });
-    h.append(t, x);
-    return h;
+    return panelChrome(this.el, title, () => this.hide(), onBack ? { back: onBack } : {});
   }
 
   /** 二级页：插件清单，点选进入三级页。 */
