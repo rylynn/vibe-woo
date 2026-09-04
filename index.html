@@ -148,7 +148,7 @@
         color: #fff;
       }
 
-      /* 统一面板关闭按钮（chrome.ts）。旧类名保留：未迁移元素仍可用 */
+      /* 统一关闭按钮（chrome.ts 的 panelChrome 生成）；旧类名按 spec 留作 CSS 别名，当前无消费者 */
       .pet-panel-close {
         border: 0;
         background: transparent;
@@ -236,27 +236,6 @@
       /* 关于面板：与设置面板同源样式，只是稍宽一点放得下构建时间与标识符 */
       .pet-about {
         width: 360px;
-      }
-
-      .pet-about-head-left {
-        display: flex;
-        align-items: center;
-        gap: 10px;
-      }
-
-      .pet-about-back {
-        padding: 1px 8px;
-        border: 1px solid rgba(255, 255, 255, 0.16);
-        border-radius: 6px;
-        background: rgba(255, 255, 255, 0.06);
-        color: #a8b0c2;
-        font: 11px/1.5 ui-sans-serif, -apple-system, sans-serif;
-        cursor: default;
-      }
-
-      .pet-about-back:hover {
-        color: #fff;
-        border-color: rgba(124, 245, 196, 0.55);
       }
 
       .pet-about-brand {

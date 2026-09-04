@@ -50,4 +50,65 @@ describe("panelChrome", () => {
     panelChrome(panel, "b", () => {});
     expect(panel.dataset.petChromeDrag).toBe("1");
   });
+
+  it("标题栏内交互控件（×/input）不触发拖拽位移", () => {
+    const panel = document.createElement("div");
+    document.body.appendChild(panel);
+    const head = panelChrome(panel, "测试", () => {});
+    // 预置哨兵定位：拖拽逻辑一旦接管就会改写为计算坐标，断言才不至于空转
+    panel.style.left = "40px";
+    panel.style.top = "40px";
+    const x = head.querySelector("button.pet-panel-close")!;
+    // 控件豁免：× 上的按下即使带左键也不进入拖拽，阈值内移动更不应产生位移
+    x.dispatchEvent(
+      new PointerEvent("pointerdown", {
+        bubbles: true,
+        buttons: 1,
+        clientX: 100,
+        clientY: 100,
+      }),
+    );
+    window.dispatchEvent(
+      new PointerEvent("pointermove", {
+        bubbles: true,
+        buttons: 1,
+        clientX: 102, // dx=2 < 阈值 4
+        clientY: 101,
+      }),
+    );
+    window.dispatchEvent(
+      new PointerEvent("pointermove", {
+        bubbles: true,
+        buttons: 1,
+        clientX: 130, // 远超阈值：若拖拽被误挂，这里必然改写定位
+        clientY: 140,
+      }),
+    );
+    expect(panel.style.left).toBe("40px");
+    expect(panel.style.top).toBe("40px");
+    expect(panel.style.transform).toBe("");
+
+    // input 同理（spec：button/input/select 不触发拖拽）
+    const input = document.createElement("input");
+    head.appendChild(input);
+    input.dispatchEvent(
+      new PointerEvent("pointerdown", {
+        bubbles: true,
+        buttons: 1,
+        clientX: 100,
+        clientY: 100,
+      }),
+    );
+    window.dispatchEvent(
+      new PointerEvent("pointermove", {
+        bubbles: true,
+        buttons: 1,
+        clientX: 140,
+        clientY: 150,
+      }),
+    );
+    expect(panel.style.left).toBe("40px");
+    expect(panel.style.top).toBe("40px");
+    panel.remove();
+  });
 });
