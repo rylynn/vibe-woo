@@ -37,6 +37,7 @@ mod sensor;
 mod state;
 mod tray;
 mod usage;
+mod updater;
 mod window;
 
 use tauri::Manager;
