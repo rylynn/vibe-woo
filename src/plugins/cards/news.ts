@@ -22,9 +22,9 @@ const DEFAULT_CFG: NewsConfigView = {
   fetch_hour: 9,
 };
 
-/** 类别（与 Rust CATEGORIES 清单一致）。 */
+/** 类别（与 Rust CATEGORIES 清单一致）。tech 已聚焦为 AI·广告，id 不变保兼容。 */
 const CATEGORIES: [string, string][] = [
-  ["tech", "科技"],
+  ["tech", "AI·广告"],
   ["finance", "财经"],
   ["design", "设计"],
 ];
@@ -149,7 +149,7 @@ export const newsFrontend: PluginFrontend = {
     const hint = document.createElement("div");
     hint.className = "pet-plugin-form-hint";
     hint.textContent =
-      "每天到点抓一次，之后从缓存出卡（2 小时一条）；标题与链接来自源站，配置 AI 后附一句当日点评";
+      "从抓取时点起每 2 小时增量拉取当天的新内容（约 2 小时出一条，当天没有就不打扰）；标题与链接来自源站，配置 AI 后附一句当日点评";
     el.appendChild(hint);
 
     const save = document.createElement("button");

@@ -1,18 +1,26 @@
 //! 每日资讯插件：RSS 拉取 + 类别过滤 + 当日缓存（设计文档 6.2）。
 //!
-//! 三条原则：
-//! - 每天 `fetch_hour` **拉一次**（只拉选中类别），结果落盘缓存；当日后续
-//!   tick 只从缓存出卡，不再请求网络 —— 资讯不需要实时性。
+//! 四条原则：
+//! - **增量抓取**：从每天 `fetch_hour` 起每 2 小时拉一轮（只拉选中类别），
+//!   只收集 pubDate 为**本地当天**的条目入缓存 —— 一手博客当天下午发的
+//!   也能看到；当天没有新内容就静默不出卡，绝不拿昨天的凑数。
 //! - 标题与链接永远来自源站（真实 URL，点了必须能开）；LLM 只把当日头条
-//!   浓缩成一句 `digest` 附在卡上，未配置 LLM 则 digest 为空。
-//! - 源失败**静默**（下个 fetch 周期再试），绝不弹错误气泡 —— 源站挂了
+//!   浓缩成一句 `digest` 附在卡上（当天只在首批内容时生成一次，增量轮不
+//!   重复调用，省 token），未配置 LLM 则 digest 为空。
+//! - 源失败**静默**（下轮增量自然重试），绝不弹错误气泡 —— 源站挂了
 //!   不是用户需要知道的事。
+//! - tech 类源聚焦「AI 一手进展 + 互联网广告行业」：大模型官网技术博客
+//!   （OpenAI / DeepMind / Google AI / Hugging Face）、业界播客（Latent
+//!   Space）、广告行业一手媒体（Adweek / AdExchanger / Modern Retail）、
+//!   中文聚合补充（量子位）。「筛选」靠两层实现：源级聚焦 + 仅当天过滤。
 //!
 //! 网络全部走异步旁路线程（与 words 的 LLM 增强同一模式）—— host 线程
 //! 绝不被网络请求阻塞，其他插件不受影响。
 //!
-//! 内置源清单可用性以 2026-09-02 网络实测为准；世界类中文源（BBC 等）
-//! 在目标网络不可达，暂缺 —— 见设计文档「明确不做」的诚实记录。
+//! 内置源清单可用性以 2026-09-04 网络实测为准；机器之心 RSS 已失效
+//! （返回 HTML）、Anthropic 官网无 RSS、Marketing Dive 404、麦迪逊邦
+//! 不可达、AdExchanger 对非浏览器请求返回反爬页、AdAge 直接拒绝，
+//! 均不收录。世界类中文源（BBC 等）同样不可达，暂缺。
 
 use std::sync::Mutex;
 use std::time::Duration;
@@ -31,7 +39,10 @@ const STATE_FILE: &str = "news-cache";
 /// 两张资讯卡之间的最小间隔（分钟）。设计 5.1：资讯 2h。
 const NEWS_GAP_MINS: u64 = 120;
 
-/// 每个源最多取的条数（控制当日缓存规模）。
+/// 增量抓取轮次间隔（分钟）：从 fetch_hour 起，每 2 小时拉一轮当天新条目。
+const FETCH_INTERVAL_MINS: u64 = 120;
+
+/// 每个源每轮最多取的**当天**条数（控制当日缓存规模；先过滤当天再截断）。
 const PER_SOURCE_ITEMS: usize = 8;
 
 /// 轻量轮询间隔：读配置感知开关（只读本地文件）。
@@ -47,28 +58,63 @@ struct RssSource {
 }
 
 const SOURCES: &[RssSource] = &[
+    // ---- AI 一手源：大模型官网技术博客与业界播客 ----
     RssSource {
-        id: "sspai",
-        name: "少数派",
-        url: "https://sspai.com/feed",
+        id: "openai-news",
+        name: "OpenAI",
+        url: "https://openai.com/news/rss.xml",
         category: "tech",
     },
     RssSource {
-        id: "36kr",
-        name: "36氪",
-        url: "https://36kr.com/feed",
+        id: "deepmind-blog",
+        name: "DeepMind",
+        url: "https://deepmind.google/blog/rss.xml",
         category: "tech",
     },
     RssSource {
-        id: "ithome",
-        name: "IT之家",
-        url: "https://www.ithome.com/rss/",
+        id: "google-ai-blog",
+        name: "Google AI",
+        url: "https://blog.google/technology/ai/rss/",
         category: "tech",
     },
     RssSource {
-        id: "solidot",
-        name: "奇客",
-        url: "https://www.solidot.org/index.rss",
+        id: "hf-blog",
+        name: "Hugging Face",
+        url: "https://huggingface.co/blog/feed.xml",
+        category: "tech",
+    },
+    RssSource {
+        id: "latent-space",
+        name: "Latent Space",
+        url: "https://www.latent.space/feed",
+        category: "tech",
+    },
+    // ---- 互联网广告行业一手源 ----
+    // （AdExchanger 对非浏览器请求返回 HTML 反爬页、AdAge 直接拒绝，
+    // 均不稳定，不收录）
+    RssSource {
+        id: "adweek",
+        name: "Adweek",
+        url: "https://www.adweek.com/feed/",
+        category: "tech",
+    },
+    RssSource {
+        id: "digiday",
+        name: "Digiday",
+        url: "https://www.digiday.com/feed/",
+        category: "tech",
+    },
+    RssSource {
+        id: "modern-retail",
+        name: "Modern Retail",
+        url: "https://www.modernretail.co/feed/",
+        category: "tech",
+    },
+    // ---- 中文聚合补充（非一手，兼顾中文阅读）----
+    RssSource {
+        id: "qbitai",
+        name: "量子位",
+        url: "https://www.qbitai.com/feed",
         category: "tech",
     },
     RssSource {
@@ -92,8 +138,9 @@ const SOURCES: &[RssSource] = &[
 ];
 
 /// 类别（id，中文名）。用户最多选 3 个。
+/// tech 已聚焦为「AI·广告」，id 不变 —— 老用户配置无缝兼容。
 const CATEGORIES: &[(&str, &str)] = &[
-    ("tech", "科技"),
+    ("tech", "AI·广告"),
     ("finance", "财经"),
     ("design", "设计"),
 ];
@@ -114,7 +161,7 @@ pub struct NewsConfig {
     pub enabled: bool,
     /// 关注类别（≤3，内置清单里选）。
     pub categories: Vec<String>,
-    /// 每天几点拉取（0-23，本地时间）。
+    /// 每天从几点开始抓取（0-23，本地时间），之后每 2 小时一轮增量。
     pub fetch_hour: u32,
 }
 
@@ -156,14 +203,18 @@ struct NewsState {
     /// 缓存属于哪天（跨天重置）。
     date: String,
     items: Vec<NewsItem>,
-    /// 下一张卡的游标（当日顺序消费）。
+    /// 下一张卡的游标（当日顺序消费；增量轮追加条目、不重置游标）。
     next_idx: usize,
-    /// LLM 当日点评（可空）。
+    /// LLM 当日点评（可空；当天只在首批内容时生成一次）。
     digest: String,
-    /// 今天是否已拉取。
+    /// 今天是否已拉取过（拉取中为 false，防止出半截卡）。
     fetched: bool,
     /// 上次出卡时刻（epoch 分钟），频率闸。
     last_card_mins: u64,
+    /// 上次拉取时刻（epoch 分钟）。0 = 今天还没拉过（旧缓存缺字段自动补 0，
+    /// 到点即触发首轮，无害）。
+    #[serde(default)]
+    last_fetch_mins: u64,
 }
 
 static STATE: Mutex<Option<NewsState>> = Mutex::new(None);
@@ -198,13 +249,24 @@ fn rollover(s: &mut NewsState, today: &str) {
 
 // ---------- 解析与拉取（纯函数 + 异步旁路） ----------
 
-/// 从一段 RSS 2.0 文本提取条目（解析交给 rss crate，这里只做裁剪）。
-fn collect_from(text: &str, source_name: &str) -> Vec<NewsItem> {
+/// RSS 条目 pubDate（RFC2822）转本地日期 `YYYY-MM-DD`；缺失或非法返回 None。
+fn pubdate_local(it: &rss::Item) -> Option<String> {
+    let raw = it.pub_date()?;
+    let dt = chrono::DateTime::parse_from_rfc2822(raw).ok()?;
+    Some(dt.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string())
+}
+
+/// 从一段 RSS 2.0 文本提取**本地当天**的条目（解析交给 rss crate，这里只做裁剪）。
+///
+/// 严格「仅当天」：pubDate 缺失、非法、非当天一律丢弃 —— 宁可少一条，
+/// 不拿昨天的凑数。先过滤当天再截断，避免源把旧条目排在前面挤掉新内容。
+fn collect_from(text: &str, source_name: &str, today: &str) -> Vec<NewsItem> {
     let Ok(ch) = rss::Channel::read_from(text.as_bytes()) else {
         return Vec::new();
     };
     ch.items()
         .iter()
+        .filter(|it| pubdate_local(it).as_deref() == Some(today))
         .take(PER_SOURCE_ITEMS)
         .filter_map(|it| {
             let headline = it.title()?.trim().to_string();
@@ -221,16 +283,15 @@ fn collect_from(text: &str, source_name: &str) -> Vec<NewsItem> {
         .collect()
 }
 
-/// 合并多源条目并按链接去重（先到先得）。
-fn merge_dedup(batches: Vec<Vec<NewsItem>>) -> Vec<NewsItem> {
-    let mut seen = std::collections::HashSet::new();
-    let mut out = Vec::new();
-    for item in batches.into_iter().flatten() {
-        if seen.insert(item.url.clone()) {
-            out.push(item);
+/// 增量合并：新条目按 url 去重后**追加**（已出过的卡不重复出，游标由调用方维护）。
+fn merge_into(existing: &mut Vec<NewsItem>, incoming: Vec<NewsItem>) {
+    let mut seen: std::collections::HashSet<String> =
+        existing.iter().map(|i| i.url.clone()).collect();
+    for it in incoming {
+        if seen.insert(it.url.clone()) {
+            existing.push(it);
         }
     }
-    out
 }
 
 fn sources_for(categories: &[String]) -> Vec<&'static RssSource> {
@@ -240,7 +301,16 @@ fn sources_for(categories: &[String]) -> Vec<&'static RssSource> {
         .collect()
 }
 
-/// 异步拉取选中类别的全部源并写入缓存；成功后顺手让 LLM 浓缩当日点评。
+/// 是否该拉一轮（纯函数，单测入口）：过了抓取时点，且距上轮 ≥ 2 小时。
+/// `last_fetch_mins == 0`（新一天首轮 / 旧缓存）时必然为真。
+fn due_fetch(s: &NewsState, mins_of_day: u32, now: u64, fetch_hour: u32) -> bool {
+    mins_of_day / 60 >= fetch_hour && now.saturating_sub(s.last_fetch_mins) >= FETCH_INTERVAL_MINS
+}
+
+/// 异步拉取选中类别的全部源，**增量合并**进缓存。
+///
+/// digest 只在「当天首批内容」落位时生成一次：增量轮（items 已有内容）
+/// 不再调 LLM —— 当天头条不会翻盘，省 token。
 fn spawn_fetch(cfg: NewsConfig, today: String, app: tauri::AppHandle) {
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_current_thread()
@@ -266,29 +336,30 @@ fn spawn_fetch(cfg: NewsConfig, today: String, app: tauri::AppHandle) {
             });
             match fetched {
                 Ok(text) => {
-                    let items = collect_from(&text, src.name);
-                    eprintln!("[plugin:{ID}] {}：{} 条", src.name, items.len());
+                    let items = collect_from(&text, src.name, &today);
+                    eprintln!("[plugin:{ID}] {}：当天 {} 条", src.name, items.len());
                     batches.push(items);
                 }
                 Err(e) => {
-                    // 源失败静默：下个 fetch 周期再试，不打扰用户
+                    // 源失败静默：下轮增量（2 小时后）自然重试，不打扰用户
                     eprintln!("[plugin:{ID}] 源 {} 拉取失败（静默重试）：{e}", src.name);
                 }
             }
         }
 
-        let items = merge_dedup(batches);
-        with_state(|s| {
+        let incoming: Vec<NewsItem> = batches.into_iter().flatten().collect();
+        let (digest_needed, all_items) = with_state(|s| {
+            let was_empty = s.items.is_empty();
+            merge_into(&mut s.items, incoming);
             s.date = today.clone();
-            s.items = items.clone();
-            s.next_idx = 0;
-            s.digest = String::new();
+            s.next_idx = s.next_idx.min(s.items.len()); // 防御：游标不越界
             s.fetched = true;
+            (was_empty && !s.items.is_empty(), s.items.clone())
         });
         save_state(&app);
 
-        if !items.is_empty() {
-            spawn_digest(cfg, items, today, app);
+        if digest_needed {
+            spawn_digest(cfg, all_items, today, app);
         }
     });
 }
@@ -378,13 +449,15 @@ impl Plugin for NewsPlugin {
         let today = now_ctx.date.clone();
         let now = epoch_mins();
 
-        // 该拉取了（拉取走异步旁路，tick 只负责触发）
+        // 该拉取了（拉取走异步旁路，tick 只负责触发）：从 fetch_hour 起
+        // 每 2 小时一轮增量，只收当天新条目 —— 一手博客下午发的也能看到
         let need_fetch = with_state(|s| {
             rollover(s, &today);
-            !s.fetched && (now_ctx.minutes / 60) >= cfg.fetch_hour
+            due_fetch(s, now_ctx.minutes, now, cfg.fetch_hour)
         });
         if need_fetch {
-            with_state(|s| s.fetched = true); // 防止下个 tick 重复触发
+            // 立刻记账，防止 30 秒后的下个 tick 重复触发
+            with_state(|s| s.last_fetch_mins = now);
             spawn_fetch(cfg.clone(), today.clone(), ctx.app.clone());
         }
 
@@ -476,42 +549,108 @@ pub fn meta(app: &tauri::AppHandle) -> PluginMeta {
 mod tests {
     use super::*;
 
-    const SAMPLE_RSS: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
-<rss version="2.0"><channel>
-<title>Test</title>
-<item><title>第一条 &amp; 细节</title><link>https://example.com/1</link></item>
-<item><title>第二条</title><link>https://example.com/2</link></item>
-<item><title>无链接</title></item>
-</channel></rss>"#;
+    /// 本地今天的 `YYYY-MM-DD`（与 collect_from 的 today 参数同格式）。
+    fn today_str() -> String {
+        chrono::Local::now().format("%Y-%m-%d").to_string()
+    }
+
+    /// 本地现在时刻的 RFC2822 字符串（RSS pubDate 用的格式）。
+    fn now_rfc2822() -> String {
+        chrono::Local::now().to_rfc2822()
+    }
+
+    /// 昨天此刻的 RFC2822 字符串（构造「过期条目」用）。
+    fn yesterday_rfc2822() -> String {
+        (chrono::Local::now() - chrono::Duration::hours(24)).to_rfc2822()
+    }
+
+    fn rss_item(title: &str, link: &str, pubdate: Option<&str>) -> String {
+        match pubdate {
+            Some(p) => format!(
+                "<item><title>{title}</title><link>{link}</link><pubDate>{p}</pubDate></item>"
+            ),
+            None => format!("<item><title>{title}</title><link>{link}</link></item>"),
+        }
+    }
 
     #[test]
-    fn 解析样例rss并跳过缺链接条目() {
-        let items = collect_from(SAMPLE_RSS, "测试源");
-        assert_eq!(items.len(), 2);
-        assert_eq!(items[0].headline, "第一条 & 细节");
+    fn 解析样例rss仅保留当天条目() {
+        let today = today_str();
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel><title>Test</title>
+{}{}{}{}
+</channel></rss>"#,
+            rss_item("今天的 &amp; 细节", "https://example.com/1", Some(&now_rfc2822())),
+            rss_item("昨天", "https://example.com/2", Some(&yesterday_rfc2822())),
+            rss_item("缺日期", "https://example.com/3", None),
+            rss_item("非法日期", "https://example.com/4", Some("not a date")),
+        );
+        let items = collect_from(&xml, "测试源", &today);
+        assert_eq!(items.len(), 1, "仅保留本地当天的条目");
+        assert_eq!(items[0].headline, "今天的 & 细节");
         assert_eq!(items[0].url, "https://example.com/1");
         assert_eq!(items[0].source, "测试源");
     }
 
     #[test]
-    fn 解析失败返回空而非panic() {
-        assert!(collect_from("not xml at all", "x").is_empty());
-        assert!(collect_from("", "x").is_empty());
+    fn 当天过滤先截断不受旧条目挤占() {
+        // 源把 10 条旧条目排在前面、新条目在最后：先过滤当天再 take，
+        // 新条目必须被收进来（若先 take(8) 就会被旧的挤掉）
+        let today = today_str();
+        let old = (0..10)
+            .map(|i| rss_item(&format!("旧{i}"), &format!("https://example.com/old/{i}"), Some(&yesterday_rfc2822())))
+            .collect::<String>();
+        let xml = format!(
+            r#"<rss version="2.0"><channel><title>T</title>{}{}</channel></rss>"#,
+            old,
+            rss_item("新条目", "https://example.com/new", Some(&now_rfc2822()))
+        );
+        let items = collect_from(&xml, "s", &today);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].headline, "新条目");
     }
 
     #[test]
-    fn 合并去重按链接先到先得() {
-        let a = vec![
+    fn 解析失败返回空而非panic() {
+        let today = today_str();
+        assert!(collect_from("not xml at all", "x", &today).is_empty());
+        assert!(collect_from("", "x", &today).is_empty());
+    }
+
+    #[test]
+    fn 增量合并去重追加且不动已有条目() {
+        let mut existing = vec![
             NewsItem { headline: "h1".into(), source: "s".into(), url: "https://x/1".into() },
             NewsItem { headline: "h2".into(), source: "s".into(), url: "https://x/2".into() },
         ];
-        let b = vec![
-            NewsItem { headline: "h1-dup".into(), source: "s2".into(), url: "https://x/1".into() },
+        let incoming = vec![
+            NewsItem { headline: "h2-dup".into(), source: "s2".into(), url: "https://x/2".into() },
             NewsItem { headline: "h3".into(), source: "s2".into(), url: "https://x/3".into() },
         ];
-        let merged = merge_dedup(vec![a, b]);
-        assert_eq!(merged.len(), 3);
-        assert_eq!(merged[0].headline, "h1", "先到的保留");
+        merge_into(&mut existing, incoming);
+        assert_eq!(existing.len(), 3, "按 url 去重");
+        assert_eq!(existing[0].headline, "h1", "已有条目原位保留");
+        assert_eq!(existing[1].headline, "h2", "先到的保留，重复的丢弃");
+        assert_eq!(existing[2].headline, "h3", "新条目追加到尾部");
+    }
+
+    #[test]
+    fn 增量节奏判定() {
+        let mk = |last_fetch: u64| NewsState {
+            last_fetch_mins: last_fetch,
+            ..Default::default()
+        };
+        // 未到抓取时点：一票否决
+        assert!(!due_fetch(&mk(0), 8 * 60, 10_000, 9), "8 点不拉（fetch_hour=9）");
+        // 到点 + 今天没拉过（0）：立即拉
+        assert!(due_fetch(&mk(0), 9 * 60, 10_000, 9));
+        // 距上轮不足 2 小时：不拉
+        assert!(!due_fetch(&mk(10_000), 10 * 60, 10_000 + 119, 9));
+        // 满 2 小时：拉
+        assert!(due_fetch(&mk(10_000), 11 * 60, 10_000 + 120, 9));
+        // last_fetch 比当前还大（时钟回拨防御）：不拉
+        assert!(!due_fetch(&mk(20_000), 12 * 60, 10_000, 9));
     }
 
     #[test]
@@ -520,8 +659,12 @@ mod tests {
         assert!(srcs.iter().all(|s| s.category == "finance"));
         assert_eq!(srcs.len(), 2);
 
+        // tech 已聚焦为 AI+广告：5 个 AI 一手 + 3 个广告 + 1 个中文聚合
+        let srcs = sources_for(&["tech".to_string()]);
+        assert_eq!(srcs.len(), 9);
+
         let srcs = sources_for(&["tech".to_string(), "design".to_string()]);
-        assert_eq!(srcs.len(), 5);
+        assert_eq!(srcs.len(), 10);
     }
 
     #[test]
@@ -554,6 +697,7 @@ mod tests {
             digest: "昨日点评".into(),
             fetched: true,
             last_card_mins: 42,
+            last_fetch_mins: 4242,
         };
         rollover(&mut s, "2026-09-02");
         assert_eq!(s.date, "2026-09-02");
@@ -561,10 +705,23 @@ mod tests {
         assert_eq!(s.next_idx, 0);
         assert!(!s.fetched);
         assert!(s.digest.is_empty());
+        assert_eq!(s.last_fetch_mins, 0, "跨天后当轮立即重新拉取");
 
         // 同日不动
         rollover(&mut s, "2026-09-02");
         assert_eq!(s.date, "2026-09-02");
+    }
+
+    #[test]
+    fn 旧缓存缺last_fetch字段可反序列化() {
+        // 旧版 news-cache 没有 last_fetch_mins：serde default 补 0，
+        // 到点即触发当天首轮拉取，无需迁移
+        let s: NewsState = serde_json::from_str(
+            r#"{"date":"2026-09-04","items":[],"next_idx":0,"digest":"","fetched":true,"last_card_mins":42}"#,
+        )
+        .unwrap();
+        assert_eq!(s.last_fetch_mins, 0);
+        assert!(s.fetched);
     }
 
     #[test]

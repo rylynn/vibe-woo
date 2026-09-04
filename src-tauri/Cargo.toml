@@ -1,6 +1,6 @@
 [package]
 name = "vibe-pet"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 rust-version = "1.77"
 
@@ -19,6 +19,8 @@ futures-util = "0.3"
 tokio = { version = "1", features = ["rt"] }
 # 插件 RSS 解析（每日资讯）。成熟解析器，避免手写 CDATA/实体的坑。
 rss = "2"
+# 资讯条目 pubDate（RFC2822）解析与本地时区换算（每日资讯「仅当天」过滤）。
+chrono = "0.4"
 # 打开系统浏览器（资讯卡「阅读原文」跳转；window.open 在透明无框窗里会被拦截）。
 tauri-plugin-opener = "2"
 # 腾讯行情接口返回 GBK 编码（A 股中文名），需要解码。
