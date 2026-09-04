@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { Box } from "../interact/hit-test";
-import { enablePanelDrag } from "./panel-drag";
+import { panelChrome } from "./chrome";
 
 interface SocialCfg {
   social_server: string;
@@ -57,7 +57,6 @@ export class FriendsPanel {
     this.el.className = "pet-settings";
     this.el.style.display = "none";
     document.body.appendChild(this.el);
-    enablePanelDrag(this.el, ".pet-settings-head");
   }
 
   async show(): Promise<void> {
@@ -112,20 +111,9 @@ export class FriendsPanel {
     this.el.appendChild(l);
   }
 
+  /** 标题栏（panelChrome 统一构建：拖拽 + ×）。 */
   private head(title: string): HTMLElement {
-    const h = document.createElement("div");
-    h.className = "pet-settings-head";
-    const t = document.createElement("span");
-    t.textContent = title;
-    const close = document.createElement("button");
-    close.className = "pet-settings-close";
-    close.textContent = "×";
-    close.addEventListener("pointerdown", (e) => {
-      e.stopPropagation();
-      this.hide();
-    });
-    h.append(t, close);
-    return h;
+    return panelChrome(this.el, title, () => this.hide());
   }
 
   private row(label: string): HTMLDivElement {

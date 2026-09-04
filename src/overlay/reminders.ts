@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { Box } from "../interact/hit-test";
-import { enablePanelDrag } from "./panel-drag";
+import { panelChrome } from "./chrome";
 
 export interface Reminder {
   time: string;
@@ -30,7 +30,6 @@ export class RemindersPanel {
     this.el.className = "pet-settings"; // 复用设置面板样式
     this.el.style.display = "none";
     document.body.appendChild(this.el);
-    enablePanelDrag(this.el, ".pet-settings-head");
   }
 
   async show(): Promise<void> {
@@ -97,18 +96,7 @@ export class RemindersPanel {
   private render(): void {
     this.el.replaceChildren();
 
-    const head = document.createElement("div");
-    head.className = "pet-settings-head";
-    const title = document.createElement("span");
-    title.textContent = "每日提醒";
-    const close = document.createElement("button");
-    close.className = "pet-settings-close";
-    close.textContent = "×";
-    close.addEventListener("pointerdown", (e) => {
-      e.stopPropagation();
-      this.hide();
-    });
-    head.append(title, close);
+    const head = panelChrome(this.el, "每日提醒", () => this.hide());
     this.el.appendChild(head);
 
     // 列表
