@@ -230,7 +230,7 @@ export const wordFrontend: PluginFrontend = {
     const hint = document.createElement("div");
     hint.className = "pet-plugin-form-hint";
     hint.textContent =
-      "开启后第一张立即出现；之后在键盘静默 1 分钟后才弹（走开、歇着、刷网页、想事情都算）。词与释义来自内置词库（雅思/托福/日常 × 英日）；配置 AI 后例句与记忆钩子按你的目标定制。没印象的词 10 分钟后会再回来";
+      "开启后第一张立即出现；之后在键盘静默 1 分钟后才弹。每日上限只数新词，复习卡是额外补充。「没印象」的词当天会按 10 分钟/半小时/2 小时回来，隔天再复习；认识的词当天不再出现，给新词让位。词、释义、例句与翻译都来自内置词库；配置 AI 后例句与记忆钩子按你的目标定制";
     el.appendChild(hint);
 
     const save = document.createElement("button");
