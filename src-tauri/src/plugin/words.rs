@@ -155,6 +155,9 @@ pub struct WordEntry {
     pub meaning: String,
     #[serde(rename = "e")]
     pub example: String,
+    /// 例句中文翻译（词库暂无该字段，缺省为空；Task 6 由 LLM 增强补齐）。
+    #[serde(rename = "ez", default)]
+    pub example_zh: String,
     #[serde(rename = "d")]
     pub domain: String,
     #[serde(rename = "l")]
@@ -459,6 +462,8 @@ fn migrate_state(s: &mut WordsState) {
 #[derive(Debug, Clone, Serialize)]
 struct Enhanced {
     example: String,
+    /// 例句中文翻译（Task 6 接 LLM 后填充，当前恒为空串兜底）。
+    example_zh: String,
     hook: Option<String>,
 }
 
@@ -504,6 +509,7 @@ fn spawn_enhance(cfg: &WordsConfig, w: &WordEntry) {
         };
         let enhanced = Enhanced {
             example: v["example"].as_str().unwrap_or_default().to_string(),
+            example_zh: String::new(),
             hook: v["hook"].as_str().map(str::to_string),
         };
         if enhanced.example.is_empty() {
@@ -622,12 +628,19 @@ impl Plugin for WordsPlugin {
             spawn_enhance(&cfg, &word);
         }
 
-        vec![make_card(&word, enhanced.as_ref())]
+        let hard = with_state(|s| {
+            s.srs.get(&word.term).is_some_and(|e| e.lapses >= 3)
+        });
+        vec![make_card(&word, enhanced.as_ref(), hard)]
     }
 }
 
-fn make_card(w: &WordEntry, enhanced: Option<&Enhanced>) -> PluginCard {
+fn make_card(w: &WordEntry, enhanced: Option<&Enhanced>, hard: bool) -> PluginCard {
     let example = enhanced.map(|e| e.example.as_str()).unwrap_or(w.example.as_str());
+    let example_zh = enhanced
+        .map(|e| e.example_zh.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(w.example_zh.as_str());
     PluginCard {
         plugin_id: ID.into(),
         kind: ID.into(),
@@ -638,8 +651,10 @@ fn make_card(w: &WordEntry, enhanced: Option<&Enhanced>) -> PluginCard {
             "reading": w.reading,
             "meaning": w.meaning,
             "example": example,
+            "example_zh": example_zh,
             "hook": enhanced.and_then(|e| e.hook.clone()),
             "ai": enhanced.is_some(),
+            "hard": hard,
         }),
     }
 }
@@ -652,17 +667,18 @@ pub fn meta(app: &tauri::AppHandle) -> PluginMeta {
     let today = crate::reminddrive::local_now()
         .map(|c| c.date)
         .unwrap_or_default();
-    let (count, terms, srs, last_domain) = match s {
+    let (new_count, review_count, terms, srs, last_domain) = match s {
         Some(mut s) => {
             rollover(&mut s, &today);
             (
                 s.served_new_count,
+                s.served_review_count,
                 s.served_terms.clone(),
                 s.srs.clone(),
                 s.last_domain.clone(),
             )
         }
-        None => (0, Vec::new(), HashMap::new(), String::new()),
+        None => (0, 0, Vec::new(), HashMap::new(), String::new()),
     };
     let pool = pool_for(&cfg.language, &[]);
     let look_up = |t: &str| {
@@ -680,7 +696,7 @@ pub fn meta(app: &tauri::AppHandle) -> PluginMeta {
         .filter_map(|t| look_up(t))
         .collect();
     // 接下来要学的（剩余配额的预览，最多 8 个）
-    let remaining = cfg.daily_limit.saturating_sub(count).min(8) as usize;
+    let remaining = cfg.daily_limit.saturating_sub(new_count).min(8) as usize;
     let upcoming: Vec<serde_json::Value> = preview(
         &pool,
         &srs,
@@ -699,7 +715,8 @@ pub fn meta(app: &tauri::AppHandle) -> PluginMeta {
         summary: serde_json::json!({
             "enabled": cfg.enabled,
             "language": cfg.language,
-            "today_count": count,
+            "today_new": new_count,
+            "today_review": review_count,
             "daily_limit": cfg.daily_limit,
             "learned": learned,
             "upcoming": upcoming,
@@ -735,6 +752,7 @@ mod tests {
             reading: String::new(),
             meaning: String::new(),
             example: String::new(),
+            example_zh: String::new(),
             domain: domain.into(),
             level: level.into(),
         }
@@ -1196,16 +1214,26 @@ mod tests {
     #[test]
     fn 卡片payload词与释义来自词库() {
         let w = word("test", "life", "beginner");
-        let c = make_card(&w, None);
+        let c = make_card(&w, None, false);
         assert_eq!(c.payload["term"], "test");
         assert_eq!(c.payload["ai"], false, "无增强时 ai=false");
         let e = Enhanced {
             example: "LLM 例句".into(),
+            example_zh: String::new(),
             hook: Some("钩子".into()),
         };
-        let c2 = make_card(&w, Some(&e));
+        let c2 = make_card(&w, Some(&e), false);
         assert_eq!(c2.payload["example"], "LLM 例句");
         assert_eq!(c2.payload["hook"], "钩子");
         assert_eq!(c2.payload["ai"], true);
+    }
+
+    #[test]
+    fn 卡片payload难词带hard标记() {
+        let w = word("test", "life", "beginner");
+        let c = make_card(&w, None, true);
+        assert_eq!(c.payload["hard"], true);
+        let c2 = make_card(&w, None, false);
+        assert_eq!(c2.payload["hard"], false);
     }
 }
