@@ -401,9 +401,12 @@ export class Banner {
   private setAnchored(on: boolean): void {
     this.el.classList.toggle("pet-banner-follow", on);
     if (!on) {
-      // 不跟随就交还给 CSS 的固定右上角
+      // 不跟随就交还给 CSS 的固定右上角（同时清掉拖拽残留的行内定位）
       this.el.style.left = "";
       this.el.style.top = "";
+      this.el.style.right = "";
+      this.el.style.bottom = "";
+      this.el.style.transform = "";
     }
   }
 
