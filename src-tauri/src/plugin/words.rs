@@ -58,7 +58,7 @@ fn preview(
     let mut last = last_domain.to_string();
     let mut out = Vec::new();
     for _ in 0..count {
-        let Some(w) = pick(&pool, &srs, now, user_rank, &last) else {
+        let Some(w) = pick(&pool, &srs, now, user_rank, &last, true) else {
             break;
         };
         last = w.domain.clone();
@@ -273,29 +273,27 @@ fn migrate_step(old: u32) -> u32 {
     }
 }
 
-/// 选词优先级（2026-09-03 两轮修订，修复「当天词汇全重复」）：
-/// 1. **有反馈的到期复习**（SRS 本意）：用户点过「认识 / 没印象」的词
-///    （reps ≥ 2）——「没印象 10 分钟后重见」与跨日复习都属此类；
-/// 2. **新词** —— 旧逻辑里复习永远优先，而第一步梯度只有 10 分钟、
-///    比出卡间隔还短，用户一旦不理卡，同一个词就永远霸屏、新词饿死；
-/// 3. **当日已见词的到期重见**（无反馈）；
-/// 4. **跨日已读词**（无反馈）—— 昨天没人理的词今天也排队等新词，
-///    否则每天一开机全是「昨天的词」，用户感受还是「全重复」。
+/// 选词优先级（2026-09-03 配额分离修订）：
+/// 1. **当日强化到期**（step<3 到期且有反馈）—— 最近「没印象」的词最优先，
+///    当天 10min/30min/2h 曲线上等它；
+/// 2. **新词**（allow_new：新词配额未满才进这档）；
+/// 3. **难词跨日到期**（lapses ≥ 2 且到期）；
+/// 4. **普通跨日到期**（有反馈）；
+/// 5. **当日已见 / 跨日已读兜底**（无反馈，现状语义）。
 /// 水平过滤（允许挑战高一级）；领域打散（避开 last_domain，有替代才避开）。
-/// 返回 owned 词条（调用侧的 pool 多为局部变量）。
 fn pick(
     pool: &[WordEntry],
     srs: &HashMap<String, SrsEntry>,
     now: u64,
     user_rank: u8,
     last_domain: &str,
+    allow_new: bool,
 ) -> Option<WordEntry> {
     let eligible: Vec<&WordEntry> = pool
         .iter()
         .filter(|w| level_rank(&w.level) <= user_rank + 1)
         .collect();
 
-    // 到期词按 due 升序；按「有无反馈」与「是否跨日」分档
     let mut due: Vec<(&WordEntry, u64)> = eligible
         .iter()
         .filter_map(|w| {
@@ -304,9 +302,9 @@ fn pick(
         })
         .collect();
     due.sort_by_key(|(_, due_at)| *due_at);
-    // 点过「认识 / 没印象」才算用户认这个词 —— reps 在首见时为 1，
-    // 每次反馈 +1（见 on_feedback）。已读未理 = 没有学习承诺，不该霸屏。
     let has_feedback = |t: &str| srs[t].reps >= 2;
+    let in_day_curve = |t: &str| srs[t].step < DAY_CURVE_START;
+    let is_hard = |t: &str| srs[t].lapses >= 2;
     let is_old = |t: &str| now.saturating_sub(srs[t].first_mins) >= DAY_MINS;
     let from = |candidates: &[(&WordEntry, u64)]| {
         candidates
@@ -316,22 +314,48 @@ fn pick(
             .map(|(w, _)| (*w).clone())
     };
 
-    // 1. 有反馈的到期复习（当日「没印象」重见与跨日复习）
-    let review: Vec<_> = due.iter().copied().filter(|(w, _)| has_feedback(&w.term)).collect();
+    // 1. 当日强化到期（最近没印象的词）
+    let reinforce: Vec<_> = due
+        .iter()
+        .copied()
+        .filter(|(w, _)| has_feedback(&w.term) && in_day_curve(&w.term))
+        .collect();
+    if !reinforce.is_empty() {
+        return from(&reinforce);
+    }
+
+    // 2. 新词（配额闸由调用方传入）
+    if allow_new {
+        if let Some(w) = eligible
+            .iter()
+            .find(|w| !srs.contains_key(&w.term) && w.domain != last_domain)
+            .or_else(|| eligible.iter().find(|w| !srs.contains_key(&w.term)))
+        {
+            return Some((*w).clone());
+        }
+    }
+
+    // 3. 难词跨日到期
+    let hard: Vec<_> = due
+        .iter()
+        .copied()
+        .filter(|(w, _)| has_feedback(&w.term) && is_hard(&w.term) && !in_day_curve(&w.term))
+        .collect();
+    if !hard.is_empty() {
+        return from(&hard);
+    }
+
+    // 4. 普通跨日到期（有反馈）
+    let review: Vec<_> = due
+        .iter()
+        .copied()
+        .filter(|(w, _)| has_feedback(&w.term))
+        .collect();
     if !review.is_empty() {
         return from(&review);
     }
 
-    // 2. 新词：从未见过的
-    if let Some(w) = eligible
-        .iter()
-        .find(|w| !srs.contains_key(&w.term) && w.domain != last_domain)
-        .or_else(|| eligible.iter().find(|w| !srs.contains_key(&w.term)))
-    {
-        return Some((*w).clone());
-    }
-
-    // 3. 当日已见的到期重见（无反馈）
+    // 5. 当日已见到期 → 跨日已读，兜底
     let today_due: Vec<_> = due
         .iter()
         .copied()
@@ -340,8 +364,6 @@ fn pick(
     if !today_due.is_empty() {
         return from(&today_due);
     }
-
-    // 4. 跨日已读词（无反馈）：排队等新词学完
     from(&due)
 }
 
@@ -523,7 +545,9 @@ impl Plugin for WordsPlugin {
 
         let Some(word) = with_state(|s| {
             rollover(s, &today);
-            if s.served_new_count >= cfg.daily_limit {
+            let allow_new = s.served_new_count < cfg.daily_limit;
+            let allow_review = s.served_review_count < review_cap(cfg.daily_limit);
+            if !allow_new && !allow_review {
                 return None;
             }
             if now.saturating_sub(s.last_card_mins) < WORD_GAP_MINS {
@@ -532,7 +556,7 @@ impl Plugin for WordsPlugin {
             // 首卡不设防：启用后当日第一张立即出现 —— 开了插件却什么都
             // 看不到是最差的默认体验，先让用户确认它在工作，再进入
             // 「键盘静默 1 分钟才弹」的节奏（时间窗是插件业务，不进仲裁器）。
-            if cfg.only_resting && s.served_new_count > 0 {
+            if cfg.only_resting && s.served_new_count + s.served_review_count > 0 {
                 let idle = crate::sensor::keyboard_idle_secs();
                 if !idle_is_resting(idle) {
                     return None;
@@ -545,11 +569,18 @@ impl Plugin for WordsPlugin {
                 now,
                 level_rank(&cfg.level),
                 &s.last_domain,
+                allow_new,
             )?;
             // 记账：今日配额、频率闸、领域；SRS 分新词首见与复习重见两条路。
             // 修复：旧逻辑对复习词也按新词整条重置（step 归 0、10 分钟后
             // 再到期），到期时刻永远追着出卡间隔跑 —— 当天全在重复同一个词。
-            s.served_new_count += 1;
+            // 配额分离：新词计入增量配额，一切重见（强化/复习/兜底）计入复习配额
+            let is_new = !s.srs.contains_key(&word.term);
+            if is_new {
+                s.served_new_count += 1;
+            } else {
+                s.served_review_count += 1;
+            }
             s.served_terms.push(word.term.clone());
             s.last_card_mins = now;
             s.last_domain = word.domain.clone();
@@ -819,7 +850,7 @@ mod tests {
         let pool = vec![word("new1", "life", "beginner"), word("old1", "life", "beginner")];
         let mut srs = HashMap::new();
         srs.insert("old1".into(), entry_reviewed(0, 1)); // 用户认过，已到期
-        let w = pick(&pool, &srs, 10_000, 0, "").unwrap();
+        let w = pick(&pool, &srs, 10_000, 0, "", true).unwrap();
         assert_eq!(w.term, "old1");
     }
 
@@ -835,7 +866,7 @@ mod tests {
         ];
         let mut srs = HashMap::new();
         srs.insert("eagle".into(), entry(0, 0)); // 早已到期、从未有反馈
-        let w = pick(&pool, &srs, 10_000, 0, "").unwrap();
+        let w = pick(&pool, &srs, 10_000, 0, "", true).unwrap();
         assert_ne!(w.term, "eagle", "已读词不该再被选中");
     }
 
@@ -846,10 +877,10 @@ mod tests {
         let pool = vec![word("stale", "life", "beginner"), word("fresh", "food", "beginner")];
         let mut srs = HashMap::new();
         srs.insert("stale".into(), entry(0, 0)); // 昨天已读（reps=1），今天到期
-        let w = pick(&pool, &srs, 10_000, 0, "").unwrap();
+        let w = pick(&pool, &srs, 10_000, 0, "", true).unwrap();
         assert_eq!(w.term, "fresh", "没人理过的词不该抢在新词前面");
         // 新词学完了它才兜底
-        let w2 = pick(&pool[..1], &srs, 10_000, 0, "").unwrap();
+        let w2 = pick(&pool[..1], &srs, 10_000, 0, "", true).unwrap();
         assert_eq!(w2.term, "stale");
     }
 
@@ -861,7 +892,7 @@ mod tests {
         let pool = vec![word("a", "life", "beginner"), word("b", "food", "beginner")];
         let mut srs = HashMap::new();
         srs.insert("a".into(), entry_today(9_940, 10_000, 60)); // 一小时前学的，已到期
-        let w = pick(&pool, &srs, 10_000, 0, "").unwrap();
+        let w = pick(&pool, &srs, 10_000, 0, "", true).unwrap();
         assert_eq!(w.term, "b", "当日已见词不该抢在没见过的新词前面");
     }
 
@@ -870,7 +901,7 @@ mod tests {
         let pool = vec![word("a", "life", "beginner")];
         let mut srs = HashMap::new();
         srs.insert("a".into(), entry_today(9_940, 10_000, 60));
-        let w = pick(&pool, &srs, 10_000, 0, "").unwrap();
+        let w = pick(&pool, &srs, 10_000, 0, "", true).unwrap();
         assert_eq!(w.term, "a", "没有新词时当日到期词仍应兜底");
     }
 
@@ -893,10 +924,10 @@ mod tests {
         let mut srs = HashMap::new();
         srs.insert("new1".into(), entry(999999, 0)); // 没到期
         // 没有「未见过的」词，也没有到期词 → None
-        assert!(pick(&pool, &srs, 10_000, 0, "").is_none());
+        assert!(pick(&pool, &srs, 10_000, 0, "", true).is_none());
 
         let pool2 = vec![word("new1", "life", "beginner"), word("new2", "food", "beginner")];
-        let w = pick(&pool2, &srs, 10_000, 0, "").unwrap();
+        let w = pick(&pool2, &srs, 10_000, 0, "", true).unwrap();
         assert_eq!(w.term, "new2");
     }
 
@@ -911,7 +942,7 @@ mod tests {
         let mut srs = HashMap::new();
         srs.insert("easy".into(), entry(999999, 0));
         srs.insert("mid".into(), entry(999999, 0));
-        assert!(pick(&pool, &srs, 10_000, 0, "").is_none(), "advanced 不该入选");
+        assert!(pick(&pool, &srs, 10_000, 0, "", true).is_none(), "advanced 不该入选");
     }
 
     #[test]
@@ -923,7 +954,7 @@ mod tests {
         let mut srs = HashMap::new();
         srs.insert("a".into(), entry(0, 1)); // a、b 都到期
         srs.insert("b".into(), entry(0, 1));
-        let w = pick(&pool, &srs, 10_000, 0, "life").unwrap();
+        let w = pick(&pool, &srs, 10_000, 0, "life", true).unwrap();
         assert_eq!(w.term, "b", "应避开刚出过的 life 领域");
     }
 
@@ -933,7 +964,57 @@ mod tests {
         let mut srs = HashMap::new();
         srs.insert("a".into(), entry(0, 1));
         srs.insert("b".into(), entry(0, 1));
-        assert!(pick(&pool, &srs, 10_000, 0, "life").is_some());
+        assert!(pick(&pool, &srs, 10_000, 0, "life", true).is_some());
+    }
+
+    // ---- 五档选词优先级（2026-09-03） ----
+
+    #[test]
+    fn 当日强化到期词压过新词() {
+        // a 是一小时前「没印象」的词（step<3 到期有反馈）；b 是新词 → 选 a
+        let pool = vec![word("a", "life", "beginner"), word("b", "food", "beginner")];
+        let mut srs = HashMap::new();
+        srs.insert("a".into(), entry_today(9_940, 10_000, 60));
+        let e = srs.get_mut("a").unwrap();
+        e.reps = 2; // 有过「没印象」反馈
+        let w = pick(&pool, &srs, 10_000, 0, "", true).unwrap();
+        assert_eq!(w.term, "a");
+    }
+
+    #[test]
+    fn 新词配额满时allow_new为false只发复习() {
+        let pool = vec![word("a", "life", "beginner"), word("new1", "food", "beginner")];
+        let mut srs = HashMap::new();
+        let mut a = entry(9_940, 1);
+        a.reps = 2; // 到期且有反馈（当日强化区）
+        srs.insert("a".into(), a);
+        let w = pick(&pool, &srs, 10_000, 0, "", false).unwrap();
+        assert_eq!(w.term, "a", "新词被闸掉，复习照发");
+        // 没有任何可复习词时，闸掉新词 = 直接不发卡
+        let none = pick(&pool, &HashMap::new(), 10_000, 0, "", false);
+        assert!(none.is_none());
+    }
+
+    #[test]
+    fn 难词跨日到期压过普通跨日到期() {
+        let pool = vec![word("hard", "life", "beginner"), word("norm", "food", "beginner")];
+        let mut srs = HashMap::new();
+        let mut hard = entry(0, 3); hard.reps = 4; hard.lapses = 2;
+        let mut norm = entry(0, 3); norm.reps = 4; norm.lapses = 0;
+        srs.insert("hard".into(), hard);
+        srs.insert("norm".into(), norm);
+        let w = pick(&pool, &srs, 10_000, 0, "", true).unwrap();
+        assert_eq!(w.term, "hard");
+    }
+
+    #[test]
+    fn 跨日已读词让位新词_语义保持() {
+        // 既有回归不动：没人理过的词排队等新词（第五档兜底语义）
+        let pool = vec![word("stale", "life", "beginner"), word("fresh", "food", "beginner")];
+        let mut srs = HashMap::new();
+        srs.insert("stale".into(), entry(0, 0));
+        let w = pick(&pool, &srs, 10_000, 0, "", true).unwrap();
+        assert_eq!(w.term, "fresh");
     }
 
     // ---- 状态 ----
