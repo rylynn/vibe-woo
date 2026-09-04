@@ -12,6 +12,10 @@ ECDICT 直出的数据有三个顽疾：音标 KK/DJ 混杂且带乱码（/i:gl/
     python3 scripts/rewrite-words-llm.py              # 全量（约 1300 词）
     python3 scripts/rewrite-words-llm.py --force      # 已重写过的也重来
 
+    # 补例句中文翻译（ez，全部词书含日语；只填 ez，不碰 m/r/e）
+    python3 scripts/rewrite-words-llm.py --fill-ez --limit 5   # 试跑
+    python3 scripts/rewrite-words-llm.py --fill-ez             # 全量（约 2255 条）
+
     # 或显式给凭据（优先级高于配置文件）
     OPENAI_API_KEY=sk-... python3 scripts/rewrite-words-llm.py \
         --base-url https://api.deepseek.com/v1 --model deepseek-chat
@@ -148,6 +152,99 @@ def valid_example(e):
     )
 
 
+EZ_SYSTEM = (
+    "你是严谨的词典编辑。输入一批外语单词及其例句，把每条例句翻译成自然中文。\n"
+    "要求：忠实原句、译文自然流畅、禁止逐字翻译腔；译主语按语境补全；30 字以内；"
+    "英语例句译成中文，日语例句也译成中文。\n"
+    '只输出 JSON 数组，不要任何其他文字：[{"i":序号,"ez":"中文翻译"}]，'
+    "数组元素与输入一一对应（i 用输入里的序号）。"
+)
+
+
+def valid_ez(z):
+    """翻译必须是非空中文且不过长（≤34 容一点自然语言余量）。"""
+    if not z or len(z) > 34:
+        return False
+    return bool(re.search(r"[一-鿿]", z))
+
+
+def translate_batch(llm, items):
+    """一批 (序号, 词, 例句) -> {序号: 中文翻译}。单条不合格不进结果，保留空值下轮重试。
+
+    按序号键而不是按词键：不同词书可能收同一个词而例句不同，按词键会串。
+    """
+    user = json.dumps(
+        [{"i": i, "t": t, "e": e} for i, t, e in items], ensure_ascii=False
+    )
+    out = chat(llm, EZ_SYSTEM, user)
+    parsed = parse_json_array(out)
+    index = {i: (t, e) for i, t, e in items}
+    result = {}
+    for it in parsed:
+        try:
+            i = int(it.get("i"))
+        except (TypeError, ValueError):
+            continue
+        if i not in index:
+            print(f"  警告：返回了未知序号 {it.get('i')!r}，丢弃")
+            continue
+        z = (it.get("ez") or "").strip()
+        if not valid_ez(z):
+            t, _ = index[i]
+            print(f"  警告：{t} 翻译不合格: {z!r}，保留空值")
+            continue
+        result[i] = z
+    return result
+
+
+def run_fill_ez(args, llm):
+    """补齐全部词书的例句中文翻译（ez）。幂等：ez 非空即视为已完成。"""
+    dict_data = json.loads(DICT_PATH.read_text())
+    todo = []  # (语言, 词书, 词条下标, 词, 例句)
+    for lang, books in dict_data.items():
+        for book_id, book in books.items():
+            for wi, w in enumerate(book["words"]):
+                if not w.get("e") or w.get("ez"):
+                    continue
+                todo.append((lang, book_id, wi, w["t"], w["e"]))
+    if args.limit is not None:
+        todo = todo[: args.limit]
+    if not todo:
+        print("没有待补翻译的词条。")
+        return
+    print(f"待补 ez: {len(todo)} 条")
+
+    batches = [todo[i : i + args.batch_size] for i in range(0, len(todo), args.batch_size)]
+    done = 0
+
+    def run_batch(i_batch):
+        idx, batch = i_batch
+        items = [(j, t, e) for j, (_, _, _, t, e) in enumerate(batch)]
+        try:
+            return idx, translate_batch(llm, items)
+        except Exception as e:  # noqa: BLE001 —— 单批失败不能拖垮整轮
+            print(f"  批 {idx + 1} 失败：{e}")
+            return idx, {}
+
+    with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
+        for idx, updates in pool.map(run_batch, enumerate(batches)):
+            batch = batches[idx]
+            hit = 0
+            for j, (lang, book_id, wi, _, _) in enumerate(batch):
+                z = updates.get(j)
+                if z:
+                    dict_data[lang][book_id]["words"][wi]["ez"] = z
+                    hit += 1
+            done += hit
+            print(f"批 {idx + 1}/{len(batches)}: {hit}/{len(batch)} 有效")
+            # 每批写盘：中断可续跑
+            DICT_PATH.write_text(
+                json.dumps(dict_data, ensure_ascii=False, indent=2) + "\n"
+            )
+
+    print(f"完成：本次补翻译 {done} 条。无效词条保留空值，重跑 --fill-ez 即可重试。")
+
+
 def rewrite_batch(llm, terms):
     """一批词条 -> {词: 新字段}。单条不合格则不进结果（保留原值，下轮重试）。"""
     user = json.dumps([{"t": t} for t in terms], ensure_ascii=False)
@@ -183,10 +280,19 @@ def main():
     ap.add_argument("--concurrency", type=int, default=4, help="并发批数（默认 4）")
     ap.add_argument("--limit", type=int, help="只处理前 N 个词条（试跑用）")
     ap.add_argument("--force", action="store_true", help="例句非空的也重写")
+    ap.add_argument(
+        "--fill-ez",
+        action="store_true",
+        help="补例句中文翻译（ez）：全部词书、例句非空且 ez 为空的词条，不碰 m/r/e",
+    )
     args = ap.parse_args()
 
     llm = load_llm(args)
     print(f"端点: {llm['base_url']}  模型: {llm['model']}")
+
+    if args.fill_ez:
+        run_fill_ez(args, llm)
+        return
 
     dict_data = json.loads(DICT_PATH.read_text())
     english = dict_data["english"]
