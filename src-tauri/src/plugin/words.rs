@@ -462,7 +462,7 @@ fn migrate_state(s: &mut WordsState) {
 #[derive(Debug, Clone, Serialize)]
 struct Enhanced {
     example: String,
-    /// 例句中文翻译（Task 6 接 LLM 后填充，当前恒为空串兜底）。
+    /// 例句中文翻译（LLM 增强输出解析所得，缺失为空串，展示时回退词库自带翻译）。
     example_zh: String,
     hook: Option<String>,
 }
@@ -493,6 +493,7 @@ fn spawn_enhance(cfg: &WordsConfig, w: &WordEntry) {
         let system = concat!(
             "你为外语单词生成学习卡增强内容，只输出 JSON，不要任何其他文字：",
             "{\"example\":\"一句使用该词的例句（与用户目标场景贴合）\",",
+            "\"example_zh\":\"该例句的中文翻译（自然、不逐字直译）\",",
             "\"hook\":\"一个中文记忆钩子：词根拆解、谐音或联想，三选一，25字内\"}。",
             "例句语言：英语单词用英文句子，日语单词用日文句子。例句要自然、略高于课本感。"
         );
@@ -509,7 +510,7 @@ fn spawn_enhance(cfg: &WordsConfig, w: &WordEntry) {
         };
         let enhanced = Enhanced {
             example: v["example"].as_str().unwrap_or_default().to_string(),
-            example_zh: String::new(),
+            example_zh: v["example_zh"].as_str().unwrap_or_default().to_string(),
             hook: v["hook"].as_str().map(str::to_string),
         };
         if enhanced.example.is_empty() {
