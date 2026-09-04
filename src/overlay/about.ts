@@ -1,7 +1,7 @@
 import type { Box } from "../interact/hit-test";
 import { formatAppInfo, getAppInfo, type AppInfo } from "../appinfo";
 import { getConfig } from "../config";
-import { enablePanelDrag } from "./panel-drag";
+import { panelChrome } from "./chrome";
 
 /** 署名。与设置面板里原来的那行保持一致。 */
 const CREDIT = "power by rylynnxj";
@@ -31,7 +31,6 @@ export class AboutPanel {
     this.el.className = "pet-settings pet-about";
     this.el.style.display = "none";
     document.body.appendChild(this.el);
-    enablePanelDrag(this.el, ".pet-settings-head");
   }
 
   /**
@@ -82,11 +81,7 @@ export class AboutPanel {
 
   private renderLoading(): void {
     this.el.replaceChildren();
-    const head = document.createElement("div");
-    head.className = "pet-settings-head";
-    const t = document.createElement("span");
-    t.textContent = "关于";
-    head.appendChild(t);
+    const head = panelChrome(this.el, "关于", () => this.hide());
     this.el.appendChild(head);
     const loading = document.createElement("div");
     loading.className = "pet-settings-hint";
@@ -116,38 +111,14 @@ export class AboutPanel {
     this.el.appendChild(this.footer());
   }
 
+  /** 标题栏（panelChrome 统一构建；从设置进入时带「返回设置」）。 */
   private header(): HTMLElement {
-    const h = document.createElement("div");
-    h.className = "pet-settings-head";
-
-    const left = document.createElement("div");
-    left.className = "pet-about-head-left";
+    // 先取快照再 hide：hide() 会把 this.back 清空，闭包里再读就是 null
     const goBack = this.back;
-    if (goBack) {
-      const back = document.createElement("button");
-      back.className = "pet-about-back";
-      back.textContent = "‹ 返回设置";
-      back.addEventListener("pointerdown", (e) => {
-        e.stopPropagation();
-        this.hide();
-        goBack();
-      });
-      left.appendChild(back);
-    }
-    const t = document.createElement("span");
-    t.textContent = "关于";
-    left.appendChild(t);
-
-    const x = document.createElement("button");
-    x.className = "pet-settings-close";
-    x.textContent = "×";
-    x.addEventListener("pointerdown", (e) => {
-      e.stopPropagation();
-      this.hide();
-    });
-
-    h.append(left, x);
-    return h;
+    const back = goBack
+      ? { back: () => { this.hide(); goBack(); }, backLabel: "‹ 返回设置" }
+      : {};
+    return panelChrome(this.el, "关于", () => this.hide(), back);
   }
 
   /** 大字的产品名与版本号，旁边是「报障时直接粘走」的复制按钮。 */
