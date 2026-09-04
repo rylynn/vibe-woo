@@ -162,7 +162,7 @@ pub struct WordEntry {
     pub meaning: String,
     #[serde(rename = "e")]
     pub example: String,
-    /// 例句中文翻译（词库暂无该字段，缺省为空；Task 6 由 LLM 增强补齐）。
+    /// 例句中文翻译（2026-09-04 词库全量补齐；LLM 增强例句的翻译缺失时回退它）。
     #[serde(rename = "ez", default)]
     pub example_zh: String,
     #[serde(rename = "d")]
@@ -1173,13 +1173,10 @@ mod tests {
                     assert!(!w.term.is_empty(), "term 为空：{lang}/{id}");
                     assert!(!w.meaning.is_empty(), "释义为空：{}", w.term);
                     assert!(!w.domain.is_empty(), "领域为空：{}", w.term);
-                    // 例句与音标允许为空：ECDICT 扩展词书（*_x）无例句，
-                    // 例句由 LLM 异步增强补；音标缺失的词照常出卡。
-                    assert!(
-                        !w.example.is_empty() || id.ends_with("_x"),
-                        "例句为空且非扩展词书：{}（{lang}/{id}）",
-                        w.term
-                    );
+                    // 2026-09-04 词库补齐后基线抬升：例句与翻译全量必填，
+                    // ECDICT 扩展词书（*_x）不再豁免（音标仍允许为空）。
+                    assert!(!w.example.is_empty(), "例句为空：{}（{lang}/{id}）", w.term);
+                    assert!(!w.example_zh.is_empty(), "例句翻译为空：{}（{lang}/{id}）", w.term);
                     assert!(
                         matches!(w.level.as_str(), "beginner" | "intermediate" | "advanced"),
                         "水平非法：{} -> {}",
