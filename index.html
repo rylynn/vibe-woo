@@ -148,6 +148,21 @@
         color: #fff;
       }
 
+      /* 统一面板关闭按钮（chrome.ts）。旧类名保留：未迁移元素仍可用 */
+      .pet-panel-close {
+        border: 0;
+        background: transparent;
+        color: #8b93a7;
+        font-size: 17px;
+        line-height: 1;
+        cursor: default;
+        padding: 0 2px;
+      }
+
+      .pet-panel-close:hover {
+        color: #fff;
+      }
+
       .pet-settings-divider {
         margin: 8px 14px 4px;
         padding-top: 8px;
@@ -349,6 +364,22 @@
       }
 
       .pet-quicknote-close:hover {
+        color: #fff;
+      }
+
+      /* 提醒大卡片的 ×（语义 = 稍后 10 分钟，见 bubble.ts） */
+      .pet-banner-close {
+        flex: 0 0 auto;
+        border: 0;
+        background: transparent;
+        color: #8b93a7;
+        font-size: 17px;
+        line-height: 1;
+        cursor: default;
+        padding: 0 2px;
+      }
+
+      .pet-banner-close:hover {
         color: #fff;
       }
 
