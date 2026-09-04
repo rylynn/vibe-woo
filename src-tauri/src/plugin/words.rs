@@ -4,7 +4,7 @@
 //! - **词与中文释义永远来自内置词库**（真实、可控、离线可用），LLM 只生成
 //!   例句（按 goal 定制场景）与记忆钩子（词根/谐音/联想）—— 未配置 LLM
 //!   时用词库自带例句，卡片照常工作。
-//! - **SRS 是简化间隔重复**：艾宾浩斯梯度 10min → 1d → 3d → 7d → 21d。
+//! - **SRS 是简化间隔重复**：当日强化 10min → 30min → 2h，跨日 1d → 3d → 7d → 21d。
 //!   选词优先级：有反馈的到期复习 > 新词 > 当日已见重见 > 跨日已读词
 //!  （2026-09-03 两轮修订：复习卡重置 + 已读词霸屏导致「当天词汇全重复」）；
 //!   领域打散（连续两卡不同 domain）；水平过滤允许挑战高一级。
@@ -83,8 +83,13 @@ const DICT_JSON: &str = include_str!("words-dict.json");
 /// 两张词卡之间的最小间隔（分钟）。
 const WORD_GAP_MINS: u64 = 15;
 
-/// SRS 艾宾浩斯梯度（分钟）：10min → 1d → 3d → 7d → 21d。
-const SRS_STEPS_MINS: [u64; 5] = [10, 24 * 60, 3 * 24 * 60, 7 * 24 * 60, 21 * 24 * 60];
+/// SRS 梯度（分钟）：当日强化 [10min, 30min, 2h] + 跨日 [1d, 3d, 7d, 21d]。
+/// 没印象的词先在当天按强化曲线回来三次，再进跨日复习（多邻国式当日巩固）。
+const SRS_STEPS_MINS: [u64; 7] = [10, 30, 120, 1440, 4320, 10080, 30240];
+/// 当日强化区边界：step < 3 属当日，≥ 3 属跨日。
+const DAY_CURVE_START: u32 = 3;
+/// 连续这么多次「没印象」后该词休眠 7 天（防挫败循环，学 Anki leech）。
+const LEECH_SLEEP_LAPSES: u32 = 5;
 
 /// 轻量轮询间隔：读配置感知开关（只读本地文件，无网络无副作用）。
 const CHECK_INTERVAL: Duration = Duration::from_secs(30);
@@ -211,7 +216,7 @@ fn pool_for(language: &str, books: &[String]) -> Vec<WordEntry> {
 pub struct SrsEntry {
     /// 到期时刻（epoch 分钟）。存整数分钟：精度足够且免时区问题。
     pub due_mins: u64,
-    /// 当前梯度下标（0..=4）。
+    /// 当前梯度下标（0..=6）。
     pub step: u32,
     pub reps: u32,
     pub lapses: u32,
@@ -232,16 +237,40 @@ fn now_epoch_mins() -> u64 {
         .unwrap_or(0)
 }
 
-/// 反馈：认识 → 梯度推进（封顶）；没印象 → 回起点 10 分钟后重见。
+/// 反馈（2026-09-03 七档曲线）：
+/// - 首见即认识（reps 将变 2、从未没印象）→ 直接跳到跨日曲线 ——
+///   认识的词当天不再出现，给新词让位，保证每日增量；
+/// - 其余认识 → +1 档封顶；
+/// - 没印象 → 回强化曲线起点、lapse+1；连续 LEECH_SLEEP_LAPSES 次 → 休眠 7 天。
 fn on_feedback(e: &mut SrsEntry, known: bool, now: u64) {
     e.reps += 1;
     if known {
-        e.step = (e.step + 1).min(SRS_STEPS_MINS.len() as u32 - 1);
+        let first_see_known = e.reps == 2 && e.lapses == 0;
+        if e.step < DAY_CURVE_START && first_see_known {
+            e.step = DAY_CURVE_START;
+        } else {
+            e.step = (e.step + 1).min(SRS_STEPS_MINS.len() as u32 - 1);
+        }
+        e.due_mins = now + SRS_STEPS_MINS[e.step as usize];
     } else {
         e.step = 0;
         e.lapses += 1;
+        e.due_mins = if e.lapses >= LEECH_SLEEP_LAPSES {
+            now + 7 * DAY_MINS
+        } else {
+            now + SRS_STEPS_MINS[0]
+        };
     }
-    e.due_mins = now + SRS_STEPS_MINS[e.step as usize];
+}
+
+/// 旧 5 档 [10m,1d,3d,7d,21d] → 新 7 档按间隔时长等值映射：
+/// 旧 0 → 0；旧 s≥1 → s+2（两档数值恰好一一对应）。
+fn migrate_step(old: u32) -> u32 {
+    if old == 0 {
+        0
+    } else {
+        (old + 2).min(SRS_STEPS_MINS.len() as u32 - 1)
+    }
 }
 
 /// 选词优先级（2026-09-03 两轮修订，修复「当天词汇全重复」）：
@@ -667,14 +696,76 @@ mod tests {
 
     // ---- SRS ----
 
+    // ---- 七档曲线（2026-09-03 修订） ----
+
+    #[test]
+    fn 梯度为当日强化加跨日七档() {
+        assert_eq!(
+            SRS_STEPS_MINS,
+            [10, 30, 120, 1440, 4320, 10080, 30240]
+        );
+    }
+
+    #[test]
+    fn 首见即认识直接跳到跨日曲线_当天不再出现() {
+        // 首见发卡 reps=1；点「认识」→ reps=2 且从未没印象 → step 直接到 3（明天见）
+        let mut e = SrsEntry { due_mins: 0, step: 0, reps: 1, lapses: 0, first_mins: 0 };
+        on_feedback(&mut e, true, 1000);
+        assert_eq!((e.step, e.due_mins), (3, 1000 + SRS_STEPS_MINS[3]));
+    }
+
+    #[test]
+    fn 复习中认识按档推进() {
+        // 已在跨日区（step=3）的词点认识 → +1 档，不触发跳档
+        let mut e = SrsEntry { due_mins: 0, step: 3, reps: 2, lapses: 0, first_mins: 0 };
+        on_feedback(&mut e, true, 1000);
+        assert_eq!(e.step, 4);
+    }
+
+    #[test]
+    fn 当日强化区里没印象过的词认识只前进一档() {
+        // step=0 但 lapses≥1（走强化曲线的词）：认识 → 30 分钟后重见，不跳跨日
+        let mut e = SrsEntry { due_mins: 0, step: 0, reps: 2, lapses: 1, first_mins: 0 };
+        on_feedback(&mut e, true, 1000);
+        assert_eq!(e.step, 1);
+        assert_eq!(e.due_mins, 1000 + SRS_STEPS_MINS[1]);
+    }
+
+    #[test]
+    fn 没印象回强化曲线起点() {
+        let mut e = SrsEntry { due_mins: 0, step: 4, reps: 3, lapses: 0, first_mins: 0 };
+        on_feedback(&mut e, false, 1000);
+        assert_eq!((e.step, e.due_mins, e.lapses), (0, 1000 + SRS_STEPS_MINS[0], 1));
+    }
+
+    #[test]
+    fn 连续五次没印象休眠七天() {
+        let mut e = SrsEntry { due_mins: 0, step: 2, reps: 5, lapses: 4, first_mins: 0 };
+        on_feedback(&mut e, false, 1000);
+        assert_eq!(e.lapses, 5);
+        assert_eq!(e.due_mins, 1000 + 7 * DAY_MINS, "第 5 次没印象应休眠 7 天");
+    }
+
+    #[test]
+    fn 旧五档状态等值迁移到新七档() {
+        assert_eq!(migrate_step(0), 0, "旧 10min → 新 10min");
+        assert_eq!(migrate_step(1), 3, "旧 1d → 新 1d");
+        assert_eq!(migrate_step(2), 4, "旧 3d → 新 3d");
+        assert_eq!(migrate_step(3), 5, "旧 7d → 新 7d");
+        assert_eq!(migrate_step(4), 6, "旧 21d → 新 21d（封顶）");
+        assert_eq!(migrate_step(9), 6, "越界封顶");
+    }
+
     #[test]
     fn 认识推进梯度并封顶() {
-        let mut e = entry(0, 0);
+        // 复习中的词（已有反馈历史）认识才逐档推进：
+        let mut e = entry(0, 3); // 跨日区 step=3
+        e.reps = 3;
         on_feedback(&mut e, true, 1000);
-        assert_eq!((e.step, e.due_mins), (1, 1000 + SRS_STEPS_MINS[1]));
-        e.step = 4;
+        assert_eq!(e.step, 4);
+        e.step = 6;
         on_feedback(&mut e, true, 1000);
-        assert_eq!(e.step, 4, "最高档封顶");
+        assert_eq!(e.step, 6, "最高档封顶");
     }
 
     #[test]
@@ -682,11 +773,6 @@ mod tests {
         let mut e = entry(0, 3);
         on_feedback(&mut e, false, 1000);
         assert_eq!((e.step, e.due_mins, e.lapses), (0, 1000 + SRS_STEPS_MINS[0], 1));
-    }
-
-    #[test]
-    fn 梯度符合艾宾浩斯设计() {
-        assert_eq!(SRS_STEPS_MINS, [10, 1440, 4320, 10080, 30240]);
     }
 
     // ---- 选词 ----
