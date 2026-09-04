@@ -49,6 +49,8 @@ fn idle_is_resting(idle_secs: Option<f64>) -> bool {
 
 /// 预览接下来要学的词（面板展示用）：连续 pick，已选的标记远期防止重复。
 /// 在 SRS 副本上操作，不污染真实学习状态。
+/// 新词/复习配额闸由调用方按真实当日计数传入（与 tick 同一套判据）——
+/// 面板预告的必须是下一个 tick 真能出的卡，配额满的档不出现。
 fn preview(
     pool: &[WordEntry],
     srs: &HashMap<String, SrsEntry>,
@@ -56,12 +58,14 @@ fn preview(
     user_rank: u8,
     last_domain: &str,
     count: usize,
+    allow_new: bool,
+    allow_review: bool,
 ) -> Vec<WordEntry> {
     let mut srs = srs.clone();
     let mut last = last_domain.to_string();
     let mut out = Vec::new();
     for _ in 0..count {
-        let Some(w) = pick(&pool, &srs, now, user_rank, &last, true, true) else {
+        let Some(w) = pick(&pool, &srs, now, user_rank, &last, allow_new, allow_review) else {
             break;
         };
         last = w.domain.clone();
@@ -633,11 +637,15 @@ impl Plugin for WordsPlugin {
             spawn_enhance(&cfg, &word);
         }
 
-        let hard = with_state(|s| {
-            s.srs.get(&word.term).is_some_and(|e| e.lapses >= 3)
-        });
+        let hard = with_state(|s| is_hard(&s.srs, &word.term));
         vec![make_card(&word, enhanced.as_ref(), hard)]
     }
+}
+
+/// UI 侧「难词」判定（钩子置顶）：lapses ≥ 3。
+/// 与选词器第 3 档的 lapses ≥ 2 是刻意两档（spec 设计二 :117 早介入 / :126 强化展示）。
+fn is_hard(srs: &HashMap<String, SrsEntry>, term: &str) -> bool {
+    srs.get(term).is_some_and(|e| e.lapses >= 3)
 }
 
 fn make_card(w: &WordEntry, enhanced: Option<&Enhanced>, hard: bool) -> PluginCard {
@@ -709,6 +717,9 @@ pub fn meta(app: &tauri::AppHandle) -> PluginMeta {
         level_rank(&cfg.level),
         &last_domain,
         remaining,
+        // 真实配额闸（与 tick 同判据）：新词配额满后「接下来」不再预告新词
+        new_count < cfg.daily_limit,
+        review_count < review_cap(cfg.daily_limit),
     )
     .iter()
     .map(|w| serde_json::json!({ "term": w.term, "meaning": w.meaning }))
@@ -943,9 +954,11 @@ mod tests {
         assert_eq!(e.reps, 1);
         assert_eq!(e.due_mins, 10_000 + 2 * WORD_GAP_MINS, "第一步梯度(10min)比出卡间隔短，保底隔两张卡");
 
-        let mut e = entry(0, 1);
+        // step=2 梯度（120min）> 保底（30min）：SRS_STEPS_MINS[1]=30 恰等于兜底，
+        // 断言会失去判别力，故取第 2 档让「曲线胜过兜底」重新可判别
+        let mut e = entry(0, 2);
         reschedule_seen(&mut e, 10_000);
-        assert_eq!(e.due_mins, 10_000 + SRS_STEPS_MINS[1], "梯度高于保底时按原梯度");
+        assert_eq!(e.due_mins, 10_000 + SRS_STEPS_MINS[2], "梯度高于保底时按原梯度");
     }
 
     #[test]
@@ -1045,7 +1058,9 @@ mod tests {
     fn 难词跨日到期压过普通跨日到期() {
         let pool = vec![word("hard", "life", "beginner"), word("norm", "food", "beginner")];
         let mut srs = HashMap::new();
-        let mut hard = entry(0, 3); hard.reps = 4; hard.lapses = 2;
+        // norm 先到期（hard 到期更晚）：若难度档失效，纯按到期序会选 norm ——
+        // 两词 due 不同让「难词档压过普通档」不再靠池序/同到期序通过
+        let mut hard = entry(50, 3); hard.reps = 4; hard.lapses = 2;
         let mut norm = entry(0, 3); norm.reps = 4; norm.lapses = 0;
         srs.insert("hard".into(), hard);
         srs.insert("norm".into(), norm);
@@ -1209,7 +1224,7 @@ mod tests {
         ];
         let mut srs = HashMap::new();
         srs.insert("a".into(), entry_reviewed(0, 1)); // a 到期且有反馈
-        let out = preview(&pool, &srs, 10_000, 0, "", 3);
+        let out = preview(&pool, &srs, 10_000, 0, "", 3, true, true);
         let terms: Vec<&str> = out.iter().map(|w| w.term.as_str()).collect();
         assert_eq!(terms, vec!["a", "b", "c"], "到期词优先、不重复、按序给满");
         // 预览只动副本：真实 SRS 不被改写
@@ -1231,6 +1246,18 @@ mod tests {
         assert_eq!(c2.payload["example"], "LLM 例句");
         assert_eq!(c2.payload["hook"], "钩子");
         assert_eq!(c2.payload["ai"], true);
+    }
+
+    #[test]
+    fn 增强翻译非空用增强_为空回退词库自带() {
+        let mut w = word("test", "life", "beginner");
+        w.example_zh = "词库翻译".into();
+        let e_ok = Enhanced { example: "LLM 例句".into(), example_zh: "LLM 翻译".into(), hook: None };
+        let c = make_card(&w, Some(&e_ok), false);
+        assert_eq!(c.payload["example_zh"], "LLM 翻译");
+        let e_blank = Enhanced { example: "LLM 例句".into(), example_zh: String::new(), hook: None };
+        let c2 = make_card(&w, Some(&e_blank), false);
+        assert_eq!(c2.payload["example_zh"], "词库翻译");
     }
 
     #[test]
