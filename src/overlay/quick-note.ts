@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { Box } from "../interact/hit-test";
+import { enablePanelDrag } from "./panel-drag";
 
 function enterInputMode(): void {
   void invoke("begin_text_input").catch(() => {});
@@ -56,8 +57,20 @@ export class QuickNote {
     this.textarea.spellcheck = false;
     this.textarea.rows = 1;
 
-    this.el.appendChild(this.textarea);
+    // 关闭按钮：语义与 Esc/再按 ⌥Space 一致 —— 丢弃当前输入直接收起
+    const x = document.createElement("button");
+    x.className = "pet-quicknote-close";
+    x.textContent = "×";
+    x.title = "收起（⌥Space 也可）";
+    x.addEventListener("pointerdown", (e) => {
+      e.stopPropagation();
+      this.hide();
+    });
+    this.el.append(this.textarea, x);
     document.body.appendChild(this.el);
+
+    // 拖拽：把手是输入条本体（textarea 被排除，从两侧留白处拖）
+    enablePanelDrag(this.el, ".pet-quicknote");
 
     this.bind();
   }
