@@ -9,7 +9,7 @@ import { drawSpots } from "../render/patterns";
 import { generateCandidates } from "../avatar/generator";
 import type { PetAvatar } from "../avatar/types";
 import type { Box } from "../interact/hit-test";
-import { enablePanelDrag } from "./panel-drag";
+import { panelChrome } from "./chrome";
 
 /** 预览画布的 CSS 像素边长。 */
 const PREVIEW_SIDE = 96;
@@ -191,7 +191,6 @@ export class AvatarPicker {
     this.el.className = "pet-avatar-picker";
     this.el.style.display = "none";
     document.body.appendChild(this.el);
-    enablePanelDrag(this.el, ".pet-avatar-picker-head");
   }
 
   get isOpen(): boolean {
@@ -235,17 +234,11 @@ export class AvatarPicker {
     this.previews = [];
     this.el.replaceChildren();
 
-    // —— 标题栏（拖动把手）——
-    const head = document.createElement("div");
-    head.className = "pet-avatar-picker-head";
-    const title = document.createElement("span");
-    title.textContent = "领养你的像素崽";
-    const close = document.createElement("button");
-    close.className = "pet-avatar-picker-close";
-    close.textContent = "×";
-    close.title = "稍后再选（下次启动还会问我）";
-    close.addEventListener("click", () => this.hide());
-    head.append(title, close);
+    // —— 标题栏（panelChrome 统一构建：拖拽 + ×）——
+    const head = panelChrome(this.el, "领养你的像素崽", () => this.hide(), {
+      headClass: "pet-avatar-picker-head",
+      closeTitle: "稍后再选（下次启动还会问我）",
+    });
     this.el.appendChild(head);
 
     // —— 3 个预览 ——
