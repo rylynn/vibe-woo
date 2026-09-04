@@ -1,4 +1,5 @@
 import type { Box } from "../interact/hit-test";
+import { enablePanelDrag } from "./panel-drag";
 
 /** 气泡与宠物身体之间的留白（也是尾巴三角形的高度）。 */
 const TAIL_GAP = 10;
@@ -211,6 +212,9 @@ export class Banner {
     this.el.className = "pet-banner";
     this.el.style.display = "none";
     document.body.appendChild(this.el);
+    // 提醒大卡片可拖（把手 = 卡片头）。只在 reminder 模式存在 head，
+    // 简单通知条没有 head 不会误拖；构造时挂一次，show 重建内容不重复挂。
+    enablePanelDrag(this.el, ".pet-banner-head");
   }
 
   /**
@@ -288,7 +292,17 @@ export class Banner {
     const time = document.createElement("span");
     time.className = "pet-banner-time";
     time.textContent = r.time;
-    head.append(icon, tag, time);
+    // × 的语义 = 稍后 10 分钟（与 snooze 按钮完全同路径，绝不误删）
+    const x = document.createElement("button");
+    x.className = "pet-banner-close";
+    x.textContent = "×";
+    x.title = "稍后 10 分钟";
+    x.addEventListener("pointerdown", (e) => {
+      e.stopPropagation();
+      void ops.onSnooze(r.index);
+      this.dismiss();
+    });
+    head.append(icon, tag, time, x);
     this.el.appendChild(head);
 
     const body = document.createElement("div");
