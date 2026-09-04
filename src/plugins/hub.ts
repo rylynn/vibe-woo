@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { Box } from "../interact/hit-test";
+import { panelChrome } from "../overlay/chrome";
 import { getPluginFrontend, type CardHost } from "./registry";
 
 /** plugin_summary 命令的返回项（与 Rust PluginMeta 契约一致）。 */
@@ -89,19 +90,9 @@ export class PluginHubPanel {
   private render(metas: PluginMeta[]): void {
     this.el.replaceChildren();
 
-    const head = document.createElement("div");
-    head.className = "pet-hub-head";
-    const title = document.createElement("span");
-    title.textContent = "插件";
-    const close = document.createElement("button");
-    close.className = "pet-hub-close";
-    close.textContent = "×";
-    close.title = "关闭";
-    close.addEventListener("pointerdown", (e) => {
-      e.stopPropagation();
-      this.hide();
+    const head = panelChrome(this.el, "插件", () => this.hide(), {
+      headClass: "pet-hub-head",
     });
-    head.append(title, close);
     this.el.appendChild(head);
 
     // show() 已过滤：进到这里的插件都是已启用的

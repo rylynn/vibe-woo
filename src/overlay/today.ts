@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { Box } from "../interact/hit-test";
+import { panelChrome } from "./chrome";
 
 interface NoteRow {
   text: string;
@@ -35,11 +36,9 @@ export class TodayPanel {
 
   private renderLoading(): void {
     this.el.replaceChildren();
-    const head = document.createElement("div");
-    head.className = "pet-today-head";
-    const t = document.createElement("span");
-    t.textContent = "今日速记";
-    head.appendChild(t);
+    const head = panelChrome(this.el, "今日速记", () => this.hide(), {
+      headClass: "pet-today-head",
+    });
     this.el.appendChild(head);
     const e = document.createElement("div");
     e.className = "pet-today-empty";
@@ -78,22 +77,9 @@ export class TodayPanel {
   private async render(): Promise<void> {
     this.el.replaceChildren();
 
-    const head = document.createElement("div");
-    head.className = "pet-today-head";
-
-    const title = document.createElement("span");
-    title.textContent = "今日速记";
-
-    const close = document.createElement("button");
-    close.className = "pet-today-close";
-    close.textContent = "×";
-    close.title = "关闭";
-    close.addEventListener("pointerdown", (e) => {
-      e.stopPropagation();
-      this.hide();
+    const head = panelChrome(this.el, "今日速记", () => this.hide(), {
+      headClass: "pet-today-head",
     });
-
-    head.append(title, close);
     this.el.appendChild(head);
 
     let notes: NoteRow[] = [];
