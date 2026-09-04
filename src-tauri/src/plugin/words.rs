@@ -359,13 +359,24 @@ struct WordsState {
     srs: HashMap<String, SrsEntry>,
     /// 当日已发卡数（跨天清零）。
     served_date: String,
-    served_count: u32,
+    /// 当日新词数（对 daily_limit）。旧字段 served_count 经 alias 并入。
+    #[serde(default, alias = "served_count")]
+    served_new_count: u32,
+    /// 当日复习补充卡数（对 review_cap，不占新词配额）。
+    #[serde(default)]
+    served_review_count: u32,
     /// 当日已发词条（面板展示用，只留最近 20 条）。
+    #[serde(default)]
     served_terms: Vec<String>,
     /// 上次发卡时刻（epoch 分钟），频率闸。
+    #[serde(default)]
     last_card_mins: u64,
     /// 上一张卡的领域（打散用）。
+    #[serde(default)]
     last_domain: String,
+    /// 状态结构版本：1=旧（5 档 step、混合计数），2=当前。加载时据此迁移。
+    #[serde(default)]
+    schema: u32,
 }
 
 static STATE: Mutex<Option<WordsState>> = Mutex::new(None);
@@ -384,17 +395,35 @@ fn save_state(app: &tauri::AppHandle) {
 }
 
 fn load_state(app: &tauri::AppHandle) {
-    let s: WordsState = store::load(app, STATE_FILE);
+    let mut s: WordsState = store::load(app, STATE_FILE);
+    migrate_state(&mut s);
     with_state(|g| *g = s);
 }
 
-/// 跨天清零（纯函数，单测入口）。
+/// 跨天清零（纯函数，单测入口）。新词与复习两个配额都清。
 fn rollover(s: &mut WordsState, today: &str) {
     if s.served_date != today {
         s.served_date = today.to_string();
-        s.served_count = 0;
+        s.served_new_count = 0;
+        s.served_review_count = 0;
         s.served_terms.clear();
     }
+}
+
+/// 复习补充卡的每日上限：不占新词配额，但也不能无限刷屏。
+fn review_cap(daily_limit: u32) -> u32 {
+    daily_limit.saturating_mul(2)
+}
+
+/// 旧状态迁移（加载后调用一次）：step 等值换档 + 标记 schema=2。
+fn migrate_state(s: &mut WordsState) {
+    if s.schema >= 2 {
+        return;
+    }
+    for e in s.srs.values_mut() {
+        e.step = migrate_step(e.step);
+    }
+    s.schema = 2;
 }
 
 // ---------- LLM 增强缓存（异步线程写，tick 读） ----------
@@ -494,7 +523,7 @@ impl Plugin for WordsPlugin {
 
         let Some(word) = with_state(|s| {
             rollover(s, &today);
-            if s.served_count >= cfg.daily_limit {
+            if s.served_new_count >= cfg.daily_limit {
                 return None;
             }
             if now.saturating_sub(s.last_card_mins) < WORD_GAP_MINS {
@@ -503,7 +532,7 @@ impl Plugin for WordsPlugin {
             // 首卡不设防：启用后当日第一张立即出现 —— 开了插件却什么都
             // 看不到是最差的默认体验，先让用户确认它在工作，再进入
             // 「键盘静默 1 分钟才弹」的节奏（时间窗是插件业务，不进仲裁器）。
-            if cfg.only_resting && s.served_count > 0 {
+            if cfg.only_resting && s.served_new_count > 0 {
                 let idle = crate::sensor::keyboard_idle_secs();
                 if !idle_is_resting(idle) {
                     return None;
@@ -520,7 +549,7 @@ impl Plugin for WordsPlugin {
             // 记账：今日配额、频率闸、领域；SRS 分新词首见与复习重见两条路。
             // 修复：旧逻辑对复习词也按新词整条重置（step 归 0、10 分钟后
             // 再到期），到期时刻永远追着出卡间隔跑 —— 当天全在重复同一个词。
-            s.served_count += 1;
+            s.served_new_count += 1;
             s.served_terms.push(word.term.clone());
             s.last_card_mins = now;
             s.last_domain = word.domain.clone();
@@ -589,7 +618,7 @@ pub fn meta(app: &tauri::AppHandle) -> PluginMeta {
         Some(mut s) => {
             rollover(&mut s, &today);
             (
-                s.served_count,
+                s.served_new_count,
                 s.served_terms.clone(),
                 s.srs.clone(),
                 s.last_domain.clone(),
@@ -913,17 +942,56 @@ mod tests {
     fn 跨天清零当日计数() {
         let mut s = WordsState {
             served_date: "2026-09-01".into(),
-            served_count: 5,
+            served_new_count: 5,
+            served_review_count: 3,
             served_terms: vec!["a".into()],
             ..Default::default()
         };
         rollover(&mut s, "2026-09-02");
-        assert_eq!(s.served_count, 0);
+        assert_eq!(s.served_new_count, 0);
+        assert_eq!(s.served_review_count, 0);
         assert!(s.served_terms.is_empty());
         assert_eq!(s.served_date, "2026-09-02");
         // 同日不清
         rollover(&mut s, "2026-09-02");
-        assert_eq!(s.served_count, 0);
+        assert_eq!(s.served_new_count, 0);
+    }
+
+    // ---- 配额分离 ----
+
+    #[test]
+    fn 旧状态served_count并入新词计数且迁移step与schema() {
+        let mut s: WordsState = serde_json::from_str(
+            r#"{"served_date":"2026-09-01","served_count":5,"served_terms":["a"],
+                "srs":{"a":{"due_mins":10,"step":2,"reps":3,"lapses":0,"first_mins":0}}}"#,
+        )
+        .unwrap();
+        migrate_state(&mut s);
+        assert_eq!(s.served_new_count, 5, "旧 served_count 近似全是新词，并入新词计数");
+        assert_eq!(s.served_review_count, 0);
+        assert_eq!(s.srs["a"].step, 4, "旧 step 2(3d) → 新 step 4(3d)");
+        assert_eq!(s.schema, 2);
+    }
+
+    #[test]
+    fn 跨天清零两个计数() {
+        let mut s = WordsState {
+            served_date: "2026-09-01".into(),
+            served_new_count: 5,
+            served_review_count: 3,
+            served_terms: vec!["a".into()],
+            schema: 2,
+            ..Default::default()
+        };
+        rollover(&mut s, "2026-09-02");
+        assert_eq!((s.served_new_count, s.served_review_count), (0, 0));
+        rollover(&mut s, "2026-09-02");
+        assert_eq!((s.served_new_count, s.served_review_count), (0, 0), "同日不清");
+    }
+
+    #[test]
+    fn 复习上限为每日限量的两倍() {
+        assert_eq!(review_cap(8), 16);
     }
 
     // ---- 配置 ----
