@@ -107,6 +107,8 @@ fn main() {
             configcmd::update_config,
             appinfo::get_app_info,
             reminddrive::snooze_reminder,
+            shortcut::begin_capture,
+            shortcut::end_capture,
             plugin::plugin_summary,
             plugin::plugin_get_config,
             plugin::plugin_set_config,
@@ -122,11 +124,11 @@ fn main() {
             // 先注册逃生快捷键，再显示窗口 —— 顺序很重要：
             // 万一窗口逻辑有问题，用户至少已经能退出了。
             app.global_shortcut().register(kill_switch())?;
-            shortcut::register_note_shortcut(app.handle());
-            shortcut::register_reminder_shortcut(app.handle());
+            // 速记 / 提醒 / 插件面板的快捷键由配置决定，必须在配置载入之后注册
+            let cfg = configcmd::init(app.handle());
+            shortcut::apply_from_config(app.handle());
             tray::setup_tray(app)?;
 
-            let cfg = configcmd::init(app.handle());
             rewards::init(app.handle());
             stats::init(app.handle());
             eprintln!(

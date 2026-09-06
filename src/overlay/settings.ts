@@ -3,12 +3,14 @@ import type { Box } from "../interact/hit-test";
 import {
   getConfig,
   updateConfig,
+  DEFAULT_SHORTCUTS,
   LLM_PROTOCOLS,
   type ConfigView,
   type LlmProtocol,
   type Persona,
   type RoamScope,
 } from "../config";
+import { prettyShortcut, shortcutFromEvent, isValidShortcut } from "../shortcut";
 import { panelChrome } from "./chrome";
 import { avatarFromView, type PetAvatar } from "../avatar/types";
 import { drawAvatarStill } from "./avatar-picker";
@@ -58,8 +60,13 @@ export class SettingsPanel {
   private readonly el: HTMLDivElement;
   private open = false;
   private cfg: ConfigView | null = null;
-  /** 当前页：main = 主表单；plugins = 插件清单（二级）；plugin:<id> = 插件表单（三级）。 */
+  /** 当前页：main = 主表单；plugins = 插件清单（二级）；plugin:<id> = 插件表单（三级）；shortcuts = 自定义快捷键（二级）。 */
   private page: string = "main";
+  /** 快捷键捕获状态：非空表示正在等待用户按下新组合。 */
+  private capturing: {
+    btn: HTMLButtonElement;
+    handler: (e: KeyboardEvent) => void;
+  } | null = null;
 
   constructor(
     private readonly onApply: (c: ConfigView) => void,
@@ -71,6 +78,9 @@ export class SettingsPanel {
     this.el.className = "pet-settings";
     this.el.style.display = "none";
     document.body.appendChild(this.el);
+    // 捕获快捷键期间失去焦点（切走应用）时中止捕获，
+    // 并让 Rust 按配置把快捷键注册回去，避免全局键处于「无主」状态
+    window.addEventListener("blur", () => this.cancelCapture());
   }
 
   async show(): Promise<void> {
@@ -99,6 +109,7 @@ export class SettingsPanel {
 
   hide(): void {
     if (this.open) void invoke("end_text_input").catch(() => {});
+    this.cancelCapture(false);
     this.closeErrorBubble();
     // 先让输入框失焦再隐藏 —— display:none 会吞掉 change 事件，
     // 导致「输入了 API key 但点外关闭后没保存」。
@@ -145,9 +156,13 @@ export class SettingsPanel {
     const c = this.cfg;
     if (!c) return;
 
-    // 页面分发：插件清单（二级）/ 插件表单（三级）/ 主表单
+    // 页面分发：插件清单（二级）/ 插件表单（三级）/ 快捷键（二级）/ 主表单
     if (this.page === "plugins") {
       this.renderPluginsPage();
+      return;
+    }
+    if (this.page === "shortcuts") {
+      this.renderShortcutsPage();
       return;
     }
     if (this.page.startsWith("plugin:")) {
@@ -218,6 +233,15 @@ export class SettingsPanel {
     this.el.appendChild(
       this.entryRow("插件配置", () => {
         this.page = "plugins";
+        this.render();
+      }),
+    );
+
+    // 快捷键：入口行 → 二级页（速记 / 提醒 / 插件面板）
+    this.el.appendChild(this.divider("快捷键"));
+    this.el.appendChild(
+      this.entryRow("自定义快捷键", () => {
+        this.page = "shortcuts";
         this.render();
       }),
     );
@@ -364,6 +388,160 @@ export class SettingsPanel {
     const box = document.createElement("div");
     this.el.appendChild(box);
     new PluginSettingsShell().renderPlugin(box, id);
+  }
+
+  /** 二级页：自定义全局快捷键（速记 / 提醒 / 插件面板）。 */
+  private renderShortcutsPage(): void {
+    this.el.replaceChildren();
+    this.el.appendChild(
+      this.header("自定义快捷键", () => {
+        this.cancelCapture(false);
+        this.page = "main";
+        this.render();
+      }),
+    );
+    const c = this.cfg;
+    if (!c) return;
+    this.el.appendChild(
+      this.rowShortcutCapture("速记", "shortcut_note", c),
+    );
+    this.el.appendChild(
+      this.rowShortcutCapture("每日提醒", "shortcut_reminder", c),
+    );
+    this.el.appendChild(
+      this.rowShortcutCapture("插件面板", "shortcut_hub", c),
+    );
+    this.el.appendChild(
+      this.hint(
+        "点按钮后按下新的快捷键；需包含 Alt / Ctrl / Cmd 修饰键；Esc 取消。配置自动保存并立即生效。",
+      ),
+    );
+    // 一键回到出厂组合：改乱了之后不用逐项回想默认值
+    this.el.appendChild(this.rowShortcutsReset(c));
+  }
+
+  private static readonly SHORTCUT_FIELDS = [
+    "shortcut_note",
+    "shortcut_reminder",
+    "shortcut_hub",
+  ] as const;
+
+  private static readonly SHORTCUT_LABELS: Record<
+    (typeof SettingsPanel.SHORTCUT_FIELDS)[number],
+    string
+  > = {
+    shortcut_note: "速记",
+    shortcut_reminder: "每日提醒",
+    shortcut_hub: "插件面板",
+  };
+
+  /** 单个快捷键行：按钮显示当前组合，点击进入捕获状态。 */
+  private rowShortcutCapture(
+    label: string,
+    field: (typeof SettingsPanel.SHORTCUT_FIELDS)[number],
+    cfg: ConfigView,
+  ): HTMLElement {
+    const r = this.row(label);
+    const btn = document.createElement("button");
+    btn.className = "pet-settings-entry pet-shortcut-btn";
+    btn.textContent = prettyShortcut(cfg[field]);
+    btn.title = "点击修改快捷键";
+    btn.addEventListener("pointerdown", (e) => {
+      e.stopPropagation();
+      if (this.capturing) return; // 一次只录一个，先 Esc 取消当前
+      this.startCapture(btn, r, field, cfg);
+    });
+    r.appendChild(btn);
+    return r;
+  }
+
+  /** 重置行：三项全部恢复默认组合。 */
+  private rowShortcutsReset(cfg: ConfigView): HTMLElement {
+    const r = this.row("改乱了？");
+    const btn = document.createElement("button");
+    btn.className = "pet-settings-entry";
+    btn.textContent = "恢复默认";
+    btn.addEventListener("pointerdown", (e) => {
+      e.stopPropagation();
+      if (this.capturing) this.cancelCapture();
+      void this.patch({ ...DEFAULT_SHORTCUTS });
+    });
+    btn.disabled =
+      SettingsPanel.SHORTCUT_FIELDS.every((f) => cfg[f] === DEFAULT_SHORTCUTS[f]);
+    r.appendChild(btn);
+    return r;
+  }
+
+  /** 进入捕获：先请 Rust 反注册全局键（否则新组合会被旧键截走）。 */
+  private startCapture(
+    btn: HTMLButtonElement,
+    anchor: HTMLElement,
+    field: (typeof SettingsPanel.SHORTCUT_FIELDS)[number],
+    cfg: ConfigView,
+  ): void {
+    void invoke("begin_shortcut_capture").catch(() => {});
+    btn.textContent = "按下新快捷键…";
+    btn.classList.add("pet-shortcut-capturing");
+    // document 捕获阶段：早于 main.ts 挂在 window 捕获阶段的 Esc 全局关闭，
+    // 录键期间 Esc 只取消捕获，不关面板
+    const handler = (e: KeyboardEvent): void => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.key === "Escape") {
+        this.cancelCapture();
+        return;
+      }
+      const s = shortcutFromEvent(e);
+      if (s === null) return; // 纯修饰键按下，等待完整组合
+      this.commitCapture(s, anchor, field, cfg);
+    };
+    document.addEventListener("keydown", handler, true);
+    this.capturing = { btn, handler };
+  }
+
+  /** 捕获结束（Esc / 失焦 / 换页）：把快捷键按当前配置注册回去。 */
+  private cancelCapture(repaint = true): void {
+    if (!this.capturing) return;
+    const { handler } = this.capturing;
+    this.capturing = null;
+    document.removeEventListener("keydown", handler, true);
+    void invoke("end_shortcut_capture").catch(() => {});
+    if (repaint) this.render();
+  }
+
+  /** 提交捕获到的组合：查冲突后保存（update_config 会按新配置重注册）。 */
+  private commitCapture(
+    s: string,
+    anchor: HTMLElement,
+    field: (typeof SettingsPanel.SHORTCUT_FIELDS)[number],
+    cfg: ConfigView,
+  ): void {
+    const capturing = this.capturing;
+    this.capturing = null;
+    if (capturing) {
+      document.removeEventListener("keydown", capturing.handler, true);
+    }
+    for (const f of SettingsPanel.SHORTCUT_FIELDS) {
+      if (f !== field && cfg[f] === s) {
+        this.showErrorBubble(
+          anchor,
+          `与「${SettingsPanel.SHORTCUT_LABELS[f]}」的快捷键冲突，未保存`,
+        );
+        void invoke("end_shortcut_capture").catch(() => {});
+        this.render();
+        return;
+      }
+    }
+    if (!isValidShortcut(s)) {
+      this.showErrorBubble(
+        anchor,
+        "需包含 Alt / Ctrl / Cmd 修饰键（纯 Shift 或裸键会拦截正常打字），未保存",
+      );
+      void invoke("end_shortcut_capture").catch(() => {});
+      this.render();
+      return;
+    }
+    void this.patch({ [field]: s });
   }
 
   /** 可点击的入口行（主表单 → 二级页）。 */

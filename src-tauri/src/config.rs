@@ -283,11 +283,33 @@ pub struct Config {
     pub last_run_version: String,
     /// 已领养的形象。None 表示首次安装尚未选择，前端据此弹选择窗。
     pub avatar: Option<AvatarConfig>,
+    /// 速记输入条的全局快捷键（存储格式见 shortcut.rs::parse）。
+    #[serde(default = "default_shortcut_note")]
+    pub shortcut_note: String,
+    /// 每日提醒面板的全局快捷键。
+    #[serde(default = "default_shortcut_reminder")]
+    pub shortcut_reminder: String,
+    /// 插件面板的全局快捷键。
+    #[serde(default = "default_shortcut_hub")]
+    pub shortcut_hub: String,
 }
 
 /// 布尔字段的默认值：新功能默认开（详见 `Config::habit_enabled` 的注释）。
 fn default_true() -> bool {
     true
+}
+
+/// 快捷键默认值（与 shortcut.rs 的 DEFAULT_* 常量一致）。
+fn default_shortcut_note() -> String {
+    crate::shortcut::DEFAULT_SHORTCUT_NOTE.to_string()
+}
+
+fn default_shortcut_reminder() -> String {
+    crate::shortcut::DEFAULT_SHORTCUT_REMINDER.to_string()
+}
+
+fn default_shortcut_hub() -> String {
+    crate::shortcut::DEFAULT_SHORTCUT_HUB.to_string()
 }
 
 impl Default for Config {
@@ -309,6 +331,9 @@ impl Default for Config {
             auto_update: true,
             last_run_version: String::new(),
             avatar: None,
+            shortcut_note: crate::shortcut::DEFAULT_SHORTCUT_NOTE.to_string(),
+            shortcut_reminder: crate::shortcut::DEFAULT_SHORTCUT_REMINDER.to_string(),
+            shortcut_hub: crate::shortcut::DEFAULT_SHORTCUT_HUB.to_string(),
         }
     }
 }

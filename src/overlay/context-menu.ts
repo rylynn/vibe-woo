@@ -14,6 +14,7 @@ export interface MenuItemSpec {
  */
 export class ContextMenu {
   private readonly el: HTMLDivElement;
+  private readonly rows: HTMLButtonElement[] = [];
   private open = false;
 
   constructor(items: MenuItemSpec[]) {
@@ -43,6 +44,7 @@ export class ContextMenu {
         item.onPick();
       });
       this.el.appendChild(row);
+      this.rows.push(row);
     }
 
     document.body.appendChild(this.el);
@@ -65,6 +67,12 @@ export class ContextMenu {
   hide(): void {
     this.el.style.display = "none";
     this.open = false;
+  }
+
+  /** 更新某项文案（快捷键提示跟随配置变化）。 */
+  setLabel(index: number, label: string): void {
+    const row = this.rows[index];
+    if (row) row.textContent = label;
   }
 
   get isOpen(): boolean {

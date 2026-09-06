@@ -26,6 +26,7 @@ import { DismissManager } from "./overlay/dismiss";
 import { onStateChange } from "./state";
 import { describe as describeState } from "./appearance";
 import { getConfig, updateConfig, type ConfigView } from "./config";
+import { prettyShortcut } from "./shortcut";
 import { AvatarPicker } from "./overlay/avatar-picker";
 import { avatarFromView, avatarToView } from "./avatar/types";
 import { analyzeImageFile } from "./avatar/from-image";
@@ -57,6 +58,10 @@ function applyConfig(c: ConfigView): void {
   pet.setSizeIndex(c.size_index);
   pet.setScope(c.roam_scope);
   if (c.avatar) pet.setAvatar(avatarFromView(c.avatar));
+  // 右键菜单里的快捷键提示跟随配置（改键后不再显示过时的 ⌥Space 等）
+  menu.setLabel(0, `记一笔  (${prettyShortcut(c.shortcut_note)})`);
+  menu.setLabel(1, `每日提醒  (${prettyShortcut(c.shortcut_reminder)})`);
+  menu.setLabel(2, `插件面板  (${prettyShortcut(c.shortcut_hub)})`);
 }
 
 // 首次安装领养流程：确认后持久化并立即换装
@@ -102,6 +107,8 @@ quickNote.onSaved = () => {
 const menu = new ContextMenu([
   { label: "记一笔  (⌥Space)", onPick: () => void quickNote.show() },
   { label: "每日提醒  (⌥R)", onPick: () => void remindersPanel.show() },
+  // 初始文案由 applyConfig 按配置改写，这里只是占位
+  { label: "插件面板", onPick: () => void hub.toggle() },
   { label: "好友", onPick: () => void friendsPanel.show() },
   { label: "今日速记", onPick: () => void today.show() },
   { label: "设置", onPick: () => void settings.show() },
@@ -294,6 +301,11 @@ void onReminderPanelOpen(() => {
     void remindersPanel.show();
   }
 });
+
+// 快捷键呼出插件面板（可在设置中自定义，默认 ⌥P），toggle 与单击宠物一致
+void listen("pet://hub-open", () => {
+  void hub.toggle();
+}).catch((e) => console.warn("[hub] 快捷键监听失败", e));
 
 // 接收 Rust 传感器推送的状态。宠物的表情、配色、呼吸节奏都由它驱动。
 void onStateChange((s) => {

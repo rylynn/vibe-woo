@@ -962,6 +962,24 @@
         background: rgba(124, 245, 196, 0.12);
       }
 
+      /* 快捷键捕获中：琥珀色 + 呼吸闪烁，提示「在等你按键」 */
+      .pet-shortcut-capturing {
+        color: #ffd88a;
+        border-color: rgba(255, 216, 138, 0.5);
+        background: rgba(255, 216, 138, 0.1);
+        animation: pet-shortcut-pulse 1.2s ease-in-out infinite;
+      }
+
+      @keyframes pet-shortcut-pulse {
+        0%,
+        100% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0.55;
+        }
+      }
+
       .pet-plugin-list-row {
         display: flex;
         align-items: center;

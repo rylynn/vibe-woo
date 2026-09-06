@@ -54,6 +54,10 @@ export interface ConfigView {
   social_hidden: boolean;
   /** 已领养的形象。null 表示首次安装未选择（前端应弹形象选择窗）。 */
   avatar: AvatarConfigView | null;
+  /** 全局快捷键（存储格式见 src/shortcut.ts），可在设置里自定义。 */
+  shortcut_note: string;
+  shortcut_reminder: string;
+  shortcut_hub: string;
 }
 
 export interface ConfigPatch {
@@ -79,7 +83,17 @@ export interface ConfigPatch {
   social_server?: string;
   social_hidden?: boolean;
   avatar?: AvatarConfigView;
+  shortcut_note?: string;
+  shortcut_reminder?: string;
+  shortcut_hub?: string;
 }
+
+/** 快捷键默认值（与 Rust 侧 shortcut.rs 的 DEFAULT_* 保持一致）。 */
+export const DEFAULT_SHORTCUTS = {
+  shortcut_note: "Alt+Space",
+  shortcut_reminder: "Alt+R",
+  shortcut_hub: "Alt+P",
+} as const;
 
 export const FALLBACK_CONFIG: ConfigView = {
   size_index: 1,
@@ -109,6 +123,7 @@ export const FALLBACK_CONFIG: ConfigView = {
   social_invite_code: "",
   social_hidden: false,
   avatar: null,
+  ...DEFAULT_SHORTCUTS,
 };
 
 export async function getConfig(): Promise<ConfigView> {

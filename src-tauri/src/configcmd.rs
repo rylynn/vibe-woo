@@ -86,6 +86,10 @@ pub struct ConfigView {
     pub social_hidden: bool,
     /// 已领养的形象，None 表示首次安装未选择。
     pub avatar: Option<config::AvatarConfig>,
+    /// 全局快捷键（速记 / 提醒 / 插件面板），存储格式见 shortcut.rs::parse。
+    pub shortcut_note: String,
+    pub shortcut_reminder: String,
+    pub shortcut_hub: String,
 }
 
 fn to_view(c: &Config) -> ConfigView {
@@ -117,6 +121,9 @@ fn to_view(c: &Config) -> ConfigView {
         social_invite_code: c.social.invite_code.clone(),
         social_hidden: c.social.hidden,
         avatar: c.avatar.clone(),
+        shortcut_note: c.shortcut_note.clone(),
+        shortcut_reminder: c.shortcut_reminder.clone(),
+        shortcut_hub: c.shortcut_hub.clone(),
     }
 }
 
@@ -153,6 +160,9 @@ pub struct ConfigPatch {
     pub social_nick: Option<String>,
     pub social_hidden: Option<bool>,
     pub avatar: Option<config::AvatarConfig>,
+    pub shortcut_note: Option<String>,
+    pub shortcut_reminder: Option<String>,
+    pub shortcut_hub: Option<String>,
 }
 
 #[tauri::command]
@@ -228,9 +238,28 @@ pub fn update_config(app: AppHandle, patch: ConfigPatch) -> Result<ConfigView, S
         cfg.avatar = Some(v);
     }
 
+    let mut shortcuts_changed = false;
+    if let Some(v) = patch.shortcut_note {
+        cfg.shortcut_note = v;
+        shortcuts_changed = true;
+    }
+    if let Some(v) = patch.shortcut_reminder {
+        cfg.shortcut_reminder = v;
+        shortcuts_changed = true;
+    }
+    if let Some(v) = patch.shortcut_hub {
+        cfg.shortcut_hub = v;
+        shortcuts_changed = true;
+    }
+
     config::save(&app, &cfg)?;
     if let Ok(mut g) = CURRENT.lock() {
         *g = Some(cfg.clone());
+    }
+
+    // 快捷键变了要立刻重新注册（先反注册旧的再注册新的，见 apply_from_config）
+    if shortcuts_changed {
+        crate::shortcut::apply_from_config(&app);
     }
 
     let view = to_view(&cfg);
