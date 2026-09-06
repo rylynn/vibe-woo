@@ -1,6 +1,8 @@
 import type { Box } from "../interact/hit-test";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { formatAppInfo, getAppInfo, type AppInfo } from "../appinfo";
-import { getConfig } from "../config";
+import { getConfig, updateConfig, type ConfigView } from "../config";
 import { panelChrome } from "./chrome";
 
 /** 署名。与设置面板里原来的那行保持一致。 */
@@ -25,12 +27,21 @@ export class AboutPanel {
   private registerDate = "";
   /** 从设置面板进入时的「返回设置」回调；直接打开时为 null。 */
   private back: (() => void) | null = null;
+  /** 完整配置（更新开关用；show 时刷新）。 */
+  private cfg: ConfigView | null = null;
+  /** 更新状态行（常驻元素，事件到来时刷新文案）。 */
+  private readonly statusEl = document.createElement("span");
 
   constructor() {
     this.el = document.createElement("div");
     this.el.className = "pet-settings pet-about";
     this.el.style.display = "none";
     document.body.appendChild(this.el);
+    // 更新状态回显：手动检查各阶段由后端事件驱动，常驻监听
+    void listen<{ kind: string; version?: string; reason?: string }>(
+      "pet://update-status",
+      (e) => this.onUpdateStatus(e.payload),
+    ).catch(() => {});
   }
 
   /**
@@ -50,6 +61,7 @@ export class AboutPanel {
     if (!this.open) return;
     this.info = info;
     this.uid = cfg.social_uid || "";
+    this.cfg = cfg;
     this.registerDate = cfg.social_register_date || "";
     this.render();
   }
@@ -103,6 +115,9 @@ export class AboutPanel {
     this.el.appendChild(this.row("Git", info.git_hash));
     this.el.appendChild(this.row("平台", info.platform));
     this.el.appendChild(this.row("标识", info.identifier));
+
+    this.el.appendChild(this.divider("更新"));
+    if (this.cfg) this.el.appendChild(this.updateSection(this.cfg));
 
     this.el.appendChild(this.divider("账号"));
     this.el.appendChild(this.row("uid", this.uid || "未登录"));
@@ -166,6 +181,65 @@ export class AboutPanel {
     v.title = value;
     r.append(l, v);
     return r;
+  }
+
+  /** 自动更新开关 + 手动检查 + 状态行。隐私红线：文案必须写明匿名与可关。 */
+  private updateSection(cfg: ConfigView): HTMLElement {
+    const wrap = document.createElement("div");
+    wrap.className = "pet-about-update";
+
+    const row = document.createElement("div");
+    row.className = "pet-settings-row";
+    const label = document.createElement("label");
+    label.textContent = "自动更新";
+    const check = document.createElement("input");
+    check.type = "checkbox";
+    check.checked = cfg.auto_update;
+    check.addEventListener("change", () => {
+      void updateConfig({ auto_update: check.checked });
+    });
+    row.append(label, check);
+    wrap.appendChild(row);
+
+    const hint = document.createElement("div");
+    hint.className = "pet-settings-hint";
+    hint.textContent =
+      "每天匿名检查一次 GitHub Releases，不发送任何本机数据，可随时关闭；下载好的更新会等你休息时再自动重启";
+    wrap.appendChild(hint);
+
+    const action = document.createElement("div");
+    action.className = "pet-settings-row";
+    const btn = document.createElement("button");
+    btn.className = "pet-bubble-confirm";
+    btn.textContent = "立即检查更新";
+    btn.addEventListener("pointerdown", (e) => {
+      e.stopPropagation();
+      this.statusEl.textContent = "检查中…";
+      void invoke("check_update_now").catch((err: unknown) => {
+        this.statusEl.textContent = `检查失败：${String(err)}`;
+      });
+    });
+    this.statusEl.className = "pet-about-value";
+    this.statusEl.title = "更新状态";
+    this.statusEl.style.cssText =
+      "color:#8b93a7;font-size:11px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap";
+    action.append(btn, this.statusEl);
+    wrap.appendChild(action);
+    return wrap;
+  }
+
+  /** pet://update-status 事件 → 状态行文案（面板关着就忽略）。 */
+  private onUpdateStatus(p: { kind: string; version?: string; reason?: string }): void {
+    if (!this.open || !p.kind) return;
+    if (p.kind === "checking") {
+      this.statusEl.textContent = "检查中…";
+    } else if (p.kind === "up_to_date") {
+      this.statusEl.textContent = `已是最新 v${p.version ?? "?"}`;
+    } else if (p.kind === "downloaded") {
+      this.statusEl.textContent = `已下载 v${p.version ?? "?"}，将在你休息时自动重启`;
+    } else if (p.kind === "failed") {
+      this.statusEl.textContent = p.reason ?? "检查失败";
+    }
   }
 
   private footer(): HTMLElement {
