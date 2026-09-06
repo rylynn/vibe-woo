@@ -322,7 +322,9 @@ git -C . rev-parse --short HEAD 2>/dev/null   # 你的代码版本
 
 ## 更新
 
-**没有内置自动更新**：仓库未接入 `tauri-plugin-updater`，也不做公证签名，所以它不会联网检查新版本。更新就是「拉最新代码 + 重装」，和首次安装同一条命令：
+**内置自动更新**：宠物每天匿名检查一次 GitHub Releases，下载新版本后等你休息时自动安装重启；升级后它会用气泡说一句这次更新了什么（每版本 ≤50 字）。仓库公开前匿名检查会静默失败（404），公开后自动生效。
+
+不想用它联网？设置 → 关于 → 关闭「自动更新」即可，之后按下面的手动方式升级：
 
 ```bash
 cd vibe-pet
@@ -332,7 +334,11 @@ bash scripts/install.sh
 
 脚本幂等：依赖已就绪就跳过，会先停掉正在跑的宠物再覆盖 `/Applications`，并对新包重新 ad-hoc 签名。Rust 是增量构建，通常几十秒到几分钟（首次除外）。
 
+**开发者发版**：`bash scripts/release.sh`（先 `--check` 自查版本与摘要）；需要 minisign 私钥（见 `src-tauri/tauri.conf.json` 的公钥对应的密钥对，私钥绝不入库）。
+
 **不会丢的东西**：配置、当日奖励、速记都在 `~/Library/Application Support/dev.vibepet.app/`，不在 `.app` 包内 —— 重装不影响，卸载也不会删（除非加 `--purge`）。
+
+手动更新的其余场景：
 
 | 场景 | 命令 |
 |---|---|
@@ -373,6 +379,7 @@ defaults read /Applications/vibe-pet.app/Contents/Info.plist CFBundleShortVersio
 - **绝不接触**键位内容、窗口标题、文件名、项目名、任何截屏、任何音频。
 - **社交上报走白名单构造**：不是「从状态里删掉敏感字段」，而是从零构造只含允许字段的新结构，只上报 `coding / idle / away / offline` 四态、昵称、宠物名、好友度。见 `src-tauri/src/share.rs`。Tier-0 信号（在开会/在等构建/专注模式）**不上报**。
 - 速记与 LLM 请求都只在你主动使用时发生，且可完全关闭（关掉即纯本地运行）。
+- **自动更新**：开启时每天向 GitHub Releases 发一次匿名 GET（只含版本检查请求，不带任何本机数据），可在 设置 → 关于 关闭。
 
 ---
 
@@ -424,8 +431,8 @@ cd src-tauri && cargo test    # Rust 单元测试
 发版（维护者）：
 
 ```bash
-bash scripts/release.sh --check    # 自查：三处版本一致 / 工作区干净 / tag 未占用
-bash scripts/release.sh            # 一键：测试 → 构建 → ad-hoc 签名 → dmg → GitHub Release
+bash scripts/release.sh --check    # 自查：三处版本一致 / 摘要 ≤50 字 / 工作区干净 / tag 未占用
+bash scripts/release.sh            # 一键：测试 → universal 构建（含更新签名）→ ad-hoc 签名 → dmg + latest.json → GitHub Release
 ```
 
 窗口行为（透明 / 置顶 / 不抢焦点 / 穿透）无法自动化测试，改动相关代码后请按
