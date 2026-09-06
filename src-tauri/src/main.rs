@@ -110,7 +110,8 @@ fn main() {
             plugin::plugin_summary,
             plugin::plugin_get_config,
             plugin::plugin_set_config,
-            plugin::words::words_feedback
+            plugin::words::words_feedback,
+            updater::check_update_now
         ])
         .setup(|app| {
             // 不出现在 Dock 与 Cmd+Tab。等价于 LSUIElement，
@@ -132,6 +133,9 @@ fn main() {
                 "[config] 已载入：尺寸档位={} 范围={:?} 人格={:?}",
                 cfg.size_index, cfg.roam_scope, cfg.persona
             );
+
+            // 升级后说一次「更新了什么」（回写 last_run_version 保证只此一次）
+            updater::maybe_show_update_note(app.handle());
 
             window::setup_pet_window(app.handle())?;
             hittest::spawn_hit_test_loop(app.handle());

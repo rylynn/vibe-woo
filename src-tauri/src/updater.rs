@@ -198,6 +198,47 @@ fn report(app: &AppHandle, manual: bool, reason: String) {
     }
 }
 
+/// 设置里「立即检查更新」。检查/下载各阶段经 EVENT_UPDATE_STATUS 回显；
+/// 安装与自动路径一致：等用户休息，不立刻重启。
+#[tauri::command]
+pub async fn check_update_now(app: AppHandle) -> Result<(), String> {
+    perform_check(&app, true).await;
+    Ok(())
+}
+
+/// 启动时（main.rs setup 调）：升级后说一次「更新了什么」。
+///
+/// 无论说不说都先回写 last_run_version —— 气泡是尽力而为的惊喜，
+/// 绝不能因为发送失败就在下次启动重复打扰。延迟 5 秒发：webview
+/// 未就绪时发事件会丢。首次安装（last_run 为空）不提示。
+pub fn maybe_show_update_note(app: &AppHandle) {
+    let current = app.config().version.clone().unwrap_or_default();
+    let text = should_show_note(
+        &current,
+        &configcmd::current().last_run_version,
+        VERSION_NOTES,
+    );
+
+    let mut cfg = configcmd::current();
+    if cfg.last_run_version != current {
+        cfg.last_run_version = current;
+        let _ = crate::config::save(app, &cfg);
+        configcmd::set_current(&cfg);
+    }
+
+    if let Some(text) = text {
+        let app = app.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(5));
+            // 复用说话气泡通道（8 秒自动消失），source=local 不占 LLM
+            let _ = app.emit(
+                crate::talkdrive::EVENT_TALK,
+                serde_json::json!({ "text": text, "source": "local" }),
+            );
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,5 +281,12 @@ mod tests {
     fn 字数按字符计() {
         assert!(!note_too_long("一二三四五"));
         assert!(note_too_long(&"字".repeat(51)));
+    }
+
+    #[test]
+    fn 摘要气泡走talk事件常量() {
+        // maybe_show_update_note 发的是 talkdrive 的 EVENT_TALK，
+        // 前端 main.ts 已有监听（8 秒自动消失），不需要新前端代码。
+        assert_eq!(crate::talkdrive::EVENT_TALK, "pet://talk");
     }
 }
