@@ -20,3 +20,6 @@ src-tauri/target/
 worker-edgeone/.local-data.json
 worker/.dev.vars
 
+# 发版期生成物（release.sh 在仓库根生成，防误提交）
+/latest.json
+
