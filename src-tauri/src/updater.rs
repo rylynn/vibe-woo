@@ -7,9 +7,11 @@
 //!   更新桌宠不值得打断工作；
 //! - 仓库私有期间匿名 GET 得 404，走静默失败路径；转公开后自动生效。
 
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use futures_util::FutureExt;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 use tauri_plugin_updater::UpdaterExt;
@@ -59,10 +61,24 @@ const INSTALL_POLL: Duration = Duration::from_secs(5 * 60);
 /// 防重入：自动与手动共用，下载/等待安装期间不再发起第二次检查。
 static BUSY: AtomicBool = AtomicBool::new(false);
 
+/// BUSY 复位防护：swap(true) 成功后立即构造，作用域结束（正常返回或 panic
+/// 展开）都在 Drop 里复位。原先手写 store(false)，run_check 一 panic —— 最
+/// 现实的来源是 arbiter::with_state 的锁污染后 `.lock().expect` 连环 panic
+/// —— BUSY 就永久卡 true，前端「立即检查更新」从此被顶回「已经在检查了」。
+/// 宠物常驻数周不重启，复位绝不能依赖调用方记得收尾。
+struct BusyGuard;
+
+impl Drop for BusyGuard {
+    fn drop(&mut self) {
+        BUSY.store(false, Ordering::SeqCst);
+    }
+}
+
 /// 持久化的更新状态（store id "update"，重启不清零）。
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 struct UpdateState {
-    /// 上次成功发起检查的 epoch 秒。
+    /// 上轮检查正常收尾的时刻（epoch 秒）：perform_check 返回后才写入。
+    /// 成功升级的路径在 hold_and_install 里 restart 不返回，永不落盘。
     #[serde(default)]
     last_check_epoch_secs: u64,
 }
@@ -104,9 +120,22 @@ pub fn spawn(app: AppHandle) {
             tokio::time::sleep(wait).await;
             loop {
                 if configcmd::current().auto_update {
-                    perform_check(&app, false).await;
-                    state.last_check_epoch_secs = epoch_secs();
-                    let _ = crate::plugin::store::save(&app, "update", &state);
+                    // 单轮 panic 不许带走常驻线程：catch 住、记一行诊断，
+                    // 照常睡满 24h 后重试。注意 panic 只能在 poll 边界被
+                    // 捕获，同步的 std::panic::catch_unwind 包不住 .await，
+                    // 这里用其异步等价 FutureExt::catch_unwind（内部同样走
+                    // std::panic::catch_unwind），future 用 AssertUnwindSafe 放行。
+                    let checked = AssertUnwindSafe(perform_check(&app, false))
+                        .catch_unwind()
+                        .await;
+                    if checked.is_err() {
+                        eprintln!("[updater] 自动检查 panic，本轮放弃，24h 后重试");
+                    } else {
+                        // panic 那轮不计入「已查」：进程若中途重启，
+                        // 下次启动 2 分钟后就会重试，而不是等满 24h。
+                        state.last_check_epoch_secs = epoch_secs();
+                        let _ = crate::plugin::store::save(&app, "update", &state);
+                    }
                 }
                 tokio::time::sleep(Duration::from_secs(CHECK_INTERVAL_SECS)).await;
             }
@@ -122,8 +151,11 @@ async fn perform_check(app: &AppHandle, manual: bool) {
         }
         return;
     }
+    // 复位统一交给 guard，不再手写 store(false)：自动（本函数被 spawn 循环调）
+    // 与手动（check_update_now）两条路径共用这里，成功路径靠返回时 Drop，
+    // panic 路径靠展开时 Drop，语义一致且不会双重复位。
+    let _guard = BusyGuard;
     run_check(app, manual).await;
-    BUSY.store(false, Ordering::SeqCst);
 }
 
 async fn run_check(app: &AppHandle, manual: bool) {
@@ -288,5 +320,30 @@ mod tests {
         // maybe_show_update_note 发的是 talkdrive 的 EVENT_TALK，
         // 前端 main.ts 已有监听（8 秒自动消失），不需要新前端代码。
         assert_eq!(crate::talkdrive::EVENT_TALK, "pet://talk");
+    }
+
+    #[test]
+    fn panic防护guard在drop与panic后复位busy() {
+        // 正常路径：swap 占用后构造 guard，作用域结束 Drop 复位。
+        assert!(!BUSY.swap(true, Ordering::SeqCst), "BUSY 起始应为 false");
+        assert!(BUSY.load(Ordering::SeqCst), "占用后应为 true");
+        {
+            let _guard = BusyGuard;
+        }
+        assert!(!BUSY.load(Ordering::SeqCst), "guard drop 应复位 BUSY");
+
+        // panic 路径：本修复的核心保证 —— 展开时 guard 照样复位，
+        // BUSY 不卡 true，「立即检查更新」才不会从此被顶回「已经在检查了」。
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // swap 返回的是旧值：false 才说明此前未被占用、占用成功。
+            assert!(!BUSY.swap(true, Ordering::SeqCst), "复位后应能再次占用");
+            let _guard = BusyGuard;
+            panic!("模拟检查中途 panic");
+        }));
+        assert!(caught.is_err(), "panic 应被 catch_unwind 捕获");
+        assert!(!BUSY.load(Ordering::SeqCst), "panic 展开后 BUSY 不得卡 true");
+
+        // 兜底复位：同模块测试共享进程，别把 BUSY 带进别的用例。
+        BUSY.store(false, Ordering::SeqCst);
     }
 }
