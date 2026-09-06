@@ -1,7 +1,7 @@
 {
   "name": "vibe-pet",
   "private": true,
-  "version": "0.8.0",
+  "version": "0.8.1",
   "type": "module",
   "packageManager": "pnpm@10.34.5",
   "engines": {
@@ -13,6 +13,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "tauri": "tauri",
+    "build:app": "tauri build",
+    "build:release": "tauri build --config src-tauri/tauri.release.conf.json",
     "pet": "cd src-tauri && cargo run",
     "stop": "bash scripts/stop-pet.sh"
   },

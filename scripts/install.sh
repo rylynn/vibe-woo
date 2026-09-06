@@ -454,7 +454,8 @@ fi
 step "构建并打包（首次编译 Rust 较慢，约 5–15 分钟，请耐心等待）"
 say "  ${C_DIM}编译期间会滚动大量 Rust 输出，属正常现象${C_RESET}"
 BUILD_START="$(date +%s)"
-pnpm tauri build
+# 只打本机可用的 .app：不开 createUpdaterArtifacts，不需要 updater 私钥口令（发版才需要，见 scripts/release.sh）
+pnpm run build:app
 BUILD_SECS=$(( $(date +%s) - BUILD_START ))
 ok "构建完成（耗时 $(( BUILD_SECS / 60 )) 分 $(( BUILD_SECS % 60 )) 秒）"
 

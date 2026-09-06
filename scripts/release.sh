@@ -5,7 +5,8 @@
 #   1. 校验：三处版本一致 / 当前版本有 ≤50 字更新摘要 / 工作区干净 / tag 未被占用 / gh 已登录
 #   2. 私钥：minisign 更新签名私钥（环境变量或 ~/.vibe-pet/updater.key）
 #   3. 测试：tsc + vitest + cargo test
-#   4. 构建：pnpm tauri build --target universal-apple-darwin（aarch64 + x86_64 双架构）
+#   4. 构建：pnpm tauri build --config src-tauri/tauri.release.conf.json（开更新签名）
+#            --target universal-apple-darwin（aarch64 + x86_64 双架构）
 #   5. 签名：ad-hoc 签名（避免下载后提示「已损坏」）；tauri 同时产出 minisign 更新签名（.sig）
 #   6. 打包：hdiutil 打成 .dmg；生成 latest.json（updater 清单，发版期生成物，不入库）
 #   7. 发布：gh release create vX.Y.Z 上传 .tar.gz / .sig / latest.json / .dmg
@@ -105,13 +106,22 @@ if [[ $CHECK_ONLY -eq 1 ]]; then
 fi
 
 # ---------- 5. 更新签名私钥（minisign，环境变量或本机文件，二选一） ----------
-# 只 cat 进环境变量，绝不 echo / 落日志；若私钥带口令，还需自行导出 TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+# 只 cat 进环境变量，绝不 echo / 落日志。
+# 只有发版需要：日常构建（pnpm tauri build / install.sh）不开签名，不需要私钥口令。
 if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" && -f "${HOME}/.vibe-pet/updater.key" ]]; then
   TAURI_SIGNING_PRIVATE_KEY="$(cat "${HOME}/.vibe-pet/updater.key")"
   export TAURI_SIGNING_PRIVATE_KEY
 fi
 if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
   die "缺更新签名私钥：导出 TAURI_SIGNING_PRIVATE_KEY 或把私钥放到 ~/.vibe-pet/updater.key"
+fi
+# 口令同理：环境变量优先，其次 ~/.vibe-pet/updater.key.password（无口令的私钥两者都可缺）
+if [[ -z "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" && -f "${HOME}/.vibe-pet/updater.key.password" ]]; then
+  TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$(head -n 1 "${HOME}/.vibe-pet/updater.key.password")"
+  export TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+fi
+if [[ -z "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" ]]; then
+  warn "未设置 TAURI_SIGNING_PRIVATE_KEY_PASSWORD —— 私钥若带口令，构建会卡在密码输入（非交互环境直接失败）"
 fi
 ok "更新签名私钥已就绪（内容不回显）"
 
@@ -135,7 +145,16 @@ if ! rustup target list --installed 2>/dev/null | grep -q x86_64-apple-darwin; t
   warn "缺 x86_64-apple-darwin 目标：先跑 rustup target add x86_64-apple-darwin，否则 universal 构建会失败"
 fi
 step "构建 universal .app（双架构，首次编译较慢，约 5–15 分钟）"
-pnpm tauri build --target universal-apple-darwin >/dev/null 2>&1
+# --config 合并 tauri.release.conf.json：只有发版才开 createUpdaterArtifacts（需私钥签名）
+BUILD_LOG="$(mktemp -t vibe-release-build)"
+if ! pnpm tauri build --target universal-apple-darwin --config src-tauri/tauri.release.conf.json >"$BUILD_LOG" 2>&1; then
+  grep -iE 'error|password|sign' "$BUILD_LOG" | head -20 >&2 || true
+  die "构建失败，完整日志：${BUILD_LOG}
+签名相关排查：确认 TAURI_SIGNING_PRIVATE_KEY 与 TAURI_SIGNING_PRIVATE_KEY_PASSWORD 正确；
+口令忘了无法找回，只能重新生成密钥对（pnpm tauri signer generate -w ~/.vibe-pet/updater.key），
+并同步 src-tauri/tauri.conf.json 的 plugins.updater.pubkey —— 已装的老版本将无法再验证新包。"
+fi
+rm -f "$BUILD_LOG"
 APP_PATH="$(find src-tauri/target/universal-apple-darwin/release/bundle/macos -maxdepth 1 -name '*.app' -print -quit)"
 [[ -n "$APP_PATH" && -d "$APP_PATH" ]] || die "没找到构建产物（src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app）"
 ok "构建完成：$(basename "$APP_PATH")"
