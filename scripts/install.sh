@@ -7,6 +7,9 @@
 # 为什么需要 Rust：宠物后端是 Tauri（Rust）。首次编译较慢（5–15 分钟），
 # 之后增量构建很快 —— 脚本会提示进度，不是卡住了。
 #
+# 所有联网下载步骤都会每 10 秒打一个点表示仍在进行；若长时间连点都没有，
+# 才需要怀疑真卡住（多半是网络不通，可 Ctrl+C 中止后配置 npm 镜像再重跑）。
+#
 # 用法：
 #   bash scripts/install.sh                    # 安装依赖 → 构建 → 装入 /Applications
 #   bash scripts/install.sh --build-only       # 只构建出 .app，不安装
@@ -47,6 +50,32 @@ ok()   { printf '  %s✓%s %s\n' "$C_OK" "$C_RESET" "$*"; }
 warn() { printf '  %s!%s %s\n' "$C_WARN" "$C_RESET" "$*"; }
 err()  { printf '%s✗%s %s\n' "$C_ERR" "$C_RESET" "$*" >&2; }
 die()  { err "$*"; exit 1; }
+
+# 静默运行一条可能耗时的命令：期间每 10 秒打一个点，表示「还在干活，不是卡死」。
+# 用法：run_silent <提示文案（可为空）> <超时秒数（0 = 不限）> <命令...>
+# 返回命令退出码；超时被终止时返回 143，调用方据此给出提示。
+run_silent() {
+  local hint="$1" max_wait="$2"; shift 2
+  if [[ -n "$hint" ]]; then printf '%s' "$hint"; fi
+  local pulse="" watchdog="" pid="" rc=0
+  ( while :; do sleep 10; printf '.'; done ) & pulse=$!
+  "$@" >/dev/null 2>&1 & pid=$!
+  if [[ "$max_wait" -gt 0 ]]; then
+    ( sleep "$max_wait"; kill "$pid" 2>/dev/null ) & watchdog=$!
+  fi
+  wait "$pid" || rc=$?
+  kill "$pulse" 2>/dev/null || true
+  wait "$pulse" 2>/dev/null || true
+  if [[ -n "$watchdog" ]]; then
+    kill "$watchdog" 2>/dev/null || true
+    wait "$watchdog" 2>/dev/null || true
+  fi
+  if [[ -n "$hint" ]]; then printf '\n'; fi
+  return "$rc"
+}
+
+# 退出时清理残留的后台心跳进程
+trap 'kill $(jobs -p) 2>/dev/null; true' EXIT
 
 usage() {
   # 打印文件头的注释块，遇到第一个非注释行即停（不用维护行号）
@@ -152,23 +181,44 @@ uninstall() {
 # ---------- 2. Xcode 命令行工具 ----------
 step "检查 Xcode 命令行工具"
 if ! xcode-select -p >/dev/null 2>&1; then
-  warn "未安装，正在触发系统安装（会弹窗，点「安装」后等待）"
+  warn "未安装，已触发系统安装（请在弹出的窗口点「安装」）"
   xcode-select --install >/dev/null 2>&1 || true
+  say "  ${C_DIM}最长等 10 分钟，每 10 秒一个点表示仍在等待系统安装……${C_RESET}"
   for _ in $(seq 1 60); do
     if xcode-select -p >/dev/null 2>&1; then break; fi
-    sleep 5
+    sleep 10
+    printf '.'
   done
+  printf '\n'
   xcode-select -p >/dev/null 2>&1 || die "Xcode 命令行工具未安装完成，请安装后重跑本脚本"
 fi
 ok "已就绪：$(xcode-select -p)"
+
+# ---------- 2.5 网络预检 ----------
+# 后面的 Rust / Node / pnpm / 前端依赖全都靠联网下载。先把网络状况亮出来，
+# 免得「无输出的下载」被误认为脚本卡死。
+step "检查 npm registry 连通性"
+REG_HTTP="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 15 \
+  https://registry.npmjs.org/pnpm 2>/dev/null || true)"
+case "$REG_HTTP" in
+  200) ok "registry.npmjs.org 可达" ;;
+  000) warn "registry.npmjs.org 连不上或超时 —— 后续各步下载会非常慢，甚至一直挂起"
+       say "  ${C_DIM}建议先配置镜像再重跑本脚本：${C_RESET}"
+       say "  ${C_DIM}    npm config set registry https://registry.npmmirror.com${C_RESET}"
+       say "  ${C_DIM}    export COREPACK_NPM_REGISTRY=https://registry.npmmirror.com  # 用 corepack 时${C_RESET}" ;;
+  *)   warn "registry.npmjs.org 返回 HTTP ${REG_HTTP}，下载可能受影响" ;;
+esac
 
 # ---------- 3. Rust ----------
 step "检查 Rust 工具链"
 export PATH="$HOME/.cargo/bin:$PATH"
 MIN_RUST="1.77"   # src-tauri/Cargo.toml: rust-version
 if ! command -v cargo >/dev/null 2>&1; then
-  warn "未安装，正在用 rustup 安装（约 1–2 分钟）"
-  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+  warn "未安装，正在用 rustup 安装（需联网，约 1–5 分钟，rustup 自带进度输出）"
+  curl --proto '=https' --tlsv1.2 -sSf --connect-timeout 15 --max-time 120 https://sh.rustup.rs \
+    | sh -s -- -y \
+    || die "rustup 安装失败（多半是网络问题）。可稍后重跑，或手动执行：
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
   export PATH="$HOME/.cargo/bin:$PATH"
 fi
 if [[ -f "$HOME/.cargo/env" ]]; then
@@ -205,10 +255,12 @@ node_ok() {
 }
 
 # pnpm 存在 ≠ 能用：corepack 的 pnpm shim 会在版本与 Node 不匹配时直接崩，
-# 因此一律以「真的跑得出 pnpm -v」为准
+# 因此一律以「真的跑得出 pnpm -v」为准。
+# 注意：corepack shim 首次运行要联网下载 pnpm 本体，网络差时会长时间无输出 ——
+# 这是「node 之后卡住」的最常见原因，这里限 60 秒，超时按「不可用」处理。
 pnpm_runs() {
   command -v pnpm >/dev/null 2>&1 || return 1
-  pnpm -v >/dev/null 2>&1 || return 1
+  run_silent "  探测 pnpm（首次运行需联网下载，最长等 60 秒）" 60 pnpm -v
 }
 
 # 交互式确认（默认同意）：--yes 或非交互（CI / 管道）直接通过
@@ -227,11 +279,13 @@ confirm() {
 
 install_node_brew() {
   command -v brew >/dev/null 2>&1 || return 1
-  say "  用 Homebrew 安装 / 升级 Node（约 1–2 分钟）"
+  say "  用 Homebrew 安装 / 升级 Node（需联网，慢网络可能要几分钟）"
   if brew list --formula node >/dev/null 2>&1; then
-    brew upgrade node >/dev/null 2>&1 || true
+    run_silent "  brew upgrade node（无进度输出属正常）" 900 brew upgrade node \
+      || warn "  brew upgrade node 失败或超时"
   else
-    brew install node >/dev/null 2>&1 || return 1
+    run_silent "  brew install node（无进度输出属正常）" 900 brew install node \
+      || { warn "  brew install node 失败或超时（网络或权限问题）"; return 1; }
   fi
   export PATH="$(brew --prefix)/bin:$PATH"
   hash -r 2>/dev/null || true
@@ -241,16 +295,19 @@ install_node_brew() {
 install_node_nvm() {
   export NVM_DIR="$HOME/.nvm"
   if [[ ! -s "$NVM_DIR/nvm.sh" ]]; then
-    say "  安装 nvm（约 1 分钟）"
-    curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash >/dev/null 2>&1 || return 1
+    say "  安装 nvm（需联网，从 GitHub 下载脚本，国内网络可能连不上）"
+    run_silent "  下载 nvm 安装脚本" 180 \
+      bash -c 'curl -fsSL --connect-timeout 10 --max-time 120 https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash' \
+      || { warn "  nvm 下载失败（GitHub 访问不通是常见原因）"; return 1; }
   fi
   [[ -s "$NVM_DIR/nvm.sh" ]] || return 1
-  say "  用 nvm 安装 Node LTS（约 1 分钟）"
+  say "  用 nvm 安装 Node LTS（需联网下载约 30 MB）"
   # nvm.sh 在 set -u 下会踩到未定义变量，加载期间临时关掉
   set +u
   # shellcheck disable=SC1091
   . "$NVM_DIR/nvm.sh" >/dev/null 2>&1 || { set -u; return 1; }
-  nvm install --lts >/dev/null 2>&1 || { set -u; return 1; }
+  run_silent "  下载 Node LTS" 600 nvm install --lts \
+    || { set -u; warn "  nvm 下载 Node 失败或超时"; return 1; }
   nvm use --lts >/dev/null 2>&1 || true
   set -u
   hash -r 2>/dev/null || true
@@ -263,8 +320,10 @@ install_node_fnm() {
     fnm_bin="$(command -v fnm)"
   fi
   if [[ -z "$fnm_bin" ]]; then
-    say "  安装 fnm（约 1 分钟）"
-    curl -fsSL https://fnm.vercel.app/install | bash -s -- --skip-shell >/dev/null 2>&1 || true
+    say "  安装 fnm（需联网下载，国内网络可能较慢）"
+    run_silent "  下载并安装 fnm" 180 \
+      bash -c 'curl -fsSL --connect-timeout 10 --max-time 120 https://fnm.vercel.app/install | bash -s -- --skip-shell' \
+      || warn "  fnm 下载失败或超时，继续尝试后续方式"
     if [[ -x "$HOME/.local/share/fnm/fnm" ]]; then
       fnm_bin="$HOME/.local/share/fnm/fnm"
     elif [[ -x "$HOME/.fnm/fnm" ]]; then
@@ -272,8 +331,9 @@ install_node_fnm() {
     fi
   fi
   [[ -n "$fnm_bin" && -x "$fnm_bin" ]] || return 1
-  say "  用 fnm 安装 Node LTS（约 1 分钟）"
-  "$fnm_bin" install --lts >/dev/null 2>&1 || return 1
+  say "  用 fnm 安装 Node LTS（需联网下载约 30 MB）"
+  run_silent "  下载 Node LTS" 600 "$fnm_bin" install --lts \
+    || { warn "  fnm 下载 Node 失败或超时"; return 1; }
   # fnm 不改动当前 shell，直接把装好的版本目录塞进 PATH
   local base="${FNM_DIR:-$HOME/.local/share/fnm}" dir ver best="" best_ver=""
   for dir in "$base"/node-versions/*/installation/bin; do
@@ -301,7 +361,7 @@ if ! node_ok; then
     if install_node_brew || install_node_nvm || install_node_fnm; then
       ok "Node 已就绪：v$(current_node)"
     else
-      warn "自动安装没成功，继续尝试其他方式也失败了"
+      warn "三种自动安装方式（Homebrew / nvm / fnm）都没成功，多半是网络问题"
     fi
   fi
   if ! node_ok; then
@@ -322,18 +382,21 @@ ensure_pnpm() {
     return 0
   fi
   if command -v corepack >/dev/null 2>&1; then
+    say "  尝试用 corepack 安装 ${PNPM_SPEC}（需联网下载，慢网络请耐心）"
     corepack enable >/dev/null 2>&1 || true
-    corepack prepare "$PNPM_SPEC" --activate >/dev/null 2>&1 || true
+    run_silent "  corepack 下载并激活 ${PNPM_SPEC}" 300 corepack prepare "$PNPM_SPEC" --activate \
+      || warn "  corepack 安装 pnpm 失败或超时"
     pnpm_runs && return 0
   fi
   if command -v npm >/dev/null 2>&1; then
-    npm install -g "$PNPM_SPEC" >/dev/null 2>&1 || true
+    run_silent "  npm 全局安装 ${PNPM_SPEC}（需联网）" 300 npm install -g "$PNPM_SPEC" \
+      || warn "  npm 安装 pnpm 失败或超时"
     pnpm_runs && return 0
     # 系统级 Node 装全局包常要权限，输入密码时屏幕不回显是正常的。
     # 只在有终端（-t 0）时才走 sudo，否则会卡在等密码上
     if [[ $EUID -ne 0 ]] && command -v sudo >/dev/null 2>&1 && [[ -t 0 ]]; then
       warn "  权限不足，改用 sudo 安装（要输开机密码，输入时不显示是正常现象）"
-      sudo npm install -g "$PNPM_SPEC" >/dev/null 2>&1 || true
+      sudo npm install -g "$PNPM_SPEC"
       pnpm_runs && return 0
     fi
   fi
@@ -341,7 +404,8 @@ ensure_pnpm() {
   if command -v corepack >/dev/null 2>&1; then
     warn "  清理 corepack 缓存后重试"
     rm -rf "$HOME/.cache/node/corepack" "$HOME/Library/Caches/node/corepack" 2>/dev/null || true
-    corepack prepare "$PNPM_SPEC" --activate >/dev/null 2>&1 || true
+    run_silent "  corepack 重新下载 ${PNPM_SPEC}" 300 corepack prepare "$PNPM_SPEC" --activate \
+      || warn "  corepack 安装 pnpm 失败或超时"
   fi
   pnpm_runs
 }
@@ -351,6 +415,7 @@ if ! pnpm_runs; then
   ensure_pnpm || die "pnpm 安装失败。请手动执行下面任一命令，再重跑本脚本：
     corepack enable && corepack prepare ${PNPM_SPEC} --activate
     npm install -g ${PNPM_SPEC}
+  网络不通时可先配置镜像：npm config set registry https://registry.npmmirror.com
   原因：pnpm 11 需要 Node ≥ ${REC_NODE}，而当前是 v${NODE_V}，只能用 ${PNPM_SPEC}。"
   ok "已安装 ${PNPM_SPEC}"
 fi
@@ -363,6 +428,7 @@ fi
 
 # ---------- 5. 前端依赖 ----------
 step "安装前端依赖"
+say "  ${C_DIM}需联网下载全部 npm 依赖，慢网络可能要几分钟；pnpm 自带进度输出${C_RESET}"
 # 跨 pnpm 大版本时会先要求确认清空 node_modules，非交互环境（CI / 管道）会直接
 # 中断（ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY）。这里显式放行，避免卡在这一步。
 pnpm install --config.confirmModulesPurge=false
@@ -386,8 +452,11 @@ fi
 
 # ---------- 8. 构建打包 ----------
 step "构建并打包（首次编译 Rust 较慢，约 5–15 分钟，请耐心等待）"
+say "  ${C_DIM}编译期间会滚动大量 Rust 输出，属正常现象${C_RESET}"
+BUILD_START="$(date +%s)"
 pnpm tauri build
-ok "构建完成"
+BUILD_SECS=$(( $(date +%s) - BUILD_START ))
+ok "构建完成（耗时 $(( BUILD_SECS / 60 )) 分 $(( BUILD_SECS % 60 )) 秒）"
 
 APP_PATH="$(find src-tauri/target/release/bundle/macos -maxdepth 1 -name '*.app' -print -quit 2>/dev/null || true)"
 [[ -n "$APP_PATH" && -d "$APP_PATH" ]] || die "没找到打包产物（src-tauri/target/release/bundle/macos/*.app）"

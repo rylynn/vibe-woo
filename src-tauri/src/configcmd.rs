@@ -60,6 +60,7 @@ pub struct ConfigView {
     /// 用户自述的「在忙什么」。空串 = 未填写，宠物不预设任何身份。
     pub user_kind: String,
     pub autostart: bool,
+    pub auto_update: bool,
     pub notes_vault: String,
     pub reminders: Vec<crate::reminder::Reminder>,
     /// 习惯记忆开关。关掉后不再用 LLM 归纳作息与风格。
@@ -94,6 +95,7 @@ fn to_view(c: &Config) -> ConfigView {
         persona: c.persona,
         user_kind: c.user_kind.clone(),
         autostart: c.autostart,
+        auto_update: c.auto_update,
         notes_vault: c.notes_vault.clone(),
         reminders: c.reminders.clone(),
         habit_enabled: c.habit_enabled,
@@ -133,6 +135,7 @@ pub struct ConfigPatch {
     /// Some("") 表示用户主动清空身份，回退到中性表达。
     pub user_kind: Option<String>,
     pub autostart: Option<bool>,
+    pub auto_update: Option<bool>,
     pub notes_vault: Option<String>,
     pub reminders: Option<Vec<crate::reminder::Reminder>>,
     pub habit_enabled: Option<bool>,
@@ -172,6 +175,9 @@ pub fn update_config(app: AppHandle, patch: ConfigPatch) -> Result<ConfigView, S
     }
     if let Some(v) = patch.autostart {
         cfg.autostart = v;
+    }
+    if let Some(v) = patch.auto_update {
+        cfg.auto_update = v;
     }
     if let Some(v) = patch.reminders {
         cfg.reminders = v;

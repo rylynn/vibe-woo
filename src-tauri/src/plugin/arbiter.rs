@@ -165,6 +165,11 @@ pub fn allow_ambient() -> bool {
     })
 }
 
+/// 当前是否处于番茄工作期（更新安装等模块查询：工作期不打断）。
+pub fn pomodoro_working() -> bool {
+    with_state(|s| s.pomodoro_working)
+}
+
 /// 番茄插件切换阶段时调用。进入休息（working=false）时自动补发延迟队列。
 pub fn on_pomodoro_phase(app: &AppHandle, working: bool) {
     let drained = with_state(|s| {
@@ -315,6 +320,11 @@ mod tests {
         assert!(allow_ambient(), "间隔过后恢复");
 
         reset_for_test();
+    }
+
+    #[test]
+    fn 工作期查询默认为否() {
+        assert!(!pomodoro_working());
     }
 
     fn reset_for_test() {

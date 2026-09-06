@@ -37,6 +37,7 @@ mod sensor;
 mod state;
 mod tray;
 mod usage;
+mod updater;
 mod window;
 
 use tauri::Manager;
@@ -68,6 +69,8 @@ fn main() {
                 let _ = win.show();
             }
         }))
+        // 自动更新（F1）：minisign 验签，GitHub Releases 分发
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
@@ -107,7 +110,8 @@ fn main() {
             plugin::plugin_summary,
             plugin::plugin_get_config,
             plugin::plugin_set_config,
-            plugin::words::words_feedback
+            plugin::words::words_feedback,
+            updater::check_update_now
         ])
         .setup(|app| {
             // 不出现在 Dock 与 Cmd+Tab。等价于 LSUIElement，
@@ -130,6 +134,9 @@ fn main() {
                 cfg.size_index, cfg.roam_scope, cfg.persona
             );
 
+            // 升级后说一次「更新了什么」（回写 last_run_version 保证只此一次）
+            updater::maybe_show_update_note(app.handle());
+
             window::setup_pet_window(app.handle())?;
             hittest::spawn_hit_test_loop(app.handle());
             // 先于感知循环：习惯日志的目录与缓存要在第一次采样前就位
@@ -139,6 +146,8 @@ fn main() {
             talkdrive::spawn(app.handle());
             socialdrive::spawn(app.handle());
             plugin::host::spawn(app.handle());
+            // 自动更新：独立线程，24h 一查；升级摘要气泡见 maybe_show_update_note
+            updater::spawn(app.handle().clone());
 
             eprintln!("[pet] ready. kill switch: Ctrl+Alt+Cmd+Q");
             Ok(())

@@ -30,6 +30,8 @@ export interface ConfigView {
   /** 用户自述的「平时主要在忙什么」。空串 = 未填写，宠物不预设任何身份。 */
   user_kind: string;
   autostart: boolean;
+  /** 自动更新：默认开。每天匿名 GET 一次 GitHub Releases 检查新版本，不上传任何用户数据。 */
+  auto_update: boolean;
   reminders: Reminder[];
   /** 习惯记忆开关：每 12 小时用 LLM 归纳一次作息与风格，作为宠物说话的物料。 */
   habit_enabled: boolean;
@@ -62,6 +64,7 @@ export interface ConfigPatch {
   /** 传空串表示清空身份，宠物回退到中性表达。 */
   user_kind?: string;
   autostart?: boolean;
+  auto_update?: boolean;
   reminders?: Reminder[];
   habit_enabled?: boolean;
   coding_apps?: string[];
@@ -85,6 +88,7 @@ export const FALLBACK_CONFIG: ConfigView = {
   persona: "quiet",
   user_kind: "",
   autostart: false,
+  auto_update: true,
   reminders: [],
   habit_enabled: true,
   coding_apps: [],
