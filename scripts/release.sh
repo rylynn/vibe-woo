@@ -180,7 +180,8 @@ PY
 
 # ---------- 10. 发布 GitHub Release（四件：更新包 + 签名 + 清单 + dmg） ----------
 step "发布 ${TAG}"
-gh release create "$TAG" \
+# --target 钉在当前分支 HEAD：产物由此构建，tag 必须指向同一提交
+gh release create "$TAG" --target "$BRANCH" \
   "$ART#vibe-pet.app.tar.gz" \
   "$SIG#vibe-pet.app.tar.gz.sig" \
   "latest.json#latest.json" \
