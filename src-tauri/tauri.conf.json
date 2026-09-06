@@ -9,6 +9,14 @@
     "beforeBuildCommand": "pnpm build",
     "frontendDist": "../dist"
   },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/rylynn/vibe-woo/releases/latest/download/latest.json"
+      ],
+      "pubkey": "RWTXgo0enNRL4BIgPXVpuj3PWJbXlIMduaFHIpFqivTivSNy8d8mMq+H"
+    }
+  },
   "app": {
     "macOSPrivateApi": true,
     "security": {
@@ -40,6 +48,7 @@
   "bundle": {
     "active": true,
     "targets": ["app"],
+    "createUpdaterArtifacts": true,
     "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.png"]
   }
 }

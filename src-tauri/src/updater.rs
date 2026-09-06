@@ -7,6 +7,15 @@
 //!   更新桌宠不值得打断工作；
 //! - 仓库私有期间匿名 GET 得 404，走静默失败路径；转公开后自动生效。
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+use serde::Serialize;
+use tauri::{AppHandle, Emitter};
+use tauri_plugin_updater::UpdaterExt;
+
+use crate::configcmd;
+
 /// 版本摘要表，编译进二进制：离线可用，检查更新时不额外发请求。
 pub const VERSION_NOTES: &str = include_str!("../version-notes.json");
 
@@ -35,6 +44,158 @@ fn note_for(notes: &str, version: &str) -> Option<String> {
 /// 摘要是否超字数（release.sh 在 bash 侧做同一校验，这里供单测兜底）。
 pub fn note_too_long(note: &str) -> bool {
     note.chars().count() > NOTE_MAX_CHARS
+}
+
+/// 手动检查的状态回显事件名（about 面板监听）。
+pub const EVENT_UPDATE_STATUS: &str = "pet://update-status";
+
+/// 启动后首查延迟：不与开机抢资源。
+const STARTUP_DELAY: Duration = Duration::from_secs(2 * 60);
+/// 检查周期。
+const CHECK_INTERVAL_SECS: u64 = 24 * 3600;
+/// 下载完成后等待「用户在休息」的轮询间隔。
+const INSTALL_POLL: Duration = Duration::from_secs(5 * 60);
+
+/// 防重入：自动与手动共用，下载/等待安装期间不再发起第二次检查。
+static BUSY: AtomicBool = AtomicBool::new(false);
+
+/// 持久化的更新状态（store id "update"，重启不清零）。
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct UpdateState {
+    /// 上次成功发起检查的 epoch 秒。
+    #[serde(default)]
+    last_check_epoch_secs: u64,
+}
+
+/// 手动检查各阶段的回显（serde tag = kind，小写下划线）。
+#[derive(Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum UpdateStatus {
+    Checking,
+    UpToDate { version: String },
+    Downloaded { version: String },
+    Failed { reason: String },
+}
+
+fn epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// 启动自动更新线程：自建 current-thread runtime，与主线程解耦。
+pub fn spawn(app: AppHandle) {
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("updater: tokio runtime 构建失败");
+        rt.block_on(async move {
+            let mut state: UpdateState = crate::plugin::store::load(&app, "update");
+            // 周期跨重启：距上次检查不足 24h 就等到边界再查；
+            // 从未查过（或已过边界）则启动延迟 2 分钟后首查。
+            let since = epoch_secs().saturating_sub(state.last_check_epoch_secs);
+            let wait = if state.last_check_epoch_secs == 0 || since >= CHECK_INTERVAL_SECS {
+                STARTUP_DELAY
+            } else {
+                Duration::from_secs(CHECK_INTERVAL_SECS - since)
+            };
+            tokio::time::sleep(wait).await;
+            loop {
+                if configcmd::current().auto_update {
+                    perform_check(&app, false).await;
+                    state.last_check_epoch_secs = epoch_secs();
+                    let _ = crate::plugin::store::save(&app, "update", &state);
+                }
+                tokio::time::sleep(Duration::from_secs(CHECK_INTERVAL_SECS)).await;
+            }
+        });
+    });
+}
+
+/// 一次检查→下载→择时安装。manual=true 时各阶段回显事件，自动路径静默。
+async fn perform_check(app: &AppHandle, manual: bool) {
+    if BUSY.swap(true, Ordering::SeqCst) {
+        if manual {
+            emit_status(app, UpdateStatus::Failed { reason: "已经在检查了，稍等一下".into() });
+        }
+        return;
+    }
+    run_check(app, manual).await;
+    BUSY.store(false, Ordering::SeqCst);
+}
+
+async fn run_check(app: &AppHandle, manual: bool) {
+    if manual {
+        emit_status(app, UpdateStatus::Checking);
+    }
+    let updater = match app.updater() {
+        Ok(u) => u,
+        Err(e) => return report(app, manual, format!("初始化失败：{e}")),
+    };
+    let update = match updater.check().await {
+        Ok(Some(u)) => u,
+        Ok(None) => {
+            if manual {
+                let v = app.config().version.clone().unwrap_or_default();
+                emit_status(app, UpdateStatus::UpToDate { version: v });
+            }
+            return;
+        }
+        // 仓库私有期间匿名 GET 得 404 落到这里 —— 设计内行为，静默即可
+        Err(e) => return report(app, manual, format!("检查失败：{e}")),
+    };
+    let version = update.version.clone();
+    // 所用 tauri-plugin-updater 2.11.0：download(on_chunk(usize, Option<u64>),
+    // on_finish()) 返回安装包字节，install(bytes) 是同步方法 —— 与早期 2.x
+    // 「download 即安装」不同，这里保留简报语义：下载与安装两段，中间卡 Resting。
+    match update.download(|_, _| {}, || {}).await {
+        Ok(bytes) => {
+            if manual {
+                emit_status(app, UpdateStatus::Downloaded { version });
+            }
+            hold_and_install(app, update, bytes).await;
+        }
+        Err(e) => report(app, manual, format!("下载失败：{e}")),
+    }
+}
+
+/// 下载完成后按住不装：只有 Resting 且不在番茄工作期才装 + 重启。
+async fn hold_and_install(
+    app: &AppHandle,
+    update: tauri_plugin_updater::Update,
+    bytes: Vec<u8>,
+) {
+    loop {
+        let resting = crate::sensedrive::shared_state()
+            .is_some_and(|s| s.tempo == crate::state::Tempo::Resting);
+        if resting && !crate::plugin::arbiter::pomodoro_working() {
+            match update.install(&bytes) {
+                Ok(()) => {
+                    // install 不负责退出；restart 不返回
+                    app.restart();
+                }
+                Err(e) => {
+                    eprintln!("[updater] 安装失败：{e}");
+                    return;
+                }
+            }
+        }
+        tokio::time::sleep(INSTALL_POLL).await;
+    }
+}
+
+fn emit_status(app: &AppHandle, s: UpdateStatus) {
+    let _ = app.emit(EVENT_UPDATE_STATUS, &s);
+}
+
+fn report(app: &AppHandle, manual: bool, reason: String) {
+    if manual {
+        emit_status(app, UpdateStatus::Failed { reason });
+    } else {
+        eprintln!("[updater] {reason}");
+    }
 }
 
 #[cfg(test)]

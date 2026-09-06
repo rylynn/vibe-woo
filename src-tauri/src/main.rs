@@ -69,6 +69,8 @@ fn main() {
                 let _ = win.show();
             }
         }))
+        // 自动更新（F1）：minisign 验签，GitHub Releases 分发
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
@@ -140,6 +142,8 @@ fn main() {
             talkdrive::spawn(app.handle());
             socialdrive::spawn(app.handle());
             plugin::host::spawn(app.handle());
+            // 自动更新：独立线程，24h 一查；升级摘要气泡见 maybe_show_update_note
+            updater::spawn(app.handle().clone());
 
             eprintln!("[pet] ready. kill switch: Ctrl+Alt+Cmd+Q");
             Ok(())

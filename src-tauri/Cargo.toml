@@ -16,7 +16,7 @@ libc = "0.2"
 rand = "0.8"
 reqwest = { version = "0.12", features = ["json", "stream"] }
 futures-util = "0.3"
-tokio = { version = "1", features = ["rt"] }
+tokio = { version = "1", features = ["rt", "time"] }
 # 插件 RSS 解析（每日资讯）。成熟解析器，避免手写 CDATA/实体的坑。
 rss = "2"
 # 资讯条目 pubDate（RFC2822）解析与本地时区换算（每日资讯「仅当天」过滤）。
@@ -30,6 +30,10 @@ encoding_rs = "0.8"
 # 单实例锁避免多开导致多层全屏透明窗叠加。
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-single-instance = "2"
+
+# 自动更新（F1）：minisign 验签 + GitHub Releases 分发。
+# 私钥绝不入库，只在本机 ~/.vibe-pet/updater.key 或环境变量。
+tauri-plugin-updater = "2"
 
 # 仅 macOS：把窗口转成 nonactivating NSPanel，实现「置顶但不抢焦点」。
 # 注意 objc2 必须与 tauri-nspanel 使用同一版本，否则 Message trait
