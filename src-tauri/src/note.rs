@@ -158,13 +158,17 @@ pub fn list_today(app: &tauri::AppHandle) -> Vec<Note> {
 fn parse_notes(text: &str) -> Vec<Note> {
     let mut out: Vec<Note> = Vec::new();
     for line in text.lines() {
-        // 续行：合并到上一条（若上一条是我们写的）
-        if line.starts_with("  ") && !line.trim().is_empty() {
-            if let Some(last) = out.last_mut() {
-                if last.ts_ms == CONTINUATION_SENTINEL || !last.text.is_empty() {
-                    last.text.push('\n');
-                    last.text.push_str(line.trim_start());
-                    continue;
+        // 续行：合并到上一条（若上一条是我们写的）。
+        // 只剥落盘时加的 2 空格 —— 用户自己的嵌套缩进保留
+        //（设计 docs/superpowers/specs/2026-09-07-quicknote-markdown-design.md）。
+        if let Some(rest) = line.strip_prefix("  ") {
+            if !rest.trim().is_empty() {
+                if let Some(last) = out.last_mut() {
+                    if last.ts_ms == CONTINUATION_SENTINEL || !last.text.is_empty() {
+                        last.text.push('\n');
+                        last.text.push_str(rest);
+                        continue;
+                    }
                 }
             }
         }
@@ -184,16 +188,32 @@ fn parse_line(line: &str) -> Option<Note> {
     let (_hhmm, rest) = rest.split_once("**")?;
     let rest = rest.trim_start();
 
-    let mut parts: Vec<&str> = Vec::new();
-    let mut tags = Vec::new();
-    for tok in rest.split_whitespace() {
-        if tok.starts_with('`') && tok.ends_with('`') && tok.len() > 1 {
-            tags.push(tok.trim_matches('`').to_string());
-        } else {
-            parts.push(tok);
+    // tag 只认**行尾连续**的反引号 token —— tags 是 LLM 回填、追加在行尾的。
+    // 行中的 `代码` 是内容不是 tag（富文本速记的往返基础）。
+    let mut core = rest;
+    let mut tags: Vec<String> = Vec::new();
+    loop {
+        let trimmed = core.trim_end();
+        let Some(without_last) = trimmed.strip_suffix('`') else { break };
+        let Some(tok_start) = without_last.rfind('`') else { break };
+        // token 前须是空白或行首，否则整段就是普通内容（如 "内容`x`"）
+        let before = &trimmed[..tok_start];
+        if !before.is_empty() && !before.ends_with(char::is_whitespace) {
+            break;
         }
+        tags.push(trimmed[tok_start + 1..trimmed.len() - 1].to_string());
+        core = before;
     }
-    let text = parts.join(" ");
+    tags.reverse();
+
+    // 单个行尾反引号 token 与「内容恰好以行内代码结尾」无法区分，保守归内容：
+    // 丢 tag 只是列表少个标签，吞内容是真丢数据 —— 仅 ≥2 个连续 token 才认作 tags。
+    if tags.len() < 2 {
+        core = rest;
+        tags.clear();
+    }
+
+    let text = core.trim().to_string();
     if text.is_empty() {
         return None;
     }
@@ -305,8 +325,9 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("vibe-pet-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
 
+        // 双 tag 才能稳定往返：单个行尾 token 与行内代码无法区分，读回时归内容
         let mut n1 = Note::new("第一条", TS);
-        n1.tags = vec!["todo".into()];
+        n1.tags = vec!["todo".into(), "macos".into()];
         append_to(&dir, &n1).unwrap();
 
         let mut n2 = Note::new("第二条", TS + 60000);
@@ -318,8 +339,8 @@ mod tests {
 
         let parsed = parse_notes(&text);
         assert_eq!(parsed.len(), 2);
-        assert_eq!(parsed[0].text, "第一条");
-        assert_eq!(parsed[0].tags, vec!["todo"]);
+        assert_eq!(parsed[0].text, "第一条"); // 设计 2026-09-07：行中反引号归内容
+        assert_eq!(parsed[0].tags, vec!["todo", "macos"]);
         assert_eq!(parsed[1].text, "第二条");
 
         let _ = fs::remove_dir_all(&dir);
@@ -345,8 +366,9 @@ mod tests {
         let text = "# 2026-08-29\n\n手写的一段笔记\n\n- **16:30** 我们的记录 `todo`\n- 不是我们的格式\n";
         let parsed = parse_notes(text);
         assert_eq!(parsed.len(), 1);
-        assert_eq!(parsed[0].text, "我们的记录");
-        assert_eq!(parsed[0].tags, vec!["todo"]);
+        // 设计 2026-09-07：行中反引号归内容 —— 单个行尾 token 与行内代码无法区分，保守归内容
+        assert_eq!(parsed[0].text, "我们的记录 `todo`");
+        assert!(parsed[0].tags.is_empty());
     }
 
     #[test]
@@ -378,5 +400,44 @@ mod tests {
         let n = Note::new("a\r\nb", TS);
         let md = n.to_markdown();
         assert!(!md.contains('\r'), "落盘前应统一为 \\n：{md:?}");
+    }
+
+    #[test]
+    fn 首行行内代码不被误提取为标签() {
+        // 行中的 `代码` 是内容不是 tag —— 富文本速记的往返基础
+        let notes = parse_notes("- **09:00** 回邮件 `tomorrow`\n");
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].text, "回邮件 `tomorrow`");
+        assert!(notes[0].tags.is_empty());
+    }
+
+    #[test]
+    fn 行尾连续反引号token仍归标签() {
+        // tags 是 LLM 回填、追加在行尾的 —— 这个语义不变
+        let notes = parse_notes("- **09:00** 开会 `工作` `项目`\n");
+        assert_eq!(notes[0].text, "开会");
+        assert_eq!(notes[0].tags, vec!["工作".to_string(), "项目".to_string()]);
+    }
+
+    #[test]
+    fn 续行只剥两个空格保留嵌套缩进() {
+        // 落盘时我们加 2 空格缩进；用户自己的嵌套缩进要保留
+        let notes = parse_notes("- **09:00** 周会\n  - P0 修闪退\n    - 细节\n");
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].text, "周会\n- P0 修闪退\n  - 细节");
+    }
+
+    #[test]
+    fn 富文本速记往返一致() {
+        let note = Note::new(
+            "**P0** 修登录闪退\n- [ ] 回邮件 `tomorrow`\n  - 带附件",
+            1_800_000_000_000,
+        );
+        let notes = parse_notes(&note.to_markdown());
+        assert_eq!(notes.len(), 1);
+        assert_eq!(
+            notes[0].text,
+            "**P0** 修登录闪退\n- [ ] 回邮件 `tomorrow`\n  - 带附件"
+        );
     }
 }
