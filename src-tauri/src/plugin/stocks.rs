@@ -20,6 +20,7 @@
 use std::sync::Mutex;
 use std::time::Duration;
 
+use chrono::{Datelike, NaiveDate, NaiveDateTime};
 use serde::{Deserialize, Serialize};
 
 use super::store;
@@ -115,6 +116,78 @@ fn parse_hhmm(s: &str) -> Option<u32> {
         return None;
     }
     Some(h * 60 + m)
+}
+
+/// 美东夏令时判定（纯算术，不引 tz 数据库）：2007 年起为 3 月第二个周日
+/// 至 11 月第一个周日。只按**日期**判，不精确到切换那一刻的 02:00 ——
+/// 1 小时误差对「时间戳是不是今天」无影响（美东收盘 16:00 落在北京
+/// 04:00–05:00，不跨午夜），但差值本身要算对，否则边界日会错一整天。
+fn is_us_dst(d: NaiveDate) -> bool {
+    let m = d.month();
+    if m < 3 || m > 11 {
+        return false;
+    }
+    if m > 3 && m < 11 {
+        return true;
+    }
+    // 某月第 n 个周日的日号（chrono：周一=0 … 周日=6）
+    let nth_sunday = |n: u32| -> Option<u32> {
+        let first = NaiveDate::from_ymd_opt(d.year(), m, 1)?;
+        let to_sunday = (6 - first.weekday().num_days_from_monday() as u32) % 7;
+        Some(1 + to_sunday + (n - 1) * 7)
+    };
+    match (m, nth_sunday(2), nth_sunday(1)) {
+        (3, Some(s), _) => d.day() >= s,
+        (11, _, Some(e)) => d.day() < e,
+        _ => true,
+    }
+}
+
+/// 美东相对 UTC 的偏移（小时）：夏令时 -4，冬令时 -5。
+fn us_dst_offset(d: NaiveDate) -> i32 {
+    if is_us_dst(d) { -4 } else { -5 }
+}
+
+/// 把一个时区的本地时刻换算成北京日期。
+/// `local_offset_hours` 为该时区相对 UTC 的偏移（美东 -5 / -4）。
+fn shift_to_beijing(local: NaiveDateTime, local_offset_hours: i32) -> String {
+    let utc = local - chrono::Duration::hours(local_offset_hours as i64);
+    (utc + chrono::Duration::hours(8)).format("%Y-%m-%d").to_string()
+}
+
+/// 从行情字段里扫描时间戳，换算成**本地（北京）日期** `YYYY-MM-DD`；
+/// 扫不到返回空串 —— 调用方一律视为陈旧（安全方向：宁可不显示，不显示错的）。
+///
+/// 时间戳字段**下标在 A股/港股/美股间会漂移**（实测 A股在第 28 位、美股在
+/// 第 30 位），所以不认下标，扫描全部字段匹配两种格式；时区按 symbol 前缀
+/// 判（比按格式判更稳）。
+fn quote_ts_local_date(fields: &[&str], symbol: &str) -> String {
+    let eastern = symbol.starts_with("us");
+    for raw in fields {
+        let t = raw.trim();
+        let naive = if t.len() == 14 && t.bytes().all(|b| b.is_ascii_digit()) {
+            // 14 位紧凑：20260902161444（A股/港股，已是北京时间）
+            NaiveDate::parse_from_str(&t[..8], "%Y%m%d").ok().and_then(|d| {
+                d.and_hms_opt(
+                    t[8..10].parse().unwrap_or(0),
+                    t[10..12].parse().unwrap_or(0),
+                    t[12..14].parse().unwrap_or(0),
+                )
+            })
+        } else if t.len() == 19 {
+            // 19 位带空格：2026-09-01 16:00:01（美股，美东时间）
+            NaiveDateTime::parse_from_str(t, "%Y-%m-%d %H:%M:%S").ok()
+        } else {
+            None
+        };
+        let Some(naive) = naive else { continue };
+        return if eastern {
+            shift_to_beijing(naive, us_dst_offset(naive.date()))
+        } else {
+            naive.date().format("%Y-%m-%d").to_string()
+        };
+    }
+    String::new()
 }
 
 /// 当前分钟是否落在任一展示时段内（含起点，不含终点）。
@@ -675,6 +748,37 @@ mod tests {
         assert!(c.endpoint.starts_with("https://"));
         assert_eq!(c.windows.len(), 2);
         assert_eq!(c.summarize_after, "15:05");
+    }
+
+    #[test]
+    fn 行情时间戳换算本地日期() {
+        // A股：14 位紧凑格式，已是北京时间
+        let f: Vec<&str> = A_SHARE.split('~').collect();
+        assert_eq!(quote_ts_local_date(&f, "sh600519"), "2026-09-02");
+        // 港股同样 +8
+        assert_eq!(quote_ts_local_date(&f, "hkHSI"), "2026-09-02");
+        // 美股：19 位带空格格式，美东 2026-09-01 16:00 → 北京 2026-09-02 04:00
+        let uf: Vec<&str> = US_SHARE.split('~').collect();
+        assert_eq!(
+            quote_ts_local_date(&uf, "usAAPL"),
+            "2026-09-02",
+            "美东 9/1 16:00（夏令时 -4）= 北京 9/2 04:00"
+        );
+        // 扫不到时间戳 → 空串（调用方视为陈旧）
+        assert_eq!(quote_ts_local_date(&["1", "名", "0"], "sh600519"), "");
+    }
+
+    #[test]
+    fn 美东夏令时边界() {
+        let d = |m: u32, day: u32| NaiveDate::from_ymd_opt(2026, m, day).unwrap();
+        // 2026-03-01 是周日 → 第二个周日是 03-08，夏令时从这天起
+        assert!(!is_us_dst(d(3, 7)), "03-07 仍是冬令时");
+        assert!(is_us_dst(d(3, 8)), "03-08 起夏令时");
+        // 2026-11-01 是周日 → 第一个周日，夏令时到这天结束
+        assert!(is_us_dst(d(10, 31)));
+        assert!(!is_us_dst(d(11, 1)), "11-01 起冬令时");
+        assert!(!is_us_dst(d(1, 15)), "1 月冬令时");
+        assert!(is_us_dst(d(7, 15)), "7 月夏令时");
     }
 
     #[test]
