@@ -190,6 +190,56 @@ fn quote_ts_local_date(fields: &[&str], symbol: &str) -> String {
     String::new()
 }
 
+/// `YYYY-MM-DD` 是否为周六或周日。解析失败按工作日处理 ——
+/// 宁可多拉一次行情，也不要因为日期算错就装死。
+fn is_weekend(date: &str) -> bool {
+    NaiveDate::parse_from_str(date, "%Y-%m-%d")
+        .map(|d| matches!(d.weekday(), chrono::Weekday::Sat | chrono::Weekday::Sun))
+        .unwrap_or(false)
+}
+
+/// 今天能不能展示行情数字。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MarketState {
+    /// 有当日行情，数字可用。
+    Live,
+    /// 周末休市。
+    Weekend,
+    /// 非交易时段 / 节假日 / 接口数据滞后。
+    Closed,
+}
+
+/// 只保留时间戳落在今天的行情（**逐条**过滤，不是整盘开关）。
+fn fresh_quotes(quotes: &[Quote], today: &str) -> Vec<Quote> {
+    quotes
+        .iter()
+        .filter(|q| !q.date.is_empty() && q.date == today)
+        .cloned()
+        .collect()
+}
+
+/// 决定今天能不能展示行情数字。
+///
+/// 周末判定**优先于**时间戳：周六 04:00（北京）= 周五 16:00 美东收盘，
+/// 时间戳换算过来是「今天」，但确实是休市。
+fn market_state(today: &str, quotes: &[Quote]) -> MarketState {
+    if is_weekend(today) {
+        return MarketState::Weekend;
+    }
+    if quotes.iter().any(|q| !q.date.is_empty() && q.date == today) {
+        return MarketState::Live;
+    }
+    MarketState::Closed
+}
+
+/// tick 的闸门（纯函数部分）：非 Live 一律不出卡，**收盘总结也在内** ——
+/// 节假日不该对着昨天的数据发「收盘总结」。放行时返回当日行情。
+fn card_gate(today: &str, quotes: &[Quote]) -> Option<Vec<Quote>> {
+    let fresh = fresh_quotes(quotes, today);
+    (market_state(today, &fresh) == MarketState::Live).then_some(fresh)
+}
+
 /// 当前分钟是否落在任一展示时段内（含起点，不含终点）。
 fn in_windows(minutes: u32, windows: &[[String; 2]]) -> bool {
     windows.iter().any(|w| {
@@ -204,12 +254,16 @@ fn in_windows(minutes: u32, windows: &[[String; 2]]) -> bool {
 
 // ---------- 行情与缓存 ----------
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Quote {
     pub symbol: String,
     pub name: String,
     pub price: f64,
     pub change_pct: f64,
+    /// 行情时间戳换算出的**本地日期** `YYYY-MM-DD`；空串 = 没能解析出时间戳
+    ///（旧缓存缺字段自动补空串 → 一律判为陈旧，安全方向正确）。
+    #[serde(default)]
+    pub date: String,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -286,6 +340,7 @@ fn parse_line(line: &str) -> Option<Quote> {
         name: f[1].trim().to_string(),
         price,
         change_pct,
+        date: String::new(), // Task 3 接真实时间戳
     })
 }
 
@@ -678,6 +733,7 @@ mod tests {
             name: "n".into(),
             price: 10.0,
             change_pct: 3.0,
+            ..Default::default()
         }];
         // 基准为空：只建基准不出卡
         assert!(significant_changes(&cur, &[], 2.0).is_none());
@@ -687,6 +743,7 @@ mod tests {
             name: "n".into(),
             price: 10.0,
             change_pct: 1.0,
+            ..Default::default()
         }];
         // 变化 2.0 个百分点 = 阈值 → 出
         let hits = significant_changes(&cur, &base, 2.0).unwrap();
@@ -698,6 +755,7 @@ mod tests {
             name: "n".into(),
             price: 10.0,
             change_pct: 2.5,
+            ..Default::default()
         }];
         assert!(significant_changes(&cur, &base2, 2.0).is_none());
     }
@@ -728,6 +786,7 @@ mod tests {
                 name: "n".into(),
                 price: 1.0,
                 change_pct: 1.0,
+                ..Default::default()
             }],
             summarized_date: "2026-09-01".into(),
             digest: "旧点评".into(),
@@ -782,18 +841,82 @@ mod tests {
     }
 
     #[test]
+    fn 周末判定() {
+        assert!(is_weekend("2026-09-05"), "周六");
+        assert!(is_weekend("2026-09-06"), "周日");
+        assert!(!is_weekend("2026-09-07"), "周一");
+        assert!(!is_weekend("乱七八糟"), "解析失败按工作日处理，宁可多拉一次");
+    }
+
+    #[test]
+    fn 市场状态三态判定() {
+        let q = |d: &str| Quote {
+            symbol: "sh600519".into(),
+            name: "n".into(),
+            price: 1.0,
+            change_pct: 0.0,
+            date: d.into(),
+            ..Default::default()
+        };
+        assert_eq!(market_state("2026-09-07", &[q("2026-09-07")]), MarketState::Live);
+        assert_eq!(
+            market_state("2026-09-07", &[q("2026-09-04")]),
+            MarketState::Closed,
+            "上周五的数据不算今天"
+        );
+        assert_eq!(market_state("2026-09-07", &[q("")]), MarketState::Closed, "没时间戳视为陈旧");
+        assert_eq!(market_state("2026-09-07", &[]), MarketState::Closed);
+        // 周末优先于时间戳：周六凌晨的美股时间戳换算过来仍是「今天」，但确实休市
+        assert_eq!(market_state("2026-09-05", &[q("2026-09-05")]), MarketState::Weekend);
+    }
+
+    #[test]
+    fn 逐条过滤只留当日行情() {
+        let q = |sym: &str, d: &str| Quote {
+            symbol: sym.into(),
+            name: sym.into(),
+            price: 1.0,
+            change_pct: 0.0,
+            date: d.into(),
+            ..Default::default()
+        };
+        let all = vec![q("sh600519", "2026-09-07"), q("usAAPL", "2026-09-04")];
+        let fresh = fresh_quotes(&all, "2026-09-07");
+        assert_eq!(fresh.len(), 1);
+        assert_eq!(fresh[0].symbol, "sh600519", "A股已收盘/美股未开盘时只显示新鲜的");
+    }
+
+    #[test]
+    fn 陈旧闸门挡住收盘总结与变动卡() {
+        let q = |d: &str| Quote {
+            symbol: "s".into(),
+            name: "n".into(),
+            price: 1.0,
+            change_pct: 5.0,
+            date: d.into(),
+            ..Default::default()
+        };
+        assert!(card_gate("2026-09-07", &[q("2026-09-07")]).is_some(), "当日行情放行");
+        assert!(card_gate("2026-09-07", &[q("2026-09-04")]).is_none(), "历史数据 → 不出卡（含总结）");
+        assert!(card_gate("2026-09-07", &[]).is_none());
+        assert!(card_gate("2026-09-05", &[q("2026-09-05")]).is_none(), "周末 → 不出卡");
+    }
+
+    #[test]
     fn 卡片payload带数字与点评标记() {
         let items = vec![Quote {
             symbol: "sh600519".into(),
             name: "贵州茅台".into(),
             price: 1297.5,
             change_pct: -0.16,
+            ..Default::default()
         }];
         let indices = vec![Quote {
             symbol: "hkHSI".into(),
             name: "恒生指数".into(),
             price: 25438.8,
             change_pct: 0.5,
+            ..Default::default()
         }];
         let c = make_card(&items, &indices, "白酒走弱", true);
         assert_eq!(c.payload["summary"], true);
@@ -836,6 +959,7 @@ mod tests {
             name: s.into(),
             price: 1.0,
             change_pct: 0.0,
+            ..Default::default()
         };
         let quotes = vec![q("sh600519"), q("sh000001"), q("hkHSI"), q("usIXIC")];
         // 配置了个股：主=个股，从=指数
