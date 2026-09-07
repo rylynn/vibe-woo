@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { Box } from "../interact/hit-test";
 import { enablePanelDrag } from "./panel-drag";
+import { continueList, wrapLink, wrapSelection } from "./md-edit";
 
 function enterInputMode(): void {
   void invoke("begin_text_input").catch(() => {});
@@ -30,8 +31,10 @@ function onInputReady(cb: () => void): void {
  * 设计原则（设计文档 6.3）：极简、无标题、无字段，保存即走。
  *
  * 按键语义（与 Notion/Slack 惯例一致）：
- *   - Enter      换行（内容里可以多行）
+ *   - Enter      换行；列表行自动续前缀，空列表项回车结束列表
  *   - Cmd+Enter  保存
+ *   - Cmd+B/I/E  粗体 / 斜体 / 行内代码（包裹选区，再按取消）
+ *   - Cmd+K      插入链接
  *   - Esc        取消
  *
  * 用 DOM 而非 canvas：多行输入需要可靠的键盘输入、光标与中文输入法
@@ -78,15 +81,56 @@ export class QuickNote {
   private bind(): void {
     this.textarea.addEventListener("keydown", (e) => {
       e.stopPropagation();
+      // 中文输入法候选确认键（keyCode 229）不拦截 —— 吞掉会打断输入。
+      // Cmd 组合键不受 IME 影响，放行给下面的快捷键分支。
+      if (e.keyCode === 229 && !e.metaKey && !e.ctrlKey) return;
+
       // Cmd+Enter 保存。metaKey 对应 macOS 的 ⌘。
       if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
         e.preventDefault();
         void this.save();
+        return;
       }
-      // 其余按键（含纯 Enter）走默认行为：textarea 里 Enter 即换行
+
+      // Markdown 快捷键：⌘B 粗体 / ⌘I 斜体 / ⌘E 行内代码 / ⌘K 链接
+      if (e.metaKey || e.ctrlKey) {
+        const key = e.key.toLowerCase();
+        if (key === "b") {
+          e.preventDefault();
+          this.applyEdit(wrapSelection(this.textarea.value, this.textarea.selectionStart, this.textarea.selectionEnd, "**"));
+        } else if (key === "i") {
+          e.preventDefault();
+          this.applyEdit(wrapSelection(this.textarea.value, this.textarea.selectionStart, this.textarea.selectionEnd, "*"));
+        } else if (key === "e") {
+          e.preventDefault();
+          this.applyEdit(wrapSelection(this.textarea.value, this.textarea.selectionStart, this.textarea.selectionEnd, "`"));
+        } else if (key === "k") {
+          e.preventDefault();
+          this.applyEdit(wrapLink(this.textarea.value, this.textarea.selectionStart, this.textarea.selectionEnd));
+        }
+        return;
+      }
+
+      // 纯 Enter：列表行自动续前缀（空列表项回车=结束列表）。
+      // Shift+Enter 不续 —— 用户要的就是普通换行。
+      if (e.key === "Enter" && !e.shiftKey && !e.altKey) {
+        const r = continueList(this.textarea.value, this.textarea.selectionStart);
+        if (r) {
+          e.preventDefault();
+          this.applyEdit(r);
+        }
+      }
+      // 其余按键走默认行为
     });
     // 输入时自动增高
     this.textarea.addEventListener("input", () => this.autosize());
+  }
+
+  /** 把编辑变换写回 textarea 并恢复选区。 */
+  private applyEdit(r: { text: string; selStart: number; selEnd: number }): void {
+    this.textarea.value = r.text;
+    this.textarea.setSelectionRange(r.selStart, r.selEnd);
+    this.autosize();
   }
 
   async show(): Promise<void> {
