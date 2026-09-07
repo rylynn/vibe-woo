@@ -1,8 +1,10 @@
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { invoke } from "@tauri-apps/api/core";
 import type { Box } from "../interact/hit-test";
 import { panelChrome } from "./chrome";
+import { renderLine } from "./md-inline";
 
-interface NoteRow {
+export interface NoteRow {
   text: string;
   tags: string[];
   kind: string;
@@ -17,6 +19,8 @@ interface NoteRow {
 export class TodayPanel {
   private readonly el: HTMLDivElement;
   private open = false;
+  /** 展开的行号（-1 = 全收起）。 */
+  private expanded = -1;
 
   constructor() {
     this.el = document.createElement("div");
@@ -49,6 +53,7 @@ export class TodayPanel {
   hide(): void {
     this.el.style.display = "none";
     this.open = false;
+    this.expanded = -1;
   }
 
   get isOpen(): boolean {
@@ -97,27 +102,69 @@ export class TodayPanel {
       return;
     }
 
-    // 最新的在前面
-    for (const n of [...notes].reverse()) {
-      const row = document.createElement("div");
-      row.className = "pet-today-row";
-
-      const text = document.createElement("span");
-      text.className = "pet-today-text";
-      // 多行内容折叠为单行预览，首行 + 省略号；hover title 展示全文
-      const firstLine = n.text.split("\n")[0];
-      text.textContent =
-        n.text.includes("\n") ? `${firstLine} …` : firstLine;
-      text.title = n.text;
-      row.appendChild(text);
-
-      if (n.kind && n.kind !== "note") {
-        const k = document.createElement("span");
-        k.className = `pet-today-kind kind-${n.kind}`;
-        k.textContent = n.kind;
-        row.appendChild(k);
-      }
+    // 最新的在前面；点击多行行展开/收起，点链接只打开链接
+    [...notes].reverse().forEach((n, idx) => {
+      const multiline = n.text.includes("\n");
+      const row = renderNoteRow(n, this.expanded === idx);
+      row.addEventListener("pointerdown", (e) => {
+        const a = (e.target as HTMLElement).closest?.("a");
+        if (a) {
+          e.stopPropagation();
+          const href = a.getAttribute("href");
+          if (href) {
+            // 失败只 warn 不打扰——与 main.ts cardHost.openUrl 同一处理
+            void openUrl(href).catch((e) => console.warn("[today] 打开链接失败", e));
+          }
+          return; // 点链接不触发展开/收起
+        }
+        if (!multiline) return; // 单行无展开态
+        this.expanded = this.expanded === idx ? -1 : idx;
+        void this.render();
+      });
       this.el.appendChild(row);
-    }
+    });
   }
+}
+
+/**
+ * 渲染一条速记行（导出供单测）。
+ * 收起态：首行行内渲染 + 多行时「…N 行」提示 + hover title 全文；
+ * 展开态：逐行渲染（任务勾选、行内语法、可点链接）。
+ */
+export function renderNoteRow(n: NoteRow, expanded: boolean): HTMLDivElement {
+  const row = document.createElement("div");
+  row.className = "pet-today-row";
+  const lines = n.text.split("\n");
+  const multiline = lines.length > 1;
+
+  const body = document.createElement(multiline && expanded ? "div" : "span");
+  body.className = multiline && expanded ? "pet-today-expand" : "pet-today-text";
+
+  if (multiline && expanded) {
+    for (const line of lines) {
+      const ln = document.createElement("div");
+      ln.className = "pet-today-line";
+      for (const node of renderLine(line)) ln.appendChild(node);
+      body.appendChild(ln);
+    }
+  } else {
+    for (const node of renderLine(lines[0])) body.appendChild(node);
+    body.title = n.text;
+  }
+  row.appendChild(body);
+
+  if (multiline && !expanded) {
+    const more = document.createElement("span");
+    more.className = "pet-today-more";
+    more.textContent = `…${lines.length} 行`;
+    row.appendChild(more);
+  }
+
+  if (n.kind && n.kind !== "note") {
+    const k = document.createElement("span");
+    k.className = `pet-today-kind kind-${n.kind}`;
+    k.textContent = n.kind;
+    row.appendChild(k);
+  }
+  return row;
 }
