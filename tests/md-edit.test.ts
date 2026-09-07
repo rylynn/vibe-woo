@@ -94,7 +94,15 @@ describe("回车自动续列表前缀", () => {
   it("多行中间回车：行首定位跨 lastIndexOf 回溯到本行行首", () => {
     // 覆盖 lineStart = lastIndexOf("\n", caret - 1) + 1 的回溯路径：
     // 光标在第 2 行行中（下标 9），行首应定位到 6 而非回到第 1 行。
+    // 注：非空分支实际只依赖 caret，lineStart/lineEnd 真正生效的是下面的空项结束分支。
     const r = continueList("- 第一行\n- 第二行", 9);
     expect(r).toEqual({ prevent: true, text: "- 第一行\n- 第\n- 二行", selStart: 12, selEnd: 12 });
+  });
+
+  it("非最后行的空列表项回车：结束列表且保留后续行", () => {
+    // 专门守护 lineStart/lineEnd：若行定位被改坏（如 lineStart 恒 0），
+    // 此例会产出 "- a\n- \n- " 而非保留尾行，断言立现差异。
+    const r = continueList("- a\n- ", 6);
+    expect(r).toEqual({ prevent: true, text: "- a\n", selStart: 4, selEnd: 4 });
   });
 });
