@@ -35,10 +35,21 @@ const STATE_FILE: &str = "stocks-cache";
 /// 两张股票卡之间的最小间隔（分钟）。设计 5.1：股票 45min。
 const STOCKS_GAP_MINS: u64 = 45;
 
-/// 行情拉取节流（分钟）。数据要实时：2 分钟一拉（腾讯行情秒级刷新，
+/// 行情拉取节流（分钟）。数据要实时：工作日 2 分钟一拉（腾讯行情秒级刷新，
 /// 节流只为不自残），且不受展示时段限制 —— 时段只闸门出卡，
 /// 面板里的数字任何时候打开都应该是活的。
-const FETCH_GAP_MINS: u64 = 2;
+const FETCH_GAP_WEEKDAY_MINS: u64 = 2;
+
+/// 周末休市是确定的，30 分钟探一次活就够 —— 别在休市时白打接口。
+const FETCH_GAP_WEEKEND_MINS: u64 = 30;
+
+fn fetch_gap_mins(weekend: bool) -> u64 {
+    if weekend {
+        FETCH_GAP_WEEKEND_MINS
+    } else {
+        FETCH_GAP_WEEKDAY_MINS
+    }
+}
 
 /// 内置指数（腾讯行情格式）：上证 / 恒指 / 纳指。
 /// 未配置关注标的时默认展示；配置后作为卡片二级视图（「查看指数」按钮）。
@@ -539,57 +550,51 @@ impl Plugin for StocksPlugin {
         let today = now_ctx.date.clone();
         let now = epoch_mins();
         let now_min = now_ctx.minutes;
+        let weekend = is_weekend(&today);
 
         with_state(|s| rollover(s, &today));
 
         // —— 实时数据：拉取不受展示时段限制（时段只闸门出卡）。
         // 面板与卡片任何时候看到的都该是活行情，不是「窗口内的旧快照」。
         let need_fetch =
-            with_state(|s| now.saturating_sub(s.last_fetch_mins) >= FETCH_GAP_MINS);
+            with_state(|s| now.saturating_sub(s.last_fetch_mins) >= fetch_gap_mins(weekend));
         if need_fetch {
             with_state(|s| s.last_fetch_mins = now); // 防重复触发
             spawn_fetch(cfg.clone(), today.clone(), ctx.app.clone());
         }
 
-        // —— 收盘总结：到点、有当日快照、未发过 ——
+        // —— 新鲜度闸门：非当日行情一律不出卡，**收盘总结也在内** ——
+        // 节假日不该对着昨天的数据发「收盘总结」。不发卡即不进仲裁器，
+        // 也就不占 90s 全局间隔（「不占用事件」）。
+        let Some(fresh) = with_state(|s| card_gate(&today, &s.quotes)) else {
+            return Vec::new();
+        };
+
+        // —— 收盘总结：到点、当日快照已就绪、未发过 ——
+        // 原「到点还没行情就补拉」分支已删除：拉取在闸门之前无条件进行
+        //（每 2 分钟一轮），走到这里时当日行情必然已就绪或本轮刚触发过拉取，
+        // 留着只会是死代码。
         if !cfg.summarize_after.is_empty() {
             if let Some(after) = parse_hhmm(&cfg.summarize_after) {
-                // 到了总结时刻但今天还没拉到行情（比如应用第一次在时段外
-                // 启动）：主动拉一次 —— 总结和面板数据不能依赖用户恰好
-                // 在展示时段内运行过应用。
                 if now_min >= after {
-                    let need_pull = with_state(|s| {
-                        s.date != today
-                            || (s.quotes.is_empty() && now.saturating_sub(s.last_fetch_mins) >= FETCH_GAP_MINS)
+                    let llm_off = {
+                        let llm = crate::configcmd::current().llm;
+                        !llm.enabled || llm.api_key.is_empty()
+                    };
+                    let ready = with_state(|s| {
+                        s.summarized_date != today && (llm_off || !s.digest.is_empty())
                     });
-                    if need_pull {
-                        with_state(|s| {
-                            s.date = today.clone();
-                            s.last_fetch_mins = now;
+                    if ready {
+                        let (items, indices, digest) = with_state(|s| {
+                            s.summarized_date = today.clone();
+                            s.last_card_mins = now;
+                            let (primary, secondary) = split_views(&fresh, &cfg.symbols);
+                            s.last_card_quotes = primary.clone();
+                            (primary, secondary, s.digest.clone())
                         });
-                        spawn_fetch(cfg.clone(), today.clone(), ctx.app.clone());
+                        save_state(ctx.app);
+                        return vec![make_card(&items, &indices, &digest, true)];
                     }
-                }
-                let llm_off = {
-                    let llm = crate::configcmd::current().llm;
-                    !llm.enabled || llm.api_key.is_empty()
-                };
-                let ready = with_state(|s| {
-                    s.date == today
-                        && !s.quotes.is_empty()
-                        && s.summarized_date != today
-                        && (llm_off || !s.digest.is_empty())
-                });
-                if now_min >= after && ready {
-                    let (items, indices, digest) = with_state(|s| {
-                        s.summarized_date = today.clone();
-                        s.last_card_mins = now;
-                        let (primary, secondary) = split_views(&s.quotes, &cfg.symbols);
-                        s.last_card_quotes = primary.clone();
-                        (primary, secondary, s.digest.clone())
-                    });
-                    save_state(ctx.app);
-                    return vec![make_card(&items, &indices, &digest, true)];
                 }
             }
         }
@@ -600,13 +605,10 @@ impl Plugin for StocksPlugin {
         }
 
         let card = with_state(|s| {
-            if s.date != today || s.quotes.is_empty() {
-                return None;
-            }
             if now.saturating_sub(s.last_card_mins) < STOCKS_GAP_MINS {
                 return None;
             }
-            let (primary, secondary) = split_views(&s.quotes, &cfg.symbols);
+            let (primary, secondary) = split_views(&fresh, &cfg.symbols);
             let hits = significant_changes(&primary, &s.last_card_quotes, cfg.change_threshold_pct)?;
             s.last_card_mins = now;
             s.last_card_quotes = primary;
@@ -654,14 +656,15 @@ pub fn meta(app: &tauri::AppHandle) -> PluginMeta {
         .map(|c| c.date)
         .unwrap_or_default();
     let s = STATE.lock().ok().and_then(|g| g.clone());
-    let quotes = match s {
+    let fresh = match s {
         Some(mut s) if s.date == today => {
             rollover(&mut s, &today);
-            s.quotes.clone()
+            fresh_quotes(&s.quotes, &today)
         }
         _ => Vec::new(),
     };
-    let (primary, indices) = split_views(&quotes, &cfg.symbols);
+    let market = market_state(&today, &fresh);
+    let (primary, indices) = split_views(&fresh, &cfg.symbols);
     PluginMeta {
         id: ID.into(),
         name: "股市投资".into(),
@@ -669,6 +672,9 @@ pub fn meta(app: &tauri::AppHandle) -> PluginMeta {
         summary: serde_json::json!({
             "enabled": cfg.enabled,
             "symbols": cfg.symbols,
+            "market": market,
+            // 非 live 时 fresh 本就是空 —— 收口在 Rust 侧：
+            // 旧版前端即使没更新也拿不到历史数字
             "quotes": primary,
             "indices": indices,
         }),
