@@ -6,6 +6,8 @@ interface Quote {
   name: string;
   price: number;
   change_pct: number;
+  /** 行情时间戳换算出的本地日期 YYYY-MM-DD；空串 = 没能解析出时间戳。 */
+  date: string;
 }
 
 /** 卡片 payload（与 Rust stocks.rs 契约一致）。 */
@@ -126,6 +128,8 @@ export const stockFrontend: PluginFrontend = {
     const s = data as {
       enabled: boolean;
       symbols: string[];
+      /** Rust 侧推导的市场状态；旧版后端没有这个字段时为 undefined。 */
+      market?: "live" | "weekend" | "closed";
       quotes: Quote[];
       indices: Quote[];
     };
@@ -136,10 +140,18 @@ export const stockFrontend: PluginFrontend = {
       return el;
     }
     if (s.quotes.length === 0) {
-      el.textContent =
-        s.symbols.length > 0
-          ? `关注 ${s.symbols.length} 只 · 今日还没有行情`
-          : "今日还没有行情（默认展示上证/恒指/纳指）";
+      // 非 live 时 Rust 已经把 quotes 清空了 —— 这里只负责把状态说清楚。
+      // market 缺失（旧版后端）走最后的兜底分支，不会显示历史数字。
+      if (s.market === "weekend") {
+        el.textContent = "周末休市";
+      } else if (s.market === "closed") {
+        el.textContent = "未开盘";
+      } else {
+        el.textContent =
+          s.symbols.length > 0
+            ? `关注 ${s.symbols.length} 只 · 今日还没有行情`
+            : "今日还没有行情（默认展示上证/恒指/纳指）";
+      }
       return el;
     }
     el.appendChild(renderRows(s.quotes));
