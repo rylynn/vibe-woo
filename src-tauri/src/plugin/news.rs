@@ -594,7 +594,7 @@ pub fn meta(app: &tauri::AppHandle) -> PluginMeta {
         .map(|c| c.date)
         .unwrap_or_default();
     let s = STATE.lock().ok().and_then(|g| g.clone());
-    let (total, remaining, latest) = match s {
+    let (total, remaining, latest, updated, stale) = match s {
         Some(mut s) => {
             rollover(&mut s, &today);
             let remaining = s.items.len().saturating_sub(s.next_idx);
@@ -607,9 +607,15 @@ pub fn meta(app: &tauri::AppHandle) -> PluginMeta {
                     serde_json::json!({ "headline": i.headline, "source": i.source, "url": i.url })
                 })
                 .collect();
-            (s.items.len(), remaining, latest)
+            (
+                s.items.len(),
+                remaining,
+                latest,
+                s.last_success_mins,
+                s.fetch_date != today,
+            )
         }
-        None => (0, 0, Vec::new()),
+        None => (0, 0, Vec::new(), 0, true),
     };
     PluginMeta {
         id: ID.into(),
@@ -621,6 +627,10 @@ pub fn meta(app: &tauri::AppHandle) -> PluginMeta {
             "today_count": total,
             "remaining": remaining,
             "latest": latest,
+            // 上次成功拉取时刻（epoch 分钟），前端格式化成本地 HH:MM
+            "updated": updated,
+            // 今天还没成功拉到内容（面板显示「更新中」）
+            "stale": stale,
         }),
     }
 }
