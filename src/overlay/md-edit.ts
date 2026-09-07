@@ -72,6 +72,10 @@ export function wrapLink(text: string, selStart: number, selEnd: number): EditRe
  * 回车在列表行内的行为；null = 非列表行（走 textarea 默认换行）。
  * - 非空列表项：在光标处断行并接上对应前缀（任务项续未完成态、有序项数字递增）
  * - 空列表项（只剩前缀）：吃掉前缀、不换行 —— 结束列表
+ *
+ * 已知边界：光标位于列表前缀之前或内部时回车，产物会重复前缀
+ * （如 `continueList('- 咖啡', 0)` → `"\n- - 咖啡"`）。速记场景下光标
+ * 几乎总在行尾/行中，此边界属既定范围，不改行为。
  */
 export function continueList(text: string, caret: number): EditResult & { prevent: boolean } | null {
   const lineStart = text.lastIndexOf("\n", caret - 1) + 1;

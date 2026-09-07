@@ -83,4 +83,18 @@ describe("回车自动续列表前缀", () => {
     const r = continueList("- abcd", 4);
     expect(r).toEqual({ prevent: true, text: "- ab\n- cd", selStart: 7, selEnd: 7 });
   });
+
+  it("非最后一行行尾回车：在两行之间插新列表项", () => {
+    // 既有用例全是单行文本，未走 nl !== -1 的 lineEnd 分支；
+    // 此处光标停在第 1 行行尾，换行后应落在原文剩余行之前。
+    const r = continueList("- a\n正文", 3);
+    expect(r).toEqual({ prevent: true, text: "- a\n- \n正文", selStart: 6, selEnd: 6 });
+  });
+
+  it("多行中间回车：行首定位跨 lastIndexOf 回溯到本行行首", () => {
+    // 覆盖 lineStart = lastIndexOf("\n", caret - 1) + 1 的回溯路径：
+    // 光标在第 2 行行中（下标 9），行首应定位到 6 而非回到第 1 行。
+    const r = continueList("- 第一行\n- 第二行", 9);
+    expect(r).toEqual({ prevent: true, text: "- 第一行\n- 第\n- 二行", selStart: 12, selEnd: 12 });
+  });
 });
