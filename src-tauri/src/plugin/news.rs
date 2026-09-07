@@ -39,8 +39,21 @@ const STATE_FILE: &str = "news-cache";
 /// 两张资讯卡之间的最小间隔（分钟）。设计 5.1：资讯 2h。
 const NEWS_GAP_MINS: u64 = 120;
 
-/// 增量抓取轮次间隔（分钟）：从 fetch_hour 起，每 2 小时拉一轮当天新条目。
+/// 增量抓取轮次间隔（分钟）：**存量还没看完**时用（还有没出过卡的条目，不急着刷新）。
 const FETCH_INTERVAL_MINS: u64 = 120;
+
+/// 增量抓取轮次间隔（分钟）：**存量已看完**时用 —— 用户明确要的 1 小时一刷。
+/// 注意这**只影响拉取**，卡片间隔 `NEWS_GAP_MINS` 保持 120 分钟不变：
+/// 信息更新更勤 ≠ 卡片弹更勤。
+const FETCH_INTERVAL_IDLE_MINS: u64 = 60;
+
+/// 补拉退避档位（分钟）：连续失败时逐级放大，上限 30。
+/// 补拉判定每 30 秒跑一次，没有退避会在源挂掉时每 30 秒猛打 12 个源。
+const RETRY_BACKOFF_MINS: [u64; 4] = [0, 5, 15, 30];
+
+/// 单轮拉取最长允许的飞行时间（分钟）：12 个源 × 15s 超时的理论上限约 3 分钟，
+/// 给到 10 分钟兜底 —— 异步线程 panic 时不能把补拉永久卡死。
+const FETCH_INFLIGHT_MAX_MINS: u64 = 10;
 
 /// 每个源每轮最多取的**当天**条数（控制当日缓存规模；先过滤当天再截断）。
 const PER_SOURCE_ITEMS: usize = 8;
@@ -215,6 +228,21 @@ struct NewsState {
     /// 到点即触发首轮，无害）。
     #[serde(default)]
     last_fetch_mins: u64,
+    /// 上次**成功**拉取的本地日期 `YYYY-MM-DD`；空串 = 从未成功。
+    /// 「内容是不是今天的」由它显式判定 —— 不再依赖 rollover 的隐式清空。
+    #[serde(default)]
+    fetch_date: String,
+    /// 连续失败轮次（补拉退避用，成功即清零）。
+    #[serde(default)]
+    fetch_failures: u8,
+    /// 上次成功拉取的时刻（epoch 分钟），面板「更新于 HH:MM」用。
+    #[serde(default)]
+    last_success_mins: u64,
+    /// 是否有拉取在飞行中（线程起来时置 true，收尾时置 false）。
+    /// 飞行中不再重复起线程 —— 否则异步线程还在跑、判定每 30s 过一次，
+    /// 会在源挂掉时叠出十几个并发请求。**不落盘**：新的一天从 false 起。
+    #[serde(skip)]
+    fetch_inflight: bool,
 }
 
 static STATE: Mutex<Option<NewsState>> = Mutex::new(None);
@@ -301,10 +329,41 @@ fn sources_for(categories: &[String]) -> Vec<&'static RssSource> {
         .collect()
 }
 
-/// 是否该拉一轮（纯函数，单测入口）：过了抓取时点，且距上轮 ≥ 2 小时。
-/// `last_fetch_mins == 0`（新一天首轮 / 旧缓存）时必然为真。
-fn due_fetch(s: &NewsState, mins_of_day: u32, now: u64, fetch_hour: u32) -> bool {
-    mins_of_day / 60 >= fetch_hour && now.saturating_sub(s.last_fetch_mins) >= FETCH_INTERVAL_MINS
+/// 补拉退避：连续失败第 n 次后要等多久再试（0 → 5 → 15 → 30 封顶）。
+fn retry_backoff_mins(failures: u8) -> u64 {
+    RETRY_BACKOFF_MINS[usize::from(failures).min(RETRY_BACKOFF_MINS.len() - 1)]
+}
+
+/// 增量拉取间隔：存量看完 → 1 小时；还有没看的 → 2 小时。
+/// 「如果看过的」= 缓存里的条目都出过卡了（next_idx 走到尾）。
+fn fetch_interval_mins(s: &NewsState) -> u64 {
+    if s.next_idx >= s.items.len() {
+        FETCH_INTERVAL_IDLE_MINS
+    } else {
+        FETCH_INTERVAL_MINS
+    }
+}
+
+/// 是否该拉一轮（纯函数，单测入口）：当天还没成功拉到 → 立即补拉（按失败退避）；
+/// 否则过了抓取时点且距上轮够久才拉。
+fn due_fetch(s: &NewsState, mins_of_day: u32, now: u64, fetch_hour: u32, today: &str) -> bool {
+    // 飞行中不重复起线程：退避档位 0 会让判定每 30s 放行一次，而异步线程
+    // 最长要跑几分钟，没有这道闸会叠出十几个并发请求猛打源。
+    // 兜底：飞过 FETCH_INFLIGHT_MAX_MINS 分钟仍没收尾（线程 panic）→ 放行，
+    // 宁可多拉一次也不能把补拉永久卡死。
+    if s.fetch_inflight
+        && now.saturating_sub(s.last_fetch_mins) < FETCH_INFLIGHT_MAX_MINS
+    {
+        return false;
+    }
+    if s.fetch_date != today {
+        // 今天还没成功拉到内容 → 最该做的就是立刻拉，不看 fetch_hour。
+        // 副作用：fetch_hour=9 的用户 8 点开机也会拉到当天内容 ——
+        // 符合「错过更新时间就在启动后触发更新」的诉求。
+        return now.saturating_sub(s.last_fetch_mins) >= retry_backoff_mins(s.fetch_failures);
+    }
+    mins_of_day / 60 >= fetch_hour
+        && now.saturating_sub(s.last_fetch_mins) >= fetch_interval_mins(s)
 }
 
 /// 异步拉取选中类别的全部源，**增量合并**进缓存。
@@ -449,15 +508,20 @@ impl Plugin for NewsPlugin {
         let today = now_ctx.date.clone();
         let now = epoch_mins();
 
-        // 该拉取了（拉取走异步旁路，tick 只负责触发）：从 fetch_hour 起
-        // 每 2 小时一轮增量，只收当天新条目 —— 一手博客下午发的也能看到
+        // 该拉取了（拉取走异步旁路，tick 只负责触发）：陈旧（今天还没成功
+        // 拉到）立即补拉；新鲜则从 fetch_hour 起按存量消费情况 60/120 分钟
+        // 一轮增量，只收当天新条目 —— 一手博客下午发的也能看到
         let need_fetch = with_state(|s| {
             rollover(s, &today);
-            due_fetch(s, now_ctx.minutes, now, cfg.fetch_hour)
+            due_fetch(s, now_ctx.minutes, now, cfg.fetch_hour, &today)
         });
         if need_fetch {
-            // 立刻记账，防止 30 秒后的下个 tick 重复触发
-            with_state(|s| s.last_fetch_mins = now);
+            // 立刻记账 + 标记飞行中，防止 30 秒后的下个 tick 重复起线程
+            // （退避档位 0 时判定会每 30s 放行一次）
+            with_state(|s| {
+                s.last_fetch_mins = now;
+                s.fetch_inflight = true;
+            });
             spawn_fetch(cfg.clone(), today.clone(), ctx.app.clone());
         }
 
@@ -637,20 +701,106 @@ mod tests {
 
     #[test]
     fn 增量节奏判定() {
-        let mk = |last_fetch: u64| NewsState {
+        let mk = |last_fetch: u64, fetch_date: &str| NewsState {
+            fetch_date: fetch_date.into(),
             last_fetch_mins: last_fetch,
             ..Default::default()
         };
-        // 未到抓取时点：一票否决
-        assert!(!due_fetch(&mk(0), 8 * 60, 10_000, 9), "8 点不拉（fetch_hour=9）");
+        let today = "2026-09-07";
+        // 当天已成功拉到：未到抓取时点 → 一票否决
+        assert!(!due_fetch(&mk(0, today), 8 * 60, 10_000, 9, today), "8 点不拉（fetch_hour=9）");
         // 到点 + 今天没拉过（0）：立即拉
-        assert!(due_fetch(&mk(0), 9 * 60, 10_000, 9));
-        // 距上轮不足 2 小时：不拉
-        assert!(!due_fetch(&mk(10_000), 10 * 60, 10_000 + 119, 9));
+        assert!(due_fetch(&mk(0, today), 9 * 60, 10_000, 9, today));
+        // 距上轮不足 2 小时：不拉（还有没看的存量，按 120 分钟）
+        let mut stocked = mk(10_000, today);
+        stocked.items = vec![NewsItem {
+            headline: "h".into(),
+            source: "s".into(),
+            url: "u".into(),
+        }];
+        assert!(!due_fetch(&stocked, 10 * 60, 10_000 + 119, 9, today));
         // 满 2 小时：拉
-        assert!(due_fetch(&mk(10_000), 11 * 60, 10_000 + 120, 9));
+        assert!(due_fetch(&stocked, 11 * 60, 10_000 + 120, 9, today));
         // last_fetch 比当前还大（时钟回拨防御）：不拉
-        assert!(!due_fetch(&mk(20_000), 12 * 60, 10_000, 9));
+        // —— 陈旧路径用 saturating_sub，回拨时差值为 0，退避档位 0 会放行，
+        // 所以这里只测新鲜路径的回拨防御
+        assert!(!due_fetch(&mk(20_000, today), 12 * 60, 10_000, 9, today));
+    }
+
+    #[test]
+    fn 陈旧时立即补拉且不看法点() {
+        let mk = |fetch_date: &str, last_fetch: u64| NewsState {
+            fetch_date: fetch_date.into(),
+            last_fetch_mins: last_fetch,
+            ..Default::default()
+        };
+        // 今天还没成功拉到 → 立即补拉（8 点也拉，不受 fetch_hour=9 闸门限制）
+        assert!(due_fetch(&mk("", 0), 8 * 60, 10_000, 9, "2026-09-07"));
+        assert!(due_fetch(&mk("2026-09-04", 0), 8 * 60, 10_000, 9, "2026-09-07"), "内容是上上周五的");
+        assert!(due_fetch(&mk("2026-09-04", 0), 23 * 60, 10_000, 9, "2026-09-07"));
+        // 当天已成功拉到 → 回到原节奏（看过存量按 60 分钟）
+        let mut fresh = mk("2026-09-07", 10_000);
+        fresh.items = vec![NewsItem {
+            headline: "h".into(),
+            source: "s".into(),
+            url: "u".into(),
+        }];
+        fresh.next_idx = 1; // 存量看完
+        assert!(!due_fetch(&fresh, 10 * 60, 10_000 + 59, 9, "2026-09-07"));
+        assert!(due_fetch(&fresh, 10 * 60, 10_000 + 60, 9, "2026-09-07"), "存量看完 → 60 分钟");
+    }
+
+    #[test]
+    fn 旧缓存没有fetchDate按陈旧补拉() {
+        // 存量 disk 上只有旧字段，没有 fetch_date。今天不是缓存里的那天 →
+        // 陈旧路径：不看 fetch_hour、不看 last_fetch_mins，立即拉
+        let s: NewsState = serde_json::from_str(
+            r#"{"date":"2026-09-04","items":[],"next_idx":0,"digest":"","fetched":true,"last_card_mins":42}"#,
+        )
+        .unwrap();
+        assert_eq!(s.fetch_date, "", "旧缓存缺字段 → serde default 补空串");
+        assert!(due_fetch(&s, 8 * 60, 10_000, 9, "2026-09-07"), "→ 8 点也补拉");
+    }
+
+    #[test]
+    fn 飞行中不重复起拉取线程() {
+        let mut s = NewsState::default(); // fetch_date="" → 陈旧路径，退避 0 分钟
+        s.last_fetch_mins = 10_000;
+        s.fetch_inflight = true;
+        // 刚起来 1 分钟：不放行 —— 否则判定每 30s 过一次会叠并发请求
+        assert!(!due_fetch(&s, 9 * 60, 10_000 + 1, 9, "2026-09-07"));
+        assert!(!due_fetch(&s, 9 * 60, 10_000 + 9, 9, "2026-09-07"));
+        // 飞了 10 分钟还没收尾（线程 panic / 网络卡死）→ 放行，不能永久卡死
+        assert!(due_fetch(&s, 9 * 60, 10_000 + 10, 9, "2026-09-07"), "兜底放行");
+        // 收尾后（fetch_inflight=false）且已失败一次 → 走 5 分钟退避
+        s.fetch_inflight = false;
+        s.fetch_failures = 1;
+        assert!(!due_fetch(&s, 9 * 60, 10_000 + 4, 9, "2026-09-07"));
+        assert!(due_fetch(&s, 9 * 60, 10_000 + 5, 9, "2026-09-07"), "5 分钟后重试");
+    }
+
+    #[test]
+    fn 失败退避逐级放大到30分钟封顶() {
+        assert_eq!(retry_backoff_mins(0), 0);
+        assert_eq!(retry_backoff_mins(1), 5);
+        assert_eq!(retry_backoff_mins(2), 15);
+        assert_eq!(retry_backoff_mins(3), 30);
+        assert_eq!(retry_backoff_mins(99), 30, "封顶 30 分钟");
+    }
+
+    #[test]
+    fn 看过存量才按1小时刷_否则2小时() {
+        let mut s = NewsState::default();
+        s.items = vec![NewsItem {
+            headline: "h".into(),
+            source: "s".into(),
+            url: "u".into(),
+        }];
+        assert_eq!(fetch_interval_mins(&s), 120, "还有没看的存量 → 120 分钟");
+        s.next_idx = 1;
+        assert_eq!(fetch_interval_mins(&s), 60, "存量看完 → 60 分钟");
+        s.next_idx = 5; // 防御：游标越界也按看完处理
+        assert_eq!(fetch_interval_mins(&s), 60);
     }
 
     #[test]
@@ -698,6 +848,10 @@ mod tests {
             fetched: true,
             last_card_mins: 42,
             last_fetch_mins: 4242,
+            fetch_date: "2026-09-01".into(),
+            fetch_failures: 0,
+            last_success_mins: 4242,
+            fetch_inflight: false,
         };
         rollover(&mut s, "2026-09-02");
         assert_eq!(s.date, "2026-09-02");
@@ -706,6 +860,7 @@ mod tests {
         assert!(!s.fetched);
         assert!(s.digest.is_empty());
         assert_eq!(s.last_fetch_mins, 0, "跨天后当轮立即重新拉取");
+        assert_eq!(s.fetch_date, "", "跨天后内容视为陈旧，触发补拉");
 
         // 同日不动
         rollover(&mut s, "2026-09-02");
