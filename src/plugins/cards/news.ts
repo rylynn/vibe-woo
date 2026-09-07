@@ -71,6 +71,10 @@ export const newsFrontend: PluginFrontend = {
       today_count: number;
       remaining: number;
       latest: { headline: string; source: string; url: string }[];
+      /** 上次成功拉取时刻（epoch 分钟）；0 = 从未成功。旧版后端无此字段。 */
+      updated?: number;
+      /** 今天还没成功拉到内容。旧版后端无此字段。 */
+      stale?: boolean;
     };
     const el = document.createElement("div");
     el.className = "pet-card-news-section";
@@ -83,7 +87,17 @@ export const newsFrontend: PluginFrontend = {
       .join("、");
     const head = document.createElement("div");
     head.className = "pet-news-section-head";
-    head.textContent = `${cats} · 今日 ${s.today_count} 条`;
+    let text = `${cats} · 今日 ${s.today_count} 条`;
+    if (s.updated) {
+      const d = new Date(s.updated * 60_000);
+      const hh = String(d.getHours()).padStart(2, "0");
+      const mm = String(d.getMinutes()).padStart(2, "0");
+      text += ` · 更新于 ${hh}:${mm}`;
+    }
+    if (s.stale) {
+      text += " · 更新中";
+    }
+    head.textContent = text;
     el.appendChild(head);
 
     for (const item of s.latest) {

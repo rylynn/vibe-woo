@@ -3,6 +3,7 @@
 import { describe, expect, it } from "vitest";
 import type { CardHost } from "../src/plugins/registry";
 import { stockFrontend } from "../src/plugins/cards/stock";
+import { newsFrontend } from "../src/plugins/cards/news";
 
 /** renderSection 只在点击时才用 openUrl，桩即可。 */
 const host: CardHost = { openUrl: () => {}, markTerm: () => {} };
@@ -44,5 +45,54 @@ describe("股市面板分区", () => {
   it("旧版后端没有 market 字段时退回原有文案", () => {
     const el = stockFrontend.renderSection!({ enabled: true, symbols: [], quotes: [], indices: [] }, host);
     expect(el.textContent).toContain("今日还没有行情");
+  });
+});
+
+describe("资讯面板分区", () => {
+  const base = {
+    enabled: true,
+    categories: ["tech"],
+    today_count: 7,
+    remaining: 3,
+    latest: [],
+    updated: 0,
+    stale: false,
+  };
+
+  it("显示更新时刻", () => {
+    // 本地 14:05 对应的 epoch 分钟
+    const d = new Date();
+    d.setHours(14, 5, 0, 0);
+    const el = newsFrontend.renderSection!(
+      { ...base, updated: Math.floor(d.getTime() / 60_000) },
+      host,
+    );
+    expect(el.textContent).toContain("今日 7 条");
+    expect(el.textContent).toContain("更新于 14:05");
+  });
+
+  it("陈旧时追加更新中", () => {
+    const d = new Date();
+    d.setHours(9, 30, 0, 0);
+    const el = newsFrontend.renderSection!(
+      { ...base, updated: Math.floor(d.getTime() / 60_000), stale: true },
+      host,
+    );
+    expect(el.textContent).toContain("更新于 09:30");
+    expect(el.textContent).toContain("更新中");
+  });
+
+  it("从未成功拉过时不显示更新时间", () => {
+    const el = newsFrontend.renderSection!({ ...base, updated: 0 }, host);
+    expect(el.textContent).not.toContain("更新于");
+  });
+
+  it("旧版后端没有 updated 字段时退回原头部", () => {
+    const el = newsFrontend.renderSection!(
+      { enabled: true, categories: ["tech"], today_count: 7, remaining: 3, latest: [] },
+      host,
+    );
+    expect(el.textContent).toContain("今日 7 条");
+    expect(el.textContent).not.toContain("更新于");
   });
 });
