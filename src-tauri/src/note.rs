@@ -339,7 +339,8 @@ mod tests {
 
         let parsed = parse_notes(&text);
         assert_eq!(parsed.len(), 2);
-        assert_eq!(parsed[0].text, "第一条"); // 设计 2026-09-07：行中反引号归内容
+        assert_eq!(parsed[0].text, "第一条");
+        // 设计 2026-09-07：行中反引号归内容 —— 双 tag 才能稳定往返
         assert_eq!(parsed[0].tags, vec!["todo", "macos"]);
         assert_eq!(parsed[1].text, "第二条");
 
