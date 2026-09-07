@@ -366,6 +366,19 @@ fn due_fetch(s: &NewsState, mins_of_day: u32, now: u64, fetch_hour: u32, today: 
         && now.saturating_sub(s.last_fetch_mins) >= fetch_interval_mins(s)
 }
 
+/// 一轮拉取的结果记账（纯函数，单测入口）：成功 → 内容算当天的、失败计数清零；
+/// 全失败 → 只累加失败计数，**不写 fetch_date**。两种都要收飞行标志。
+fn apply_fetch_result(s: &mut NewsState, today: &str, any_ok: bool, now: u64) {
+    s.fetch_inflight = false;
+    if any_ok {
+        s.fetch_date = today.to_string();
+        s.fetch_failures = 0;
+        s.last_success_mins = now;
+    } else {
+        s.fetch_failures = s.fetch_failures.saturating_add(1);
+    }
+}
+
 /// 异步拉取选中类别的全部源，**增量合并**进缓存。
 ///
 /// digest 只在「当天首批内容」落位时生成一次：增量轮（items 已有内容）
@@ -380,6 +393,7 @@ fn spawn_fetch(cfg: NewsConfig, today: String, app: tauri::AppHandle) {
             Err(_) => return,
         };
         let mut batches = Vec::new();
+        let mut any_ok = false;
         for src in sources_for(&cfg.categories) {
             // 部分源要求 UA；超时 15s —— 单源挂了不拖死整轮
             let req = reqwest::Client::builder()
@@ -397,10 +411,11 @@ fn spawn_fetch(cfg: NewsConfig, today: String, app: tauri::AppHandle) {
                 Ok(text) => {
                     let items = collect_from(&text, src.name, &today);
                     eprintln!("[plugin:{ID}] {}：当天 {} 条", src.name, items.len());
+                    any_ok = true; // 源通了就算成功，哪怕当天 0 条新内容
                     batches.push(items);
                 }
                 Err(e) => {
-                    // 源失败静默：下轮增量（2 小时后）自然重试，不打扰用户
+                    // 源失败静默：下轮按退避自然重试，不打扰用户
                     eprintln!("[plugin:{ID}] 源 {} 拉取失败（静默重试）：{e}", src.name);
                 }
             }
@@ -413,6 +428,7 @@ fn spawn_fetch(cfg: NewsConfig, today: String, app: tauri::AppHandle) {
             s.date = today.clone();
             s.next_idx = s.next_idx.min(s.items.len()); // 防御：游标不越界
             s.fetched = true;
+            apply_fetch_result(s, &today, any_ok, epoch_mins());
             (was_empty && !s.items.is_empty(), s.items.clone())
         });
         save_state(&app);
@@ -801,6 +817,27 @@ mod tests {
         assert_eq!(fetch_interval_mins(&s), 60, "存量看完 → 60 分钟");
         s.next_idx = 5; // 防御：游标越界也按看完处理
         assert_eq!(fetch_interval_mins(&s), 60);
+    }
+
+    #[test]
+    fn 失败记账不写成功标记_成功清零计数() {
+        let mut s = NewsState::default();
+        s.fetch_inflight = true;
+        // 全源失败：只累加计数，fetch_date 保持空 → 下轮按退避补拉
+        apply_fetch_result(&mut s, "2026-09-07", false, 10_000);
+        assert!(!s.fetch_inflight, "失败也要收飞行标志，否则永远不再重试");
+        assert_eq!(s.fetch_failures, 1);
+        assert_eq!(s.fetch_date, "", "失败当天不能算拉到过");
+        assert_eq!(s.last_success_mins, 0, "失败不刷新面板的更新时间");
+        // 连续失败累加到封顶（u8 溢出用 saturating）
+        apply_fetch_result(&mut s, "2026-09-07", false, 10_000);
+        assert_eq!(s.fetch_failures, 2);
+        // 成功：记日期、清零计数、记时刻，并收飞行标志
+        apply_fetch_result(&mut s, "2026-09-07", true, 10_100);
+        assert_eq!(s.fetch_date, "2026-09-07");
+        assert_eq!(s.fetch_failures, 0, "成功即清零");
+        assert_eq!(s.last_success_mins, 10_100);
+        assert!(!s.fetch_inflight, "收尾必须收飞行标志，否则补拉被卡 10 分钟");
     }
 
     #[test]
