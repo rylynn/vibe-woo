@@ -335,12 +335,15 @@ fn parse_line(line: &str) -> Option<Quote> {
         return None;
     }
     let change_pct = (price - prev_close) / prev_close * 100.0;
+    let name = f[1].trim().to_string();
+    // symbol 会被 move，date 必须在构造 Quote 之前算好。
+    let date = quote_ts_local_date(&f, &symbol);
     Some(Quote {
         symbol,
-        name: f[1].trim().to_string(),
+        name,
         price,
         change_pct,
-        date: String::new(), // Task 3 接真实时间戳
+        date,
     })
 }
 
@@ -838,6 +841,25 @@ mod tests {
         assert!(!is_us_dst(d(11, 1)), "11-01 起冬令时");
         assert!(!is_us_dst(d(1, 15)), "1 月冬令时");
         assert!(is_us_dst(d(7, 15)), "7 月夏令时");
+    }
+
+    #[test]
+    fn 解析结果带上本地日期() {
+        let q = parse_line(A_SHARE).unwrap();
+        assert_eq!(q.symbol, "sh600519");
+        assert_eq!(q.date, "2026-09-02", "A股 14 位时间戳 → 本地日期");
+        let q2 = parse_line(US_SHARE).unwrap();
+        assert_eq!(q2.date, "2026-09-02", "美股美东 9/1 16:00 → 北京 9/2");
+    }
+
+    #[test]
+    fn 旧缓存缺date字段视为陈旧() {
+        let q: Quote = serde_json::from_str(
+            r#"{"symbol":"sh600519","name":"n","price":1.0,"change_pct":0.0}"#,
+        )
+        .unwrap();
+        assert_eq!(q.date, "", "旧缓存没有 date → 空串");
+        assert_eq!(market_state("2026-09-07", &[q]), MarketState::Closed, "→ 判为陈旧");
     }
 
     #[test]
