@@ -89,7 +89,8 @@ sensor.rs / envsense.rs (120ms 采样，空闲退避 500ms / 锁屏 1s)
 - 每次合入必须显式带版本号（commit message / PR 描述里写 `版本: x.y.z`）。**用户没给就先问，不许自己编**。
 - 版本真源是 `src-tauri/tauri.conf.json` 的 `version`，必须与 `src-tauri/Cargo.toml`、`package.json` 三处同步改，缺一处算没做完。
 - 版本号只进不退；语义化：修 bug/文案 = patch，加功能 = minor，配置/数据格式不兼容 = major；拿不准按 minor 提并跟用户确认。
-- 合入前检查：`npx tsc --noEmit`、`src-tauri` 下 `cargo check`、`npx vitest run` 全绿；改过 `worker-edgeone/**/lib-account.js` 还要跑 `pnpm test:sync`。
+- 合入前检查：`npx tsc --noEmit`、`src-tauri` 下 `cargo check`、`npx vitest run` 全绿；改过同步服务还要跑 `pnpm test:sync`（业务逻辑）与 `pnpm test:worker`（Cloudflare 适配层）。
+- 同步服务有两套部署：`worker-edgeone/`（EdgeOne Pages，需备案域名才能长期访问）与 `worker/`（Cloudflare Worker，免备案）。**两边共用同一份 `worker-edgeone/edge-functions/api/lib-account.js`**，各目录只放运行时适配层 —— 不要把业务逻辑复制成两份。
 - 「关于」面板的构建时间/Git 提交由 `src-tauri/build.rs` 构建期注入，不要手工维护。
 
 ## 其他

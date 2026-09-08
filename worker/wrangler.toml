@@ -2,12 +2,16 @@ name = "vibe-pet-sync"
 main = "src/index.js"
 compatibility_date = "2024-12-01"
 
-# KV 命名空间需先创建：
-#   npx wrangler kv namespace create SYNC
-# 然后把输出的 id 填到下面并取消注释
-# [[kv_namespaces]]
-# binding = "SYNC"
-# id = "<填入你的 namespace id>"
+# KV 命名空间：
+#   npx wrangler kv namespace create SYNC_KV
+# 把输出的 id 填到下面（binding 名必须是 SYNC_KV，与 EdgeOne 版一致）
+[[kv_namespaces]]
+binding = "SYNC_KV"
+id = "<填入你的 namespace id>"
 
-# 管理密钥（签发注册邀请码），部署后设置：
-#   npx wrangler secret put ADMIN_TOKEN
+# 管理看板口令（可选，不配则 /api/admin/* 整体禁用）：
+#   npx wrangler secret put ADMIN_USER
+#   npx wrangler secret put ADMIN_PASS
+
+# 排障用（可选）：把内部异常摘要放进响应头 X-Pet-Sync-Error
+#   npx wrangler secret put DEBUG_ERRORS   # 值填 1

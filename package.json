@@ -13,6 +13,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:sync": "node scripts/test-sync.mjs",
+    "test:worker": "node scripts/test-worker.mjs",
     "tauri": "tauri",
     "build:app": "tauri build",
     "build:release": "tauri build --config src-tauri/tauri.release.conf.json",
