@@ -1,19 +1,31 @@
 /**
- * 本机同步服务 —— 用于 KV 申请期间的功能验证与 admin 看板联调。
+ * 自托管同步服务（单机 Node 版）。
  *
- * 复用与线上完全相同的业务逻辑（lib-account.js），存储改为一个 JSON 文件，
- * 因此跑通的行为就是线上行为，不会出现「本地过、线上挂」。
+ * 复用与线上**完全相同**的业务逻辑（lib-account.js），只有存储换成一个
+ * JSON 文件 —— 所以这里跑通的行为就是线上行为，不会出现「本地过、线上挂」。
  *
- * 用法：
- *   node worker-edgeone/local-dev.js [端口]
+ * 两种用法：
  *
- * 默认监听 8787。然后在宠物「好友 → 服务器」填 http://localhost:8787/api。
+ * 1) 本地联调
+ *      node worker-edgeone/local-dev.js [端口]
+ *    然后在宠物「设置 → 同步服务（高级）」填 http://localhost:8787/api
  *
- * admin 联调：本地起服务前设置环境变量（与线上控制台 Secret 同名）
- *   ADMIN_USER=xxx ADMIN_PASS=yyy node worker-edgeone/local-dev.js
- * 然后打开 worker-edgeone/admin/index.html，服务器填 http://localhost:8787。
+ * 2) 部署到自己的服务器（国内机器没备案时的可行方案）
+ *      node worker-edgeone/local-dev.js 8787
+ *    用 systemd 或 pm2 守护，安全组放行该端口，
+ *    客户端填 http://<公网IP>:8787/api
+ *    **国内云主机未备案时 80/443 会被阻断，必须用非标端口（如 8787）。**
  *
- * 注意：这是测试工具，不是生产服务 —— 单机、无鉴权落盘明文（密码仍是哈希）。
+ * 环境变量：
+ *   ADMIN_USER / ADMIN_PASS   admin 看板口令（不设则 /api/admin/* 整体禁用）
+ *   DEBUG_ERRORS=1            把内部异常摘要放进响应头，排障用
+ *   SYNC_DATA_FILE            数据文件路径（默认 worker-edgeone/.local-data.json）
+ *   SYNC_HOST                 监听地址（默认 0.0.0.0，即允许外部访问）
+ *
+ * 自托管前要知道的三件事：
+ *   - 单机单文件、没有副本 —— 数据文件要定期备份
+ *   - 明文 HTTP，会话 token 在链路上可被窃听（域名备案后请改用 https）
+ *   - 密码存的是 PBKDF2 哈希，但账号、昵称、宠物名是明文落盘的
  */
 
 import { createServer } from "node:http";
@@ -23,7 +35,9 @@ import { fileURLToPath } from "node:url";
 import { dispatch, CORS, statusFor } from "./edge-functions/api/lib-account.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const DATA_FILE = resolve(HERE, ".local-data.json");
+const DATA_FILE = process.env.SYNC_DATA_FILE
+  ? resolve(process.env.SYNC_DATA_FILE)
+  : resolve(HERE, ".local-data.json");
 
 /** 极简文件存储：进程内 Map 落盘，接口与 KV 一致。 */
 class FileStore {
@@ -63,6 +77,8 @@ class FileStore {
 
 const store = new FileStore(DATA_FILE);
 const port = Number(process.argv[2] || 8787);
+/** 默认监听所有网卡：自托管时要能被外部访问。只想本机联调就设 SYNC_HOST=127.0.0.1。 */
+const HOST = process.env.SYNC_HOST || "0.0.0.0";
 
 /** 与线上一致：内部异常摘要默认不回传，需要时 DEBUG_ERRORS=1。 */
 function debugErrors() {
@@ -123,10 +139,15 @@ createServer(async (req, res) => {
   console.log(
     `${req.method} ${url.pathname} → ${status} ${out.slice(0, 90)}`,
   );
-}).listen(port, () => {
-  console.log(`[vibe-pet 本地同步服务] http://localhost:${port}`);
+}).listen(port, HOST, () => {
+  console.log(`[vibe-pet 同步服务] 监听 http://${HOST}:${port}`);
   console.log(`数据文件：${DATA_FILE}`);
-  console.log("在宠物「好友 → 服务器」填 http://localhost:" + port + "/api");
+  if (HOST === "127.0.0.1" || HOST === "localhost") {
+    console.log(`本机联调：客户端服务地址填 http://${HOST}:${port}/api`);
+  } else {
+    console.log(`客户端服务地址填：http://<这台机器的IP>:${port}/api`);
+    console.log("提醒：国内云主机未备案时 80/443 会被阻断，别用这两个端口");
+  }
   if (!process.env.ADMIN_USER || !process.env.ADMIN_PASS) {
     console.log("提示：未设置 ADMIN_USER/ADMIN_PASS，admin 接口不可用");
   }

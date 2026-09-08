@@ -2,12 +2,10 @@ name = "vibe-pet-sync"
 main = "src/index.js"
 compatibility_date = "2024-12-01"
 
-# KV 命名空间：
-#   npx wrangler kv namespace create SYNC_KV
-# 把输出的 id 填到下面（binding 名必须是 SYNC_KV，与 EdgeOne 版一致）
+# KV 命名空间（binding 名必须是 SYNC_KV，与 EdgeOne 版一致）
 [[kv_namespaces]]
 binding = "SYNC_KV"
-id = "<填入你的 namespace id>"
+id = "456dd47476ee4ccdbbaeaee92f90e84c"
 
 # 管理看板口令（可选，不配则 /api/admin/* 整体禁用）：
 #   npx wrangler secret put ADMIN_USER

@@ -2,7 +2,8 @@
 //!
 //! 服务地址内置在客户端里：用户不需要、也不该手填服务器。
 //! 配置里的 `social.server` 保留为**覆盖口子** —— 留空即用内置域名，
-//! 填了就走填的（本地起 `worker-edgeone/local-dev.js` 联调用）。
+//! 填了就走填的（本机联调，或自托管到自己的服务器 —— 见
+//! `worker-edgeone/local-dev.js` 顶部的用法说明）。
 //!
 //! 之前 `post_authed` 在 socialcmd.rs 与 socialdrive.rs 各有一份，
 //! 两份的错误文案和超时都不一样，改一处漏一处。这里收敛成一份。
@@ -15,7 +16,8 @@ use crate::configcmd;
 ///
 /// **必须带 `/api`**：边缘函数文件在 `edge-functions/api/[[default]].js`，
 /// 按 Pages 的文件路由它只挂在 `/api/*` 上；请求 `/heartbeat` 根本不会命中。
-/// 本地联调同理，见 `worker-edgeone/local-dev.js` 顶部的用法说明。
+/// 自托管同理：国内云主机未备案时只能用 IP + 非标端口，见
+/// `worker-edgeone/local-dev.js` 顶部的用法说明。
 pub const DEFAULT_SYNC_BASE_URL: &str = "https://vibe-woo-moyzkajk.edgeone.cool/api";
 
 /// 实际使用的服务地址：配置留空 → 内置域名。
@@ -30,15 +32,35 @@ pub fn base_url() -> String {
         return DEFAULT_SYNC_BASE_URL.to_string();
     }
     let s = s.trim_end_matches('/');
-    let ok = s.starts_with("https://")
-        || s.starts_with("http://127.0.0.1")
-        || s.starts_with("http://localhost");
+    let ok = s.starts_with("https://") || (s.starts_with("http://") && host_is_ip(s));
     if ok {
         s.to_string()
     } else {
-        eprintln!("[sync] 服务地址不合规（须 https 或本机），回落内置地址");
+        eprintln!("[sync] 服务地址不合规（https，或 http + IP），回落内置地址");
         DEFAULT_SYNC_BASE_URL.to_string()
     }
+}
+
+/// 取 URL 的 host（去掉协议、端口、路径）。取不到时返回空串。
+fn host_of(url: &str) -> &str {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let authority = rest.split_once('/').map_or(rest, |(a, _)| a);
+    let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    host.rsplit_once(':').map_or(host, |(h, _)| h)
+}
+
+/// host 是不是「没法备案、只能明文」的那类：本机，或 IPv4 字面量。
+///
+/// 国内云主机没备案时 80/443 会被阻断，只剩「IP + 非标端口」一条路，
+/// 而 IP 无从备案 —— 只能放行明文。反过来，**有域名就必须走 https**：
+/// 域名能备案、证书也免费，没有理由让 Bearer token 裸奔。
+pub fn host_is_ip(url: &str) -> bool {
+    let h = host_of(url);
+    if h == "localhost" || h == "127.0.0.1" {
+        return true;
+    }
+    let parts: Vec<&str> = h.split('.').collect();
+    parts.len() == 4 && parts.iter().all(|p| p.parse::<u8>().is_ok())
 }
 
 /// 复用同一个 Client：每次新建都要重建连接池与 TLS 握手，
@@ -116,22 +138,52 @@ mod tests {
     }
 
     #[test]
-    fn 明文http一律回落到内置地址() {
-        // 填 http:// 会让 Bearer token 明文上网
-        for bad in ["http://evil.example", "ftp://x", "javascript:alert(1)"] {
+    fn 有域名就必须走https() {
+        // 域名能备案、证书免费 —— 没有理由让 Bearer token 走明文
+        for bad in [
+            "http://evil.example",
+            "http://example.com:8787",
+            "ftp://x",
+            "javascript:alert(1)",
+        ] {
             let s = bad.trim_end_matches('/');
-            let ok = s.starts_with("https://")
-                || s.starts_with("http://127.0.0.1")
-                || s.starts_with("http://localhost");
+            let ok = s.starts_with("https://") || (s.starts_with("http://") && host_is_ip(s));
             assert!(!ok, "不该放行：{bad}");
         }
-        // 本机 http 要放行，否则 local-dev.js 没法联调
-        for good in ["http://127.0.0.1:8787", "http://localhost:8787", "https://x.example"] {
-            let ok = good.starts_with("https://")
-                || good.starts_with("http://127.0.0.1")
-                || good.starts_with("http://localhost");
+    }
+
+    #[test]
+    fn 本机与纯IP可以走明文http() {
+        // 国内云主机没备案时 80/443 被阻断，只剩 IP + 非标端口；
+        // 而 IP 无从备案，只能放行。本机联调同理。
+        for good in [
+            "http://127.0.0.1:8787",
+            "http://localhost:8787",
+            "http://43.139.12.34:8787",
+            "http://10.0.0.5",
+            "https://x.example",
+            "https://43.139.12.34:8787",
+        ] {
+            let ok = good.starts_with("https://") || (good.starts_with("http://") && host_is_ip(good));
             assert!(ok, "该放行：{good}");
         }
+    }
+
+    #[test]
+    fn host提取要能剥掉端口与路径() {
+        assert_eq!(host_of("http://1.2.3.4:8787"), "1.2.3.4");
+        assert_eq!(host_of("http://1.2.3.4/api/status"), "1.2.3.4");
+        assert_eq!(host_of("https://sync.example.com"), "sync.example.com");
+        assert_eq!(host_of("http://u:p@1.2.3.4:9/x"), "1.2.3.4");
+    }
+
+    #[test]
+    fn 非法IPv4不算IP() {
+        // 999 不是一个字节，这种 host 不该被当成 IP 放行明文
+        assert!(!host_is_ip("http://999.1.1.1:8787"));
+        assert!(!host_is_ip("http://1.2.3:8787"));
+        assert!(!host_is_ip("http://1.2.3.4.5:8787"));
+        assert!(host_is_ip("http://1.2.3.4:8787"));
     }
 
     #[test]
