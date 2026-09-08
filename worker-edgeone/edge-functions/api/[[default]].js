@@ -18,6 +18,8 @@
  *   POST /api/logout          Bearer token —— 吊销当前会话
  *   GET  /api/me              Bearer token
  *   POST /api/profile/pet-name / friends/add / friends/remove / heartbeat / visit / home
+ *   POST /api/greet           { target } —— 打招呼（60 秒冷却）
+ *   POST /api/online/random   Bearer token —— 今日随机在线用户（按日期确定性取样）
  *   GET  /api/friends         Bearer token
  *   POST /api/admin/login     { user, pass }（ADMIN_USER/ADMIN_PASS 校验）→ { token }
  *   GET  /api/admin/overview|users|user?uid=   Bearer admin token

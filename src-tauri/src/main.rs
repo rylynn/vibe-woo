@@ -31,6 +31,7 @@ mod stats;
 mod share;
 mod social;
 mod socialcmd;
+mod syncclient;
 mod talkdrive;
 mod shortcut;
 mod sensor;
@@ -98,6 +99,9 @@ fn main() {
             socialcmd::register,
             socialcmd::login,
             socialcmd::logout,
+            socialcmd::auto_register,
+            socialcmd::online_random,
+            socialcmd::greet,
             socialcmd::add_friend,
             socialcmd::remove_friend,
             socialcmd::set_pet_name,

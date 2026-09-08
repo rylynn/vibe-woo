@@ -27,17 +27,19 @@
   <body>
     <main>
       <h1>Vibe Pet 同步服务已部署</h1>
-      <p>把这个地址（含 <code>/api</code>）填进宠物设置的「好友 → 服务器」即可。</p>
+      <p>地址已内置在客户端里（<code>/api</code> 前缀），用户不需要手填。</p>
       <p>支持的端点：</p>
       <ul>
-        <li><code>POST /api/register</code> — 邀请码注册，返回 uid / 会话 token</li>
+        <li><code>POST /api/register</code> — 注册，返回 uid / 会话 token（公共码可重复使用）</li>
         <li><code>POST /api/login</code> — 登录，返回会话 token（90 天滚动续期）</li>
         <li><code>POST /api/logout</code> — 登出，吊销当前会话（Bearer）</li>
         <li><code>GET /api/me</code> — 我的账号信息（Bearer）</li>
-        <li><code>POST /api/profile/pet-name</code> — 改宠物名（Bearer）</li>
+        <li><code>POST /api/profile/pet-name</code> — 改宠物名，1–30 字白名单（Bearer）</li>
         <li><code>POST /api/friends/add</code> / <code>friends/remove</code> — 加/删好友（Bearer）</li>
         <li><code>GET /api/friends</code> — 好友列表（Bearer）</li>
-        <li><code>POST /api/heartbeat</code> — 心跳，可捎带当日用量计数（Bearer）</li>
+        <li><code>POST /api/heartbeat</code> — 心跳，捎带用量，一次往返带回好友/事件/访客/今日招呼（Bearer）</li>
+        <li><code>POST /api/online/random</code> — 今日随机在线用户，按日期确定性取样（Bearer）</li>
+        <li><code>POST /api/greet</code> — 打招呼，60 秒冷却，只中转话术文本（Bearer）</li>
         <li><code>POST /api/visit</code> / <code>home</code> — 串门 / 回家（Bearer）</li>
         <li><code>POST /api/admin/login</code> — 管理员登录（环境变量 ADMIN_USER / ADMIN_PASS）</li>
         <li><code>GET /api/admin/overview|users|user?uid=</code> — 数据看板查询（admin Bearer）</li>

@@ -60,15 +60,19 @@ pub fn valid_nick(s: &str) -> Result<String, String> {
     Ok(s)
 }
 
-/// 宠物名：1-24 字。返回清洗后的名字。
+/// 宠物名：1-30 字。返回清洗后的名字。
+///
+/// 与服务端 `PET_NAME_MAX` 保持一致（改一处必须改另一处）。
+/// 白名单字符集本身已经挡住注入与脚本 —— 不做黑名单过滤，
+/// 黑名单永远漏，白名单才是防线。
 pub fn valid_pet_name(s: &str) -> Result<String, String> {
     let s = clean(s);
     let n = s.chars().count();
     if n < 1 {
         return Err("宠物名不能为空".into());
     }
-    if n > 24 {
-        return Err("宠物名最多 24 字".into());
+    if n > 30 {
+        return Err("宠物名最多 30 字".into());
     }
     if !s
         .chars()
@@ -138,10 +142,37 @@ mod tests {
     }
 
     #[test]
-    fn 宠物名限二十四字() {
+    fn 宠物名限三十字() {
+        // 上限与服务端 PET_NAME_MAX 相同（改一处必须改另一处）
         assert!(valid_pet_name("像素崽").is_ok());
-        assert!(valid_pet_name(&"名".repeat(25)).is_err());
+        assert!(valid_pet_name(&"名".repeat(30)).is_ok());
+        assert!(valid_pet_name(&"名".repeat(31)).is_err());
         assert!(valid_pet_name("").is_err());
+    }
+
+    #[test]
+    fn 宠物名挡住注入与脚本() {
+        // 白名单是防线：不是「过滤掉危险字符」，而是「只放行安全字符」
+        for bad in [
+            "'; DROP TABLE users--",
+            "<script>alert(1)</script>",
+            "<img onerror=1>",
+            "\" onmouseover=\"alert(1)",
+            "名; rm -rf /",
+        ] {
+            assert!(valid_pet_name(bad).is_err(), "应被拒绝：{bad}");
+        }
+        // 分隔符要放行，否则用户连「阿咪·二号」都起不了。
+        // 注意括号与引号不在白名单内（前后端一致），宁可严一点。
+        assert!(valid_pet_name("阿咪·二号").is_ok());
+        assert!(valid_pet_name("咪咪 - 2").is_ok());
+    }
+
+    #[test]
+    fn 宠物名控制字符被清洗而非报错() {
+        let cleaned = valid_pet_name("阿咪\u{0007}").unwrap();
+        assert_eq!(cleaned, "阿咪", "控制字符应被剥离");
+        assert_eq!(valid_pet_name("  阿咪  ").unwrap(), "阿咪", "首尾空白应被去掉");
     }
 
     #[test]

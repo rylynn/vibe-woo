@@ -22,6 +22,8 @@
  *   visitors_<uid>     当前在家访客 [{ uid, nick, pet_name, at }]（≤3）
  *   events_<uid>       事件队列（读即清空，上限 20 条；无 TTL，靠长度限制）
  *   rl_<iphash>        限频标记 { at }（10 秒，时间戳判断）
+ *   gr_<uid>           招呼限频标记 { at }（60 秒，时间戳判断）
+ *   greeted_<uid>_<yyyymmdd> 当日互打招呼的 uid 数组（键随日期自然过期，无需清理）
  *   users_idx          全部 uid 的 JSON 数组（注册追加 + 心跳懒补录）
  *   usage_<uid>        个人按日用量 { days: { "YYYY-MM-DD": {...} }, last: {...} }（保留 30 天）
  *   stats_<yyyymmdd>   全站当日用量 { reminders, notes, pomodoros, online_mins, active: [uid] }（索引保留 90 天）
@@ -44,7 +46,20 @@ const STATS_KEEP_DAYS = 90;
 const PASS_MIN = 6;
 const PASS_MAX = 30;
 const NICK_MAX = 120; // 按码点计
-const PET_NAME_MAX = 24;
+const PET_NAME_MAX = 30;
+/** 招呼冷却：同一用户对任何人两次招呼的最小间隔。服务端权威，客户端只做倒计时展示。 */
+const GREET_COOLDOWN_MS = 60 * 1000;
+/** 今日在线推荐：每次返回的人数区间（按日期确定性取样，同一天名单稳定）。 */
+const ONLINE_PICK_MIN = 3;
+const ONLINE_PICK_MAX = 5;
+/** 招呼话术长度上限（按码点）。事件有 512 字节硬上限，必须卡住。 */
+const GREET_LINE_MAX = 40;
+/**
+ * 公共邀请码：客户端首次启动自动开户时使用，可无限次重复使用。
+ * 命中此码时跳过一次性校验、且不写回 used_by —— 不拒绝、不计数。
+ * 格式须满足 validInvite（去掉易混淆的 0/O/1/I）。
+ */
+const PUBLIC_INVITE = "PET888";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -80,7 +95,9 @@ async function nickKey(nick) {
     "SHA-256",
     new TextEncoder().encode(nick.toLowerCase()),
   );
-  return `nick_${digest}`.slice(0, 80); // 摘要 64 hex，远低于键长限制
+  // 必须 hex() 转字符串：直接插值 ArrayBuffer 会得到 "[object ArrayBuffer]"，
+  // 那样所有昵称会撞到同一个键上（第二个用户起永远报「昵称已被占用」）。
+  return `nick_${hex(digest)}`.slice(0, 80); // 摘要 64 hex，远低于键长限制
 }
 
 // ---------- 校验（服务端权威白名单） ----------
@@ -122,6 +139,56 @@ function validDate(s) {
 function clampCount(v) {
   const n = Number(v) || 0;
   return Math.min(1_000_000, Math.max(0, Math.floor(n)));
+}
+
+/**
+ * 日期键（YYYY-MM-DD）。固定按 UTC+8 计算：用户群集中在一个时区，
+ * 而边缘节点可能落在任意时区 —— 用服务器本地时间会让「今天」在节点间漂移。
+ */
+function todayKey(now = Date.now()) {
+  const d = new Date(now + 8 * 3600 * 1000);
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(d.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+/** 招呼记录键：KV 键只允许字母数字下划线，日期里的横杠要去掉。 */
+function greetedKey(uid, date) {
+  return `greeted_${uid}_${date.replace(/-/g, "")}`;
+}
+
+// ---------- 确定性随机（同一天同一用户拿到同一批推荐） ----------
+
+function hashSeed(str) {
+  let h = 2166136261; // FNV-1a 32 位
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
+/** mulberry32：小而稳的确定性 PRNG，够做名单洗牌，不需要密码学强度。 */
+function mulberry32(a) {
+  return function next() {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** 原地 Fisher-Yates 洗牌，用 seed 驱动 —— 同 seed 必得同顺序。 */
+function seededShuffle(arr, seed) {
+  const rnd = mulberry32(hashSeed(seed));
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(rnd() * (i + 1));
+    const tmp = arr[i];
+    arr[i] = arr[j];
+    arr[j] = tmp;
+  }
+  return arr;
 }
 
 // ---------- 密码哈希（PBKDF2，WebCrypto 标准，两端可用） ----------
@@ -228,10 +295,15 @@ async function register(store, bodyReq) {
   }
   if (!validInvite(invite)) return { error: "邀请码格式不正确" };
 
-  const inviteRaw = await store.get(`invite_${invite}`);
-  if (!inviteRaw) return { error: "邀请码不存在" };
-  const inviteData = JSON.parse(inviteRaw);
-  if (inviteData.used_by) return { error: "邀请码已被使用" };
+  // 公共码是自动开户通道：可重复使用，不参与一次性消耗，也不写回 used_by。
+  const isPublic = invite === PUBLIC_INVITE;
+  let inviteData = null;
+  if (!isPublic) {
+    const inviteRaw = await store.get(`invite_${invite}`);
+    if (!inviteRaw) return { error: "邀请码不存在" };
+    inviteData = JSON.parse(inviteRaw);
+    if (inviteData.used_by) return { error: "邀请码已被使用" };
+  }
 
   if (await store.get(`acct_${account}`)) return { error: "账号已被注册" };
   const nKey = await nickKey(nick);
@@ -256,8 +328,10 @@ async function register(store, bodyReq) {
   await store.put(`friends_${uid}`, JSON.stringify([]));
   await indexUser(store, uid);
 
-  inviteData.used_by = uid;
-  await store.put(`invite_${invite}`, JSON.stringify(inviteData));
+  if (inviteData) {
+    inviteData.used_by = uid;
+    await store.put(`invite_${invite}`, JSON.stringify(inviteData));
+  }
   const ownInvite = randomInvite();
   await store.put(`invite_${ownInvite}`, JSON.stringify({ by: uid, used_by: null }));
 
@@ -538,10 +612,14 @@ async function heartbeat(store, uid, bodyReq) {
     ? bodyReq.state
     : "idle";
   const affinity = Math.min(100, Math.max(0, Number(bodyReq.affinity) || 0));
+  const now = Date.now();
+  // hidden：用户自己拨的隐身开关。带着它，服务端才能把隐身的人
+  // 从推荐/招呼/串门里排除 —— 否则「隐身」只是本机不显示状态而已。
   await store.put(`hb_${uid}`, JSON.stringify({
     state,
     affinity,
-    last_seen: Date.now(),
+    hidden: bodyReq.hidden === true,
+    last_seen: now,
   }));
 
   // 宠物名随心跳兜底同步（改名接口失败时的重试通道）
@@ -558,16 +636,34 @@ async function heartbeat(store, uid, bodyReq) {
   await recordUsage(store, uid, bodyReq.usage);
   await indexUser(store, uid);
 
-  // 一次往返带回全部所需：好友、事件、在家访客（省请求量，配合限频）
+  // 一次往返带回全部所需：好友、事件、在家访客、今日打招呼名单（省请求量）
   const friends = await listFriends(store, uid);
   const events = await pullEvents(store, uid);
   const visitors = await activeVisitors(store, uid);
+  // 今日打过招呼、且此刻仍在线的人 —— 直接作为串门候选下发，
+  // 省得客户端拿一串 uid 去猜谁在线。列表通常只有几个人，逐个读可接受。
+  const greetedToday = [];
+  for (const id of await greetedList(store, uid, todayKey())) {
+    const hb = JSON.parse((await store.get(`hb_${id}`)) || "null");
+    if (!hb || now - hb.last_seen >= OFFLINE_AFTER_MS) continue;
+    if (hb.hidden) continue; // 对方后来隐身了，就别再去串门
+    const raw = await store.get(`u_${id}`);
+    if (!raw) continue;
+    const u = JSON.parse(raw);
+    greetedToday.push({
+      uid: id,
+      nick: u.nick,
+      pet_name: u.pet_name,
+      state: hb.state,
+    });
+  }
   return {
     ok: true,
     next_secs: DEFAULT_HEARTBEAT_SECS,
     friends,
     events: events.events,
     visitors,
+    greeted_today: greetedToday,
   };
 }
 
@@ -591,6 +687,133 @@ async function pullEvents(store, uid) {
   return { events: list };
 }
 
+// ---------- 今日打招呼记录 ----------
+
+async function greetedList(store, uid, date) {
+  return JSON.parse((await store.get(greetedKey(uid, date))) || "[]");
+}
+
+/** 单日打招呼记录上限。心跳会逐个读这些人，封太大会放大 KV 读次数。 */
+const GREETED_DAY_MAX = 20;
+
+async function addGreeted(store, uid, date, other) {
+  const list = await greetedList(store, uid, date);
+  if (list.includes(other)) return;
+  list.push(other);
+  while (list.length > GREETED_DAY_MAX) list.shift(); // 单日封顶
+  await store.put(greetedKey(uid, date), JSON.stringify(list));
+}
+
+/** 今天我和 target 打过招呼吗（自己这侧的记录即算，不要求对方回打）。 */
+async function greetedToday(store, uid, target) {
+  return (await greetedList(store, uid, todayKey())).includes(target);
+}
+
+// ---------- 打招呼 ----------
+
+/**
+ * 招呼话术白名单 —— 这条文本会原样渲染到对方屏幕的气泡上，
+ * 只放行中英文/数字/空格与少量标点，尖括号、引号、反斜杠一律不收。
+ * 话术由发起方本地按自己宠物心情挑好，服务端只中转：
+ * 心情本身（tempo/mood/activity）绝不出本机。
+ */
+function validGreetLine(s) {
+  if (typeof s !== "string") return false;
+  const n = cpLen(s);
+  if (n < 1 || n > GREET_LINE_MAX) return false;
+  // 尖括号与引号一律不收（防注入/防脚本）；全角括号要放行，语料库大量使用
+  return /^[\p{L}\p{N}\s·_\-，。！？、,.!?~～（）()「」『』]+$/u.test(s);
+}
+
+/** 按码点截断（事件有 512 字节上限，长昵称必须先切短）。 */
+function cpSlice(s, n) {
+  return [...String(s ?? "")].slice(0, n).join("");
+}
+
+async function greet(store, uid, bodyReq) {
+  const target = await resolveTarget(store, bodyReq.target);
+  if (!target) return { error: "找不到这位用户" };
+  if (target === uid) return { error: "不能跟自己打招呼" };
+
+  const now = Date.now();
+  const rl = JSON.parse((await store.get(`gr_${uid}`)) || "null");
+  const lastAt = Number(rl?.at || 0);
+  if (lastAt && now - lastAt < GREET_COOLDOWN_MS) {
+    return {
+      error: "招呼太密啦，歇一会儿",
+      cooldown_secs: Math.ceil((GREET_COOLDOWN_MS - (now - lastAt)) / 1000),
+    };
+  }
+
+  const hb = JSON.parse((await store.get(`hb_${target}`)) || "null");
+  if (!hb || now - hb.last_seen >= OFFLINE_AFTER_MS) {
+    return { error: "对方已经不在了" };
+  }
+  // 隐身的人不该被打扰 —— 隐身是「完全不让人看见」的开关，
+  // 只在本地把状态压成 idle 是不够的
+  if (hb.hidden) return { error: "对方现在不想被打扰" };
+
+  await store.put(`gr_${uid}`, JSON.stringify({ at: now }));
+
+  // 双向记录：我记下 TA，TA 记下我 —— 串门候选与非对称回打都靠这份名单
+  const date = todayKey(now);
+  await addGreeted(store, uid, date, target);
+  await addGreeted(store, target, date, uid);
+
+  const meUser = JSON.parse(await store.get(`u_${uid}`));
+  // line 由发起方本地按宠物心情挑好；非法或缺失时兜底成一句中性话术，
+  // 而不是报错 —— 旧客户端、异常客户端都不该让打招呼这件事失败。
+  const rawLine = cpSlice(clean(bodyReq.line), GREET_LINE_MAX);
+  await pushEvent(store, target, {
+    type: "greet",
+    from_uid: uid,
+    from_nick: cpSlice(meUser.nick, 24),
+    pet_name: cpSlice(meUser.pet_name, 16),
+    line: validGreetLine(rawLine) ? rawLine : "（挥了挥爪子）",
+  });
+  return { ok: true, cooldown_secs: Math.ceil(GREET_COOLDOWN_MS / 1000) };
+}
+
+// ---------- 今日在线推荐 ----------
+
+/**
+ * 今天随机派发的在线用户：从全站在线者里按「用户 + 日期」确定性取样。
+ * 同一天反复打开面板拿到的是同一批人（避免刷一次换一批），
+ * 过滤掉自己、已是好友的、以及心跳判定已离线的。算法不优化，够用即可。
+ */
+async function onlineRandom(store, uid) {
+  const now = Date.now();
+  const date = todayKey(now);
+  const mine = new Set((await friendList(store, uid)).map((f) => f.uid));
+
+  // 先洗牌再逐个读：凑够人数就停。反过来的写法（全量读完再洗牌）
+  // 在用户量大时会做几百次无谓的 KV 读。
+  const idx = await userIndex(store);
+  seededShuffle(idx, `${uid}:${date}`);
+  const rnd = mulberry32(hashSeed(`${uid}:${date}:count`));
+  const want =
+    ONLINE_PICK_MIN + Math.floor(rnd() * (ONLINE_PICK_MAX - ONLINE_PICK_MIN + 1));
+
+  const users = [];
+  for (const id of idx) {
+    if (users.length >= want) break;
+    if (id === uid || mine.has(id)) continue;
+    const hb = JSON.parse((await store.get(`hb_${id}`)) || "null");
+    if (!hb || now - hb.last_seen >= OFFLINE_AFTER_MS) continue;
+    if (hb.hidden) continue; // 隐身的人不进推荐池
+    const raw = await store.get(`u_${id}`);
+    if (!raw) continue;
+    const u = JSON.parse(raw);
+    users.push({
+      uid: id,
+      nick: u.nick,
+      pet_name: u.pet_name,
+      state: hb.state,
+    });
+  }
+  return { ok: true, date, users };
+}
+
 // ---------- 串门 ----------
 
 async function activeVisitors(store, uid) {
@@ -610,13 +833,18 @@ async function visit(store, uid, bodyReq) {
   if (target === uid) return { error: "不能拜访自己" };
 
   const mine = await friendList(store, uid);
-  if (!mine.some((f) => f.uid === target)) return { error: "只能拜访好友" };
+  // 候选放宽：好友，或今天打过招呼的人 —— 打过招呼才可能互访
+  const isFriend = mine.some((f) => f.uid === target);
+  if (!isFriend && !(await greetedToday(store, uid, target))) {
+    return { error: "只能去好友或今天打过招呼的人家" };
+  }
 
   const hb = JSON.parse((await store.get(`hb_${target}`)) || "null");
   const now = Date.now();
   if (!hb || now - hb.last_seen >= OFFLINE_AFTER_MS) {
     return { error: "好友不在线" };
   }
+  if (hb.hidden) return { error: "对方现在不想被打扰" };
 
   const visitors = await activeVisitors(store, target);
   if (visitors.length >= MAX_VISITORS) {
@@ -897,6 +1125,10 @@ export async function dispatch(store, method, segs, query, body, env, meta = {})
   }
   if (method === "POST" && path === "visit") return await visit(store, auth.uid, body);
   if (method === "POST" && path === "home") return await goHome(store, auth.uid, body);
+  if (method === "POST" && path === "greet") return await greet(store, auth.uid, body);
+  if (method === "POST" && path === "online/random") {
+    return await onlineRandom(store, auth.uid);
+  }
   return { error: "not found", _status: 404 };
 }
 

@@ -18,7 +18,11 @@ import {
   onFriendsUpdate,
   onSocialEvent,
   onAwayChange,
+  onVisitorsChange,
 } from "./overlay/friends";
+import { GuestRegistry } from "./guest";
+import { GUEST_INTERVAL_MS } from "./guest/guest-pet";
+import { GuestDialog } from "./guest/guest-dialog";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -58,6 +62,13 @@ function applyConfig(c: ConfigView): void {
   pet.setSizeIndex(c.size_index);
   pet.setScope(c.roam_scope);
   if (c.avatar) pet.setAvatar(avatarFromView(c.avatar));
+  // 访客比主宠物小一圈：一眼能分清谁是自己家的
+  const changed = guests.setSide(
+    Math.max(32, Math.round((pet.body.w * 0.7) / 8) * 8),
+  );
+  const now = performance.now();
+  for (const g of changed.arrived) guestDialog.onArrive(g, now);
+  for (const g of changed.left) guestDialog.onLeave(g.seed.uid);
   // 右键菜单里的快捷键提示跟随配置（改键后不再显示过时的 ⌥Space 等）
   menu.setLabel(0, `记一笔  (${prettyShortcut(c.shortcut_note)})`);
   menu.setLabel(1, `每日提醒  (${prettyShortcut(c.shortcut_reminder)})`);
@@ -120,6 +131,17 @@ const banner = new Banner();
 const remindersPanel = new RemindersPanel(() => {});
 const friendsPanel = new FriendsPanel();
 
+// —— 访客：别人家的宠物来做客 ——
+// 画在主宠物同一张画布上；主宠物清脏矩形时会擦到访客，所以访客后画。
+const guests = new GuestRegistry(ctx2d, canvas, 48);
+const guestDialog = new GuestDialog((text) => {
+  // 主宠物的回应走主气泡；不在家就不说话。
+  // 主气泡正占着（宠物自己说话 / 提醒 / 插件卡片）就让路 ——
+  // 访客闲聊是最低优先级，不该把提醒挤掉。
+  if (pet.isHidden || bubble.isOpen) return;
+  bubble.show(text, { autoDismissMs: 5000 });
+});
+
 // 插件卡片的受控操作：openUrl 走 opener 插件（透明无框窗里 window.open
 // 会被系统拦截，导致资讯「阅读原文」点不动），markTerm 走 SRS 反馈命令
 // 并顺手收起气泡。渲染器不直接 invoke（registry.ts 的约定）。
@@ -175,6 +197,9 @@ function fit(): void {
   pet.resize(window.innerWidth, window.innerHeight);
   // resize 会重置 canvas 尺寸，进而清空 imageSmoothingEnabled，需重设
   ctx2d.imageSmoothingEnabled = false;
+  // 改 canvas 尺寸会清空整张位图：访客若因「指纹未变」不重画就会凭空消失，
+  // 而命中框还在上报 —— 屏幕上出现看不见却拦鼠标的区域
+  guests.invalidate();
 }
 fit();
 window.addEventListener("resize", fit);
@@ -353,6 +378,12 @@ startBoxReporter(() => {
   if (bubbleBox) boxes.push(bubbleBox);
   const bannerBox = banner.box;
   if (bannerBox) boxes.push(bannerBox);
+  // 访客气泡：逐个 push，不能合并成并集矩形 —— 并集会盖住大片空白，
+  // 误拦截下面编辑器/终端的点击。
+  //
+  // 访客**身体**刻意不上报：它不可点、也不该拦鼠标，让点击照常穿透到
+  // 下面的应用。宠物挡住视线却点得到下面，本来就是桌宠该有的样子。
+  for (const b of guestDialog.boxes) boxes.push(b);
   return {
     boxes,
     lock:
@@ -365,6 +396,9 @@ startBoxReporter(() => {
       remindersPanel.isOpen ||
       friendsPanel.isOpen ||
       avatarPicker.isOpen ||
+      // 访客气泡刻意不参与 lock：lock 是「保持鼠标接管」的语义，
+      // 访客气泡不需要拖动连续性，命中框已经够了；算进来会平白
+      // 抢走用户在编辑器里按住鼠标的那几秒
       hub.isOpen ||
       bubble.isOpen ||
       banner.isOpen,
@@ -376,12 +410,42 @@ startBoxReporter(() => {
 
 // 好友状态与串门事件
 void onFriendsUpdate((list) => friendsPanel.setFriends(list));
+
+// 家里的访客：每拍心跳都发（空列表表示人走光了）
+void onVisitorsChange((list) => {
+  const now = performance.now();
+  const { arrived, left } = guests.sync(list, now);
+  for (const g of arrived) guestDialog.onArrive(g, now);
+  for (const g of left) guestDialog.onLeave(g.seed.uid);
+  wakeFrame();
+});
+
+/** 收到别人的招呼/来访时，给一个能真的打回去的按钮。 */
+function greetBackBubble(text: string, fromUid: string, label: string): void {
+  bubble.show(text, {
+    confirmLabel: fromUid ? label : undefined,
+    onConfirm: () => {
+      if (!fromUid) return;
+      void invoke("greet", { target: fromUid }).catch(() => {});
+    },
+    autoDismissMs: 20_000,
+  });
+}
+
 void onSocialEvent((e) => {
   if (e.event.type === "visit" && e.event.from_nick) {
-    bubble.show(`${e.event.from_nick} 的宠物来串门了`, {
-      confirmLabel: "打个招呼",
-      autoDismissMs: 30_000,
-    });
+    greetBackBubble(
+      `${e.event.from_nick} 的宠物来串门了`,
+      e.event.from_uid ?? "",
+      "打个招呼",
+    );
+  } else if (e.event.type === "greet" && e.event.from_nick) {
+    // 话术由对方本地按 TA 自己宠物的心情挑好，我们只负责展示
+    const line = e.event.line?.trim();
+    const text = line
+      ? `${e.event.from_nick} 跟你打招呼：${line}`
+      : `${e.event.from_nick} 跟你打招呼了`;
+    greetBackBubble(text, e.event.from_uid ?? "", "回个招呼");
   } else if (e.event.type === "interaction" && e.event.from_nick) {
     bubble.show(`被 ${e.event.from_nick} 摸了 ${e.event.pats ?? 1} 下`, {
       autoDismissMs: 6000,
@@ -405,6 +469,8 @@ document.body.appendChild(awayIcon);
 
 void onAwayChange((n) => {
   pet.setHidden(n.away);
+  // setHidden 会整屏 clearRect，访客必须作废指纹重画，否则会消失
+  guests.invalidate();
   // 宠物走了：贴它身上的通知没了依托，收掉（右上角提醒卡片不受影响）
   if (n.away) banner.releaseFromPet();
   awayIcon.style.display = n.away ? "flex" : "none";
@@ -529,6 +595,22 @@ function wakeFrame(): void {
 function onFrame(now: number): void {
   frameScheduled = false;
   const drew = pet.tick(now);
+  // 访客必须画在主宠物之后：主宠物清自己的脏矩形时，
+  // 会连带擦掉落在它范围内的访客像素。
+  const guestDrew = guests.tick(now);
+  guestDialog.tick(now, guests.list);
+  // 访客擦到主宠物身上时，主宠物可能因为「视觉指纹未变」而跳帧，
+  // 身上就留个洞 —— 只在真的重叠时才让它重画，别白白提帧。
+  if (guestDrew) {
+    const host = pet.body;
+    for (const g of guests.list) {
+      const d = g.lastAffected;
+      if (d && overlaps(d, host)) {
+        pet.invalidate();
+        break;
+      }
+    }
+  }
   // 气泡与贴宠物通知条跟随宠物身体：只在真正绘制了新画面时同步。
   // 位置量化到整数像素 —— 不绘制则位置必然未变，DOM 写纯属浪费。
   if (drew) {
@@ -544,12 +626,21 @@ function onFrame(now: number): void {
 
   // 下一拍按活跃度档位调度：active 档（拖动/走动/眨眼）对齐显示刷新，
   // idle/sleep 档先睡够再拍。留 4ms 余量避免长期欠帧。
-  const delay = pet.debugIntervalMs - (performance.now() - now) - 4;
+  // 访客在动时才抬帧 —— 否则主宠物 8fps 会把访客走成慢动作；
+  // 访客只是站着发呆时维持主宠物自己的档位，别为它多烧 CPU。
+  const interval = guests.wantsFastFrame
+    ? Math.min(pet.debugIntervalMs, GUEST_INTERVAL_MS)
+    : pet.debugIntervalMs;
+  const delay = interval - (performance.now() - now) - 4;
   if (delay > 4) {
     setTimeout(wakeFrame, delay);
   } else {
     wakeFrame();
   }
+}
+
+function overlaps(a: Box, b: Box): boolean {
+  return a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
 }
 wakeFrame();
 

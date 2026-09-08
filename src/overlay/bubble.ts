@@ -28,10 +28,13 @@ export class Bubble {
 
   /** 点确认/关闭后的回调。 */
   onDismiss: (() => void) | null = null;
+  /** 点确认按钮后的回调（「打个招呼」这类动作靠它接上业务）。 */
+  onConfirm: (() => void) | null = null;
 
-  constructor() {
+  /** @param extraClass 附加的样式类（访客气泡用它和主气泡区分开）。 */
+  constructor(extraClass?: string) {
     this.el = document.createElement("div");
-    this.el.className = "pet-bubble";
+    this.el.className = extraClass ? `pet-bubble ${extraClass}` : "pet-bubble";
     this.el.style.display = "none";
 
     this.textEl = document.createElement("span");
@@ -55,12 +58,15 @@ export class Bubble {
    * @param text 内容
    * @param opts.confirmLabel 提供「确认」按钮文案则显示按钮（点击消失）；
    *                         不提供则整泡可点、或 autoDismissMs 后自动消失
+   * @param opts.onConfirm   点确认按钮时先跑这个回调，再关闭气泡。
+   *                         之前按钮只会 dismiss，「打个招呼」因此是个死按钮
    * @param opts.ai          内容来自 LLM 时点亮文本前的 AI 徽章
    */
   show(
     text: string,
     opts: {
       confirmLabel?: string;
+      onConfirm?: () => void;
       autoDismissMs?: number;
       ai?: boolean;
     } = {},
@@ -79,6 +85,9 @@ export class Bubble {
       btn.textContent = opts.confirmLabel;
       btn.addEventListener("pointerdown", (e) => {
         e.stopPropagation();
+        // 先跑业务再关闭：顺序反了会让人以为「点了没反应」
+        opts.onConfirm?.();
+        this.onConfirm?.();
         this.dismiss();
       });
       this.actionsEl.appendChild(btn);
@@ -136,6 +145,17 @@ export class Bubble {
 
   get isOpen(): boolean {
     return this.open;
+  }
+
+  /**
+   * 永久销毁：从 DOM 摘掉。
+   *
+   * 主气泡是单例、跟着程序活到最后；访客气泡是临时实例，
+   * 客人走了必须把节点收掉，否则每来一位就留一个孤儿 div。
+   */
+  destroy(): void {
+    this.dismiss();
+    this.el.remove();
   }
 
   /** 渲染循环每帧调用：跟随宠物身体。 */

@@ -430,6 +430,30 @@
         white-space: nowrap;
       }
 
+      /* 打招呼按钮：默认青绿描边，冷却中变灰并原地显示剩余秒数 */
+      .pet-greet-btn {
+        flex: 0 0 auto;
+        min-width: 56px;
+        padding: 2px 8px;
+        border: 1px solid rgba(124, 245, 196, 0.6);
+        background: rgba(124, 245, 196, 0.12);
+        color: #7cf5c4;
+        font-size: 11px;
+        cursor: pointer;
+      }
+
+      .pet-greet-btn:hover:enabled {
+        background: rgba(124, 245, 196, 0.25);
+      }
+
+      .pet-greet-btn.is-cooling {
+        border-color: rgba(90, 100, 120, 0.5);
+        background: transparent;
+        color: #5a6478;
+        cursor: default;
+        font-variant-numeric: tabular-nums;
+      }
+
       .pet-reminder-del {
         flex: 0 0 auto;
         padding: 2px 8px;
@@ -511,6 +535,21 @@
         border-width: 0 6px 10px 6px;
         border-top-color: transparent;
         border-bottom-color: #7cf5c4;
+      }
+
+      /* 访客气泡：换淡紫描边，和主宠物的青绿气泡区分开 ——
+         必须放在上面两条之后，否则会被 .pet-bubble 的 border 简写覆盖 */
+      .pet-bubble-guest {
+        border-color: #a8c0ff;
+        padding: 7px 10px;
+      }
+
+      .pet-bubble-guest::after {
+        border-top-color: #a8c0ff;
+      }
+
+      .pet-bubble-guest.pet-bubble-below::after {
+        border-bottom-color: #a8c0ff;
       }
 
       /* 右上角通知条 */

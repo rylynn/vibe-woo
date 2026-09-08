@@ -389,6 +389,44 @@ pub fn fallback(persona: Persona, rng: f64) -> Option<&'static str> {
     pick_from(&[pool], rng)
 }
 
+// ---------- 打招呼话术 ----------
+
+/// 主动打招呼时说的第一句话：心情好的版本。
+const GREET_HAPPY: &[&str] = &[
+    "（摇着尾巴跑过来）嗨～",
+    "（蹦跶了两下）你好呀",
+    "（眼睛亮了）有人来啦",
+    "（晃了晃耳朵）今天挺高兴的，打个招呼",
+    "（凑过来蹭了蹭）hi～",
+];
+
+/// 主动打招呼时说的第一句话：平静版本。
+const GREET_CALM: &[&str] = &[
+    "（挥了挥爪子）",
+    "（轻轻点了点头）你好",
+    "（抬头看了一眼）嗨",
+    "（安静地坐到旁边）来啦",
+    "（眨了眨眼）欢迎来看看",
+];
+
+/// 挑一句打招呼的话。`rng` 为 0..1，由调用方掷一次。
+///
+/// **只有两档，不做四档细分 —— 这是刻意的。**
+/// 心情属于本机隐私（share.rs 红线：mood/tempo/activity 不出本机）。
+/// 话术虽然在本地挑选、不经过上报，但句子本身会被对方看到：
+/// 「叹了口气」「百无聊赖」这类措辞等于把「你卡住了 / 你在摸鱼」
+/// 告诉对方。所以 bored / frustrated 一律并入平静档，
+/// 对外只区分「今天挺好的」和「平平常常」。
+pub fn greet_line(mood: Mood, rng: f64) -> &'static str {
+    let pool = if mood == Mood::Content {
+        GREET_HAPPY
+    } else {
+        GREET_CALM
+    };
+    let idx = (rng.abs().fract() * pool.len() as f64) as usize;
+    pool[idx.min(pool.len() - 1)]
+}
+
 /// system prompt 的上下文。
 ///
 /// 除 persona 外全部来自传感器与当日记忆；`user_kind` 是唯一来自
@@ -616,6 +654,47 @@ mod tests {
             for bad in CODING_WORDS {
                 assert!(!line.contains(bad), "中性语料里出现了工种词「{bad}」：{line}");
             }
+        }
+    }
+
+    // ---------- 打招呼话术 ----------
+
+    #[test]
+    fn 只有心情好才走开心档() {
+        assert!(GREET_HAPPY.contains(&greet_line(Mood::Content, 0.5)));
+        // 其余心情一律并进平静档 —— 负面措辞等于把「卡住/摸鱼」告诉对方
+        for m in [Mood::Focused, Mood::Bored, Mood::Frustrated] {
+            let line = greet_line(m, 0.5);
+            assert!(GREET_CALM.contains(&line), "{m:?} 不该露出负面情绪：{line}");
+        }
+    }
+
+    #[test]
+    fn 招呼话术rng边界不越界() {
+        for m in [Mood::Content, Mood::Focused, Mood::Bored, Mood::Frustrated] {
+            for rng in [0.0, 0.999, 1.0, -0.5] {
+                let line = greet_line(m, rng);
+                assert!(!line.is_empty(), "rng={rng} 取到了空话术");
+            }
+        }
+    }
+
+    #[test]
+    fn 招呼话术全部能通过服务端白名单() {
+        // 服务端 validGreetLine：≤40 码点，且只放行中英文/数字/空格与少量标点。
+        // 话术是硬编码的，写的时候不合规就永远发不出去 —— 用测试钉死。
+        for line in GREET_HAPPY.iter().chain(GREET_CALM.iter()) {
+            assert!(line.chars().count() <= 40, "超过 40 字会被服务端兜底：{line}");
+            for bad in ['<', '>', '"', '\'', '\\', '`'] {
+                assert!(!line.contains(bad), "含不允许的字符「{bad}」：{line}");
+            }
+            assert!(
+                line.chars().all(|c| {
+                    c.is_alphanumeric()
+                        || " ·_-，。！？、,.!?~～（）()「」『』".contains(c)
+                }),
+                "含白名单外字符：{line}"
+            );
         }
     }
 

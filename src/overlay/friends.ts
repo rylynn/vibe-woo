@@ -10,6 +10,7 @@ interface SocialCfg {
   social_pet_name: string;
   social_register_date: string;
   social_invite_code: string;
+  social_hidden: boolean;
 }
 
 interface FriendRow {
@@ -19,6 +20,14 @@ interface FriendRow {
   state: string;
   affinity: number;
   online: boolean;
+}
+
+/** 今日在线推荐（服务端按日期确定性取样，同一天名单稳定）。 */
+interface OnlineRow {
+  uid: string;
+  nick: string;
+  pet_name: string;
+  state: string;
 }
 
 const STATE_LABEL: Record<string, string> = {
@@ -38,19 +47,65 @@ const STATE_COLOR: Record<string, string> = {
   offline: "#5a6478",
 };
 
+/** 宠物名上限，与服务端 PET_NAME_MAX / Rust valid_pet_name 三处一致。 */
+export const PET_NAME_MAX = 30;
+/** 宠物名白名单：只放行安全字符，注入与脚本写法根本进不来。 */
+const PET_NAME_RE = /^[\p{L}\p{N}_\-\s·]+$/u;
+/** 招呼冷却（服务端权威 60 秒，这里只做展示，不负责拦）。 */
+const GREET_COOLDOWN_MS = 60_000;
+
+export type PetNameCheck =
+  | { ok: true; name: string }
+  | { ok: false; reason: string };
+
 /**
- * 好友面板：登录/注册 + 好友管理。
+ * 宠物名本地校验 —— 不合格连请求都不发。
  *
- * 登录态以本地缓存的社会配置为准（uid/token 已存配置，token 永久有效）。
- * 所有输入先本地校验（与服务端同一套规则），不合格不发请求。
+ * 与服务端 `validName`、Rust `valid_pet_name` 是同一套白名单：
+ * 不是「过滤掉危险字符」，而是「只放行安全字符」。
+ * 控制字符先剥掉（与后端的 clean 一致），不是报错。
+ */
+export function checkPetName(raw: string): PetNameCheck {
+  const name = stripControl(raw).trim();
+  if (!name) return { ok: false, reason: "宠物名不能为空" };
+  if ([...name].length > PET_NAME_MAX) {
+    return { ok: false, reason: `最多 ${PET_NAME_MAX} 字` };
+  }
+  if (!PET_NAME_RE.test(name)) {
+    return { ok: false, reason: "仅支持中英文、数字、空格" };
+  }
+  return { ok: true, name };
+}
+
+/** 剥掉控制字符（与后端 clean 同源）。用码点判断，避免在源码里写不可见字符。 */
+function stripControl(s: string): string {
+  return Array.from(s)
+    .filter((ch) => {
+      const c = ch.codePointAt(0) ?? 0;
+      return c > 0x1f && c !== 0x7f && c !== 0x2028 && c !== 0x2029;
+    })
+    .join('');
+}
+
+/**
+ * 好友面板：我的宠物 / 今日在线 / 好友。
+ *
+ * 不再让用户填服务器 —— 地址内置在客户端里，这里只管内容。
+ * 登录态以本地缓存的社会配置为准；所有输入先本地校验，不合格不发请求。
  */
 export class FriendsPanel {
   private readonly el: HTMLDivElement;
   private open = false;
   private cfg: SocialCfg | null = null;
   private friends: FriendRow[] = [];
-  /** 注册/登录视图切换 */
-  private mode: "login" | "register" = "login";
+  private online: OnlineRow[] = [];
+  private onlineLoading = false;
+  private onlineError = "";
+  /** uid → 冷却结束时间戳。 */
+  private readonly coolUntil = new Map<string, number>();
+  /** uid → 打招呼按钮（倒计时就地更新，不整块重绘以免抢走输入焦点）。 */
+  private readonly greetBtns = new Map<string, HTMLButtonElement>();
+  private tick: ReturnType<typeof setInterval> | null = null;
 
   constructor() {
     this.el = document.createElement("div");
@@ -65,6 +120,8 @@ export class FriendsPanel {
     void invoke("begin_text_input").catch(() => {});
     this.renderLoading();
     await this.refresh();
+    // 推荐名单单独拉：只在打开面板时请求一次，不做轮询
+    void this.loadOnline();
   }
 
   hide(): void {
@@ -74,6 +131,7 @@ export class FriendsPanel {
     }
     this.el.style.display = "none";
     this.open = false;
+    this.stopTick();
   }
 
   get isOpen(): boolean {
@@ -99,6 +157,29 @@ export class FriendsPanel {
       this.cfg = null;
     }
     this.render();
+  }
+
+  private async loadOnline(): Promise<void> {
+    if (!this.cfg?.social_uid) return;
+    // 隐身时不去要推荐名单：自己不想被人看见，就别去翻别人的名单
+    if (this.cfg.social_hidden) {
+      this.online = [];
+      this.onlineLoading = false;
+      this.onlineError = "";
+      if (this.open) this.render();
+      return;
+    }
+    this.onlineLoading = true;
+    this.onlineError = "";
+    this.render();
+    try {
+      this.online = await invoke<OnlineRow[]>("online_random");
+    } catch (err) {
+      this.onlineError = String(err);
+      this.online = [];
+    }
+    this.onlineLoading = false;
+    if (this.open) this.render();
   }
 
   private renderLoading(): void {
@@ -134,149 +215,78 @@ export class FriendsPanel {
     return i;
   }
 
+  private divider(text: string): HTMLElement {
+    const d = document.createElement("div");
+    d.className = "pet-settings-divider";
+    d.textContent = text;
+    return d;
+  }
+
+  private hint(text: string): HTMLElement {
+    const h = document.createElement("div");
+    h.className = "pet-settings-hint";
+    h.textContent = text;
+    return h;
+  }
+
   private render(): void {
     this.el.replaceChildren();
     this.el.appendChild(this.head("好友"));
 
     const cfg = this.cfg;
-    // 未配置服务器 → 引导
-    if (!cfg || !cfg.social_server) {
-      this.renderNoServer();
+    if (!cfg || !cfg.social_uid) {
+      this.renderNoAccount();
       return;
     }
-    // 已登录（uid 非空）→ 主界面
-    if (cfg.social_uid) {
-      this.renderMain(cfg);
-    } else {
-      this.renderAuth(cfg);
-    }
+    this.renderMain(cfg);
   }
 
-  /** 未配置服务器。 */
-  private renderNoServer(): void {
-    const r = this.row("服务器");
-    const input = this.input("https://your-worker.workers.dev");
-    input.value = this.cfg?.social_server ?? "";
-    input.addEventListener("change", () => {
-      void invoke("update_config", {
-        patch: { social_server: input.value.trim() },
-      }).then(() => this.refresh());
-    });
-    r.appendChild(input);
-    this.el.appendChild(r);
-    const hint = document.createElement("div");
-    hint.className = "pet-settings-hint";
-    hint.textContent = "填好服务器后即可登录（需邀请码注册）";
+  /** 还没开户：启动自检会自动注册，这里只给一个手动重试的入口。 */
+  private renderNoAccount(): void {
+    const hint = this.hint(
+      this.cfg?.social_uid ? "" : "正在为你开户…需要联网，失败会自动重试。",
+    );
+    hint.style.padding = "14px";
     this.el.appendChild(hint);
-  }
 
-  // ---------- 登录 / 注册 ----------
-
-  private renderAuth(_cfg: SocialCfg): void {
-    const isRegister = this.mode === "register";
-
-    const acct = this.row("账号");
-    const acctInput = this.input("3-12 位字母/数字/下划线");
-    acct.appendChild(acctInput);
-    this.el.appendChild(acct);
-
-    const pass = this.row("密码");
-    const passInput = this.input("6-30 位，含大小写", "password");
-    pass.appendChild(passInput);
-    this.el.appendChild(pass);
-
-    if (isRegister) {
-      const nick = this.row("昵称");
-      const nickInput = this.input("好友看到的名字，全局唯一");
-      nick.appendChild(nickInput);
-      this.el.appendChild(nick);
-
-      const inv = this.row("邀请码");
-      const invInput = this.input("6 位邀请码");
-      inv.appendChild(invInput);
-      this.el.appendChild(inv);
-    }
-
-    const btnRow = document.createElement("div");
-    btnRow.style.cssText = "display:flex;gap:8px;align-items:center;padding:10px 14px";
+    const foot = document.createElement("div");
+    foot.style.cssText = "padding:8px 14px 2px";
     const btn = document.createElement("button");
     btn.className = "pet-bubble-confirm";
-    btn.textContent = isRegister ? "注册" : "登录";
-    const status = document.createElement("span");
-    status.style.cssText = "color:#8b93a7;font-size:11px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap";
-    status.title = "";
+    btn.textContent = "立即开户";
     btn.addEventListener("pointerdown", async (e) => {
       e.stopPropagation();
-      status.style.color = "#8b93a7";
-      status.textContent = "请求中";
+      btn.disabled = true;
       try {
-        if (isRegister) {
-          await invoke("register", {
-            account: acctInput.value.trim(),
-            password: passInput.value,
-            nick: nickInputOf(this.el).value,
-            inviteCode: invInputOf(this.el).value,
-          });
-          status.textContent = "注册成功";
-        } else {
-          await invoke("login", {
-            account: acctInput.value.trim(),
-            password: passInput.value,
-          });
-          status.textContent = "登录成功";
-        }
+        await invoke("auto_register");
         await this.refresh();
+        void this.loadOnline();
       } catch (err) {
-        status.style.color = "#ffab9d";
-        status.textContent = String(err);
-        status.title = String(err);
+        hint.textContent = String(err);
+        btn.disabled = false;
       }
     });
-    btnRow.append(btn, status);
-    this.el.appendChild(btnRow);
-
-    const toggle = document.createElement("div");
-    toggle.className = "pet-settings-hint";
-    toggle.textContent = isRegister ? "已有账号？点此登录" : "没有账号？用邀请码注册";
-    toggle.style.cursor = "pointer";
-    toggle.addEventListener("pointerdown", (e) => {
-      e.stopPropagation();
-      this.mode = isRegister ? "login" : "register";
-      this.render();
-    });
-    this.el.appendChild(toggle);
-
-    function nickInputOf(root: HTMLElement): HTMLInputElement {
-      return root.querySelectorAll("input")[2] as HTMLInputElement;
-    }
-    function invInputOf(root: HTMLElement): HTMLInputElement {
-      return root.querySelectorAll("input")[3] as HTMLInputElement;
-    }
+    foot.appendChild(btn);
+    this.el.appendChild(foot);
   }
 
-  // ---------- 已登录主界面 ----------
-
   private renderMain(cfg: SocialCfg): void {
-    // 我的档案：uid / 昵称 / 宠物名
-    const me = this.row("我的 uid");
-    const uid = document.createElement("span");
-    uid.textContent = cfg.social_uid;
-    uid.style.cssText = "color:#7cf5c4;letter-spacing:1px;font-weight:600;flex:1";
-    uid.title = "好友可通过此 uid 添加你";
-    me.appendChild(uid);
-    this.el.appendChild(me);
+    this.renderPetName(cfg);
+    this.el.appendChild(this.divider("今日在线"));
+    this.renderOnline();
+    this.el.appendChild(this.divider("好友"));
+    this.renderAddFriend();
+    this.renderFriendList();
+    this.renderFoot();
+  }
 
-    const nickRow = this.row("昵称");
-    const nick = document.createElement("span");
-    nick.textContent = cfg.social_nick;
-    nick.title = "昵称全局唯一，注册后不可改";
-    nickRow.appendChild(nick);
-    this.el.appendChild(nickRow);
+  // ---------- 第一段：我的宠物 ----------
 
-    // 宠物名：随时可改，本地立即生效 + 异步同步
+  private renderPetName(cfg: SocialCfg): void {
     const pet = this.row("宠物名");
-    const petInput = this.input("1-24 字");
+    const petInput = this.input(`1-${PET_NAME_MAX} 字`);
     petInput.value = cfg.social_pet_name;
+    petInput.maxLength = PET_NAME_MAX;
     const petBtn = document.createElement("button");
     petBtn.className = "pet-bubble-confirm";
     petBtn.textContent = "改名";
@@ -285,10 +295,15 @@ export class FriendsPanel {
     petStatus.style.cssText = "color:#8b93a7;font-size:11px";
     petBtn.addEventListener("pointerdown", async (e) => {
       e.stopPropagation();
+      // 本地先过一遍白名单，不合格连请求都不发
+      const checked = checkPetName(petInput.value);
+      if (!checked.ok) {
+        petStatus.style.color = "#ffab9d";
+        petStatus.textContent = checked.reason;
+        return;
+      }
       try {
-        const name = await invoke<string>("set_pet_name", {
-          name: petInput.value,
-        });
+        const name = await invoke<string>("set_pet_name", { name: checked.name });
         petStatus.style.color = "#7cf5c4";
         petStatus.textContent = `已改名「${name}」`;
         await this.refresh();
@@ -300,17 +315,142 @@ export class FriendsPanel {
     });
     pet.append(petInput, petBtn);
     this.el.appendChild(pet);
-    const petHint = document.createElement("div");
-    petHint.className = "pet-settings-hint";
-    petHint.textContent = "本地立即生效，联网自动同步给好友";
-    this.el.appendChild(petHint);
+    this.el.appendChild(this.hint("本地立即生效，联网自动同步给好友"));
 
-    // 加好友：uid 或昵称
-    const divider = document.createElement("div");
-    divider.className = "pet-settings-divider";
-    divider.textContent = "好友";
-    this.el.appendChild(divider);
+    const me = this.row("我的 uid");
+    const uid = document.createElement("span");
+    uid.textContent = cfg.social_uid;
+    uid.style.cssText = "color:#7cf5c4;letter-spacing:1px;font-weight:600;flex:1";
+    uid.title = "好友可通过此 uid 添加你";
+    me.appendChild(uid);
+    this.el.appendChild(me);
 
+    const nickRow = this.row("昵称");
+    const nick = document.createElement("span");
+    nick.textContent = cfg.social_nick;
+    nick.title = "好友看到的名字";
+    nickRow.appendChild(nick);
+    this.el.appendChild(nickRow);
+  }
+
+  // ---------- 第二段：今日在线 ----------
+
+  private renderOnline(): void {
+    this.greetBtns.clear();
+    this.el.appendChild(this.hint("每天换一批 · 打个招呼，宠物就可能去串门"));
+
+    if (this.onlineLoading) {
+      this.el.appendChild(this.hint("看看今天有谁在…"));
+      return;
+    }
+    if (this.onlineError) {
+      const h = this.hint(this.onlineError);
+      h.style.color = "#ffab9d";
+      this.el.appendChild(h);
+      return;
+    }
+    if (this.online.length === 0) {
+      // 没有在线的人就不展示这个区块，只留一行空态
+      this.el.appendChild(this.hint("今天还没有人在线，晚点再来看看"));
+      return;
+    }
+    for (const u of this.online) {
+      this.el.appendChild(this.onlineRow(u));
+    }
+    this.startTick();
+  }
+
+  private onlineRow(u: OnlineRow): HTMLElement {
+    const row = document.createElement("div");
+    row.className = "pet-friend-row";
+
+    const dot = document.createElement("span");
+    dot.className = "pet-friend-dot";
+    dot.style.background = STATE_COLOR[u.state] ?? "#5a6478";
+
+    const main = document.createElement("span");
+    main.className = "pet-friend-nick";
+    main.textContent = `${u.nick} 的 ${u.pet_name}`;
+    main.title = `uid: ${u.uid}`;
+
+    const state = document.createElement("span");
+    state.className = "pet-friend-state";
+    state.style.color = STATE_COLOR[u.state] ?? "#5a6478";
+    state.textContent = STATE_LABEL[u.state] ?? u.state;
+
+    const btn = document.createElement("button");
+    btn.className = "pet-greet-btn";
+    btn.textContent = "打招呼";
+    btn.addEventListener("pointerdown", (e) => {
+      e.stopPropagation();
+      void this.doGreet(u.uid);
+    });
+    this.greetBtns.set(u.uid, btn);
+    this.applyCooldown(u.uid);
+
+    row.append(dot, main, state, btn);
+    return row;
+  }
+
+  private async doGreet(uid: string): Promise<void> {
+    const btn = this.greetBtns.get(uid);
+    if (btn) btn.disabled = true;
+    try {
+      await invoke("greet", { target: uid });
+      this.startGlobalCooldown();
+    } catch (err) {
+      if (btn) {
+        btn.title = String(err);
+        btn.textContent = "失败";
+      }
+      // 服务端限频是「发起方 60 秒内一次」，不是「对同一个人一次」——
+      // 打完 A 立刻点 B 也会被拒，所以冷却要落到所有按钮上。
+      // 网络错误同样按冷却处理，省得用户一直点一个打不通的按钮。
+      this.startGlobalCooldown();
+    }
+  }
+
+  private startGlobalCooldown(): void {
+    const until = Date.now() + GREET_COOLDOWN_MS;
+    for (const other of this.greetBtns.keys()) this.coolUntil.set(other, until);
+    this.startTick();
+    for (const other of this.greetBtns.keys()) this.applyCooldown(other);
+  }
+
+  private applyCooldown(uid: string): void {
+    const btn = this.greetBtns.get(uid);
+    if (!btn) return;
+    const left = Math.ceil(((this.coolUntil.get(uid) ?? 0) - Date.now()) / 1000);
+    if (left > 0) {
+      btn.disabled = true;
+      btn.classList.add("is-cooling");
+      btn.textContent = `${left}s`;
+    } else {
+      btn.disabled = false;
+      btn.classList.remove("is-cooling");
+      btn.textContent = "打招呼";
+    }
+  }
+
+  private startTick(): void {
+    if (this.tick) return;
+    this.tick = setInterval(() => {
+      if (!this.open) {
+        this.stopTick();
+        return;
+      }
+      for (const uid of this.greetBtns.keys()) this.applyCooldown(uid);
+    }, 1000);
+  }
+
+  private stopTick(): void {
+    if (this.tick) clearInterval(this.tick);
+    this.tick = null;
+  }
+
+  // ---------- 第三段：好友 ----------
+
+  private renderAddFriend(): void {
     const addRow = this.row("加好友");
     const addInput = this.input("uid 或昵称");
     const addBtn = document.createElement("button");
@@ -331,7 +471,6 @@ export class FriendsPanel {
         addStatus.style.color = "#7cf5c4";
         addStatus.textContent = note;
         addInput.value = "";
-        // 好友列表由下一次心跳刷新，这里立即拉一次
         await this.refresh();
       } catch (err) {
         addStatus.style.color = "#ffab9d";
@@ -341,34 +480,18 @@ export class FriendsPanel {
     });
     addRow.append(addInput, addBtn, addStatus);
     this.el.appendChild(addRow);
+  }
 
-    // 好友列表（含删除）
+  private renderFriendList(): void {
     if (this.friends.length === 0) {
-      const empty = document.createElement("div");
-      empty.className = "pet-settings-hint";
+      const empty = this.hint("还没有好友 —— 把你的 uid 发给朋友吧");
       empty.style.paddingLeft = "14px";
-      empty.textContent = "还没有好友 —— 把你的 uid 发给朋友吧";
       this.el.appendChild(empty);
-    } else {
-      for (const f of this.friends) {
-        this.el.appendChild(this.friendRow(f));
-      }
+      return;
     }
-
-    // 退出登录
-    const foot = document.createElement("div");
-    foot.style.cssText = "padding:8px 14px 2px";
-    const out = document.createElement("button");
-    out.className = "pet-bubble-confirm";
-    out.textContent = "退出登录";
-    out.addEventListener("pointerdown", async (e) => {
-      e.stopPropagation();
-      await invoke("logout").catch(() => {});
-      this.friends = [];
-      await this.refresh();
-    });
-    foot.appendChild(out);
-    this.el.appendChild(foot);
+    for (const f of this.friends) {
+      this.el.appendChild(this.friendRow(f));
+    }
   }
 
   private friendRow(f: FriendRow): HTMLElement {
@@ -412,6 +535,23 @@ export class FriendsPanel {
     return row;
   }
 
+  private renderFoot(): void {
+    const foot = document.createElement("div");
+    foot.style.cssText = "padding:8px 14px 2px";
+    const out = document.createElement("button");
+    out.className = "pet-bubble-confirm";
+    out.textContent = "退出登录";
+    out.addEventListener("pointerdown", async (e) => {
+      e.stopPropagation();
+      await invoke("logout").catch(() => {});
+      this.friends = [];
+      this.online = [];
+      await this.refresh();
+    });
+    foot.appendChild(out);
+    this.el.appendChild(foot);
+  }
+
   /** 更新好友列表（事件驱动）。 */
   setFriends(list: FriendRow[]): void {
     this.friends = list;
@@ -432,15 +572,29 @@ export async function onFriendsUpdate(
   }
 }
 
-/** 订阅串门/互动/离开事件。 */
+/** 订阅串门/互动/离开/打招呼事件。 */
 export async function onSocialEvent(
   cb: (e: {
-    event: { type: string; from_nick?: string; pats?: number };
+    event: {
+      type: string;
+      from_uid?: string;
+      from_nick?: string;
+      pet_name?: string;
+      line?: string;
+      pats?: number;
+    };
   }) => void,
 ): Promise<() => void> {
   try {
     return await listen<{
-      event: { type: string; from_nick?: string; pats?: number };
+      event: {
+        type: string;
+        from_uid?: string;
+        from_nick?: string;
+        pet_name?: string;
+        line?: string;
+        pats?: number;
+      };
     }>("pet://social", (e) => cb(e.payload));
   } catch {
     return () => {};
@@ -454,6 +608,20 @@ export async function onAwayChange(
   try {
     return await listen<{ away: boolean; at_nick?: string }>(
       "pet://home-away",
+      (e) => cb(e.payload),
+    );
+  } catch {
+    return () => {};
+  }
+}
+
+/** 家里当前的访客（每拍心跳刷新，空列表表示人都走了）。 */
+export async function onVisitorsChange(
+  cb: (list: { uid: string; nick: string; pet_name: string }[]) => void,
+): Promise<() => void> {
+  try {
+    return await listen<{ uid: string; nick: string; pet_name: string }[]>(
+      "pet://visitors",
       (e) => cb(e.payload),
     );
   } catch {

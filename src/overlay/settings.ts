@@ -289,6 +289,18 @@ export class SettingsPanel {
     );
     this.el.appendChild(this.rowTest());
 
+    // 同步服务：地址内置在客户端里，这里只留一个覆盖口子给本地联调。
+    // 绝大多数用户一辈子都不会碰它，所以放在最后、留空即用内置地址。
+    this.el.appendChild(this.divider("同步服务（高级）"));
+    this.el.appendChild(
+      this.rowText(
+        "服务地址",
+        c.social_server,
+        (v) => this.patch({ social_server: v.trim() }),
+        "留空则使用内置服务",
+      ),
+    );
+
     // 关于：一年也看不了几次的只读信息，收成面板最底部的二级入口
     if (this.onOpenAbout) this.el.appendChild(this.rowAbout());
 
