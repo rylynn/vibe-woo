@@ -93,6 +93,7 @@ fn main() {
             hittest::quit_app,
             notecmd::add_note,
             notecmd::list_today_notes,
+            notecmd::delete_note,
             inputfocus::begin_text_input,
             inputfocus::end_text_input,
             socialcmd::register,

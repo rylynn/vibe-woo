@@ -71,6 +71,25 @@ pub fn list_today_notes(app: AppHandle) -> Vec<Note> {
     note::list_today(&app)
 }
 
+/**
+ * 删除今日速记的第 `index` 条（0 基，按文件出现顺序）。
+ *
+ * 删除后前端「今日速记」面板自行重新拉取渲染，无需额外事件 ——
+ * 删除是低频显式操作，不像 add_note 那样需要仪式感动画。
+ *
+ * 返回是否至少在一个落点删成功。
+ */
+#[tauri::command]
+pub fn delete_note(app: AppHandle, index: usize) -> bool {
+    let ok = note::remove_today(&app, index);
+    if ok {
+        eprintln!("[note] 已删除第 {} 条", index);
+    } else {
+        eprintln!("[note] 删除失败或 index 越界：{}", index);
+    }
+    ok
+}
+
 fn now_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()

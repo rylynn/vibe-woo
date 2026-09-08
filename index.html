@@ -1147,6 +1147,47 @@
         color: #fff;
       }
 
+      /* 标题栏右侧动作区：编辑 + 关闭两个按钮贴在一起靠右，
+         避免 space-between 把编辑推到中间 */
+      .pet-today-head-actions {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+      }
+
+      /* 编辑按钮：与关闭按钮并排，风格一致 */
+      .pet-today-edit {
+        border: 0;
+        background: transparent;
+        color: #8b93a7;
+        font-size: 13px;
+        line-height: 1;
+        cursor: default;
+        padding: 0 4px;
+      }
+
+      .pet-today-edit:hover {
+        color: #fff;
+      }
+
+      /* 行内删除按钮：编辑模式下每行右侧 */
+      .pet-today-del {
+        flex: 0 0 auto;
+        border: 0;
+        background: transparent;
+        color: #ff6b6b;
+        font-size: 15px;
+        line-height: 1;
+        cursor: default;
+        padding: 0 4px;
+        opacity: 0.7;
+      }
+
+      .pet-today-del:hover {
+        opacity: 1;
+        color: #ff8787;
+      }
+
       .pet-today-empty {
         padding: 16px 12px;
         color: #6d768c;
