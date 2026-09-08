@@ -1,5 +1,6 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import type { Box } from "../interact/hit-test";
 import { panelChrome } from "./chrome";
 import { renderLine } from "./md-inline";
@@ -27,6 +28,15 @@ export class TodayPanel {
     this.el.className = "pet-today";
     this.el.style.display = "none";
     document.body.appendChild(this.el);
+
+    // 面板已打开时新增速记（add_note 落盘后发 pet://note-saved）要实时刷新，
+    // 否则「打开面板 → 再调接口记一条」这条链路看不到新记录。
+    void listen("pet://note-saved", () => {
+      if (!this.open) return;
+      // 列表最新在前，新记录插入后旧展开行号会错位，直接收起避免指错行
+      this.expanded = -1;
+      void this.render();
+    }).catch(() => {});
   }
 
   async show(): Promise<void> {
