@@ -30,15 +30,16 @@
 
 import { createServer } from "node:http";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
-import { webcrypto } from "node:crypto";
-
-// 业务逻辑里的密码哈希（PBKDF2）、会话 token、昵称索引全靠 WebCrypto。
-// Node 18 起才有全局 crypto，16 只有 node:crypto 里的 webcrypto ——
-// 补上这一行，16 也能跑。低于 16 的请先升级 Node。
-globalThis.crypto ??= webcrypto;
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { webcrypto } from "node:crypto";
 import { dispatch, CORS, statusFor } from "./edge-functions/api/lib-account.js";
+
+// Node 18 在 **ESM** 里不注入全局 crypto（CJS 里才有 —— 这是 18 的已知行为），
+// 而业务逻辑的密码哈希、会话 token、昵称索引全靠 WebCrypto：
+// 少了这一行，第一个请求就会抛 "crypto is not defined"。
+// Node 19+ 自带全局 crypto，这里赋值会被 ??= 跳过，无副作用。
+globalThis.crypto ??= webcrypto;
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const DATA_FILE = process.env.SYNC_DATA_FILE

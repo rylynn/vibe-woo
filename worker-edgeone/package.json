@@ -3,11 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "scripts": {
-    "start": "node local-dev.js",
     "build": "node -e \"console.log('edge functions deploy: no build needed')\""
   },
-  "type": "module",
-  "engines": {
-    "node": ">=18"
-  }
+  "type": "module"
 }
