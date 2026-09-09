@@ -82,12 +82,30 @@ curl -i https://<你的域名>/api/status
 国内云主机**未备案时 80/443 会被阻断**，但用 **IP + 非标端口**可以正常访问 ——
 ICP 备案针对域名，不针对 IP。所以域名还在备案时，这是最省事的一条路。
 
+### 前置：Node 18+
+
+代码用了 ES modules、可选链，以及**全局 `crypto.subtle`**（密码哈希与会话
+token 都靠它），后者要 Node 18 才有。服务器上如果是老版本会直接报
+`SyntaxError: Unexpected token {` —— 那就是 Node 太老，不是代码问题。
+
+```bash
+node --version        # 需要 v18 及以上
+
+# 用 nvm 装（推荐，不影响系统自带版本）
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
+source ~/.bashrc
+nvm install 18
+nvm use 18
+```
+
 ### 跑起来
 
 ```bash
 node worker-edgeone/local-dev.js 8787
 ADMIN_USER=xxx ADMIN_PASS=yyy node worker-edgeone/local-dev.js 8787   # 带 admin 看板
 ```
+
+（在 `worker-edgeone/` 目录下也可以直接 `npm start`）
 
 服务默认监听 `0.0.0.0`（允许外部访问），所以部署到服务器后不用改监听地址。
 
