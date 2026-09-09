@@ -30,6 +30,12 @@
 
 import { createServer } from "node:http";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { webcrypto } from "node:crypto";
+
+// 业务逻辑里的密码哈希（PBKDF2）、会话 token、昵称索引全靠 WebCrypto。
+// Node 18 起才有全局 crypto，16 只有 node:crypto 里的 webcrypto ——
+// 补上这一行，16 也能跑。低于 16 的请先升级 Node。
+globalThis.crypto ??= webcrypto;
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { dispatch, CORS, statusFor } from "./edge-functions/api/lib-account.js";
