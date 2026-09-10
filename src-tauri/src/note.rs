@@ -149,6 +149,80 @@ pub fn list_today(app: &tauri::AppHandle) -> Vec<Note> {
 }
 
 /**
+ * 删除今日速记的第 `index` 条「我们的记录」（0 基，按文件出现顺序）。
+ *
+ * 与 `persist` 对称：内置目录与 Obsidian vault 各删一遍，任一失败不阻断另一个。
+ *
+ * 「我们的记录」= 以 `- **HH:MM**` 开头的列表项；其后的两空格缩进行是续行，
+ * 一并删除。用户在同一文件里手写的标题、段落、其他格式内容**原样保留** ——
+ * 只精准移除匹配的那一块，不重写整个文件（见 parse_notes 的解析语义）。
+ *
+ * 返回是否有任一落点删除成功。
+ */
+pub fn remove_today(app: &tauri::AppHandle, index: usize) -> bool {
+    let date = fmt_date(now_ms());
+    let mut ok = false;
+    if let Some(dir) = notes_dir(app) {
+        if remove_note_from(&dir, &date, index) {
+            ok = true;
+        }
+    }
+    if let Some(dir) = vault_dir(app) {
+        if remove_note_from(&dir, &date, index) {
+            ok = true;
+        }
+    }
+    ok
+}
+
+/// 从一个目录的当日文件里移除第 `index` 条「我们的记录」。
+fn remove_note_from(dir: &Path, date: &str, index: usize) -> bool {
+    let path = dir.join(format!("{date}.md"));
+    let Ok(text) = fs::read_to_string(&path) else {
+        return false;
+    };
+    let rewritten = remove_note_at(&text, index);
+    // 没有变化（index 越界或文件为空）直接判失败，不触发无谓写盘
+    if rewritten == text {
+        return false;
+    }
+    fs::write(&path, rewritten).is_ok()
+}
+
+/**
+ * 从当日 Markdown 文本里移除第 `index` 条「我们的记录」（含续行）。
+ *
+ * 识别与 `parse_notes` 同源：以 `- **` 开头且能 split 出 `**...**` 的行算一条记录；
+ * 紧随其后、以两空格开头的行是该记录的续行，一并删除。其他行原样保留。
+ *
+ * 纯函数，便于单测。
+ */
+fn remove_note_at(text: &str, index: usize) -> String {
+    let mut out = String::new();
+    let mut count: usize = 0;
+    let mut skipping = false;
+    for line in text.lines() {
+        let is_our_record = line
+            .strip_prefix("- **")
+            .and_then(|r| r.split_once("**"))
+            .is_some();
+        if is_our_record {
+            skipping = count == index;
+            count += 1;
+            if skipping {
+                continue;
+            }
+        } else if skipping && line.starts_with("  ") {
+            // 上一条被删，续行跟随删除
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/**
  * 从 Markdown 解析回 Note 列表。
  *
  * 只解析我们自己写出的格式，不做通用 Markdown 解析 ——
@@ -440,5 +514,55 @@ mod tests {
             notes[0].text,
             "**P0** 修登录闪退\n- [ ] 回邮件 `tomorrow`\n  - 带附件"
         );
+    }
+
+    #[test]
+    fn 删除指定记录含续行() {
+        let dir = std::env::temp_dir().join(format!("vibe-pet-del-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+
+        let mut a = Note::new("第一条\n续行A1\n续行A2", TS);
+        a.tags = vec!["todo".into(), "x".into()];
+        let b = Note::new("第二条", TS + 60000);
+        let c = Note::new("第三条\n续行C1", TS + 120000);
+        append_to(&dir, &a).unwrap();
+        append_to(&dir, &b).unwrap();
+        append_to(&dir, &c).unwrap();
+
+        let date = fmt_date(TS);
+        assert!(remove_note_from(&dir, &date, 1)); // 删第二条
+        let parsed = parse_notes(&fs::read_to_string(dir.join(format!("{date}.md"))).unwrap());
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].text, "第一条\n续行A1\n续行A2");
+        assert_eq!(parsed[1].text, "第三条\n续行C1");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 删除保留用户手写内容() {
+        let text = "# 2026-08-29\n\n手写的一段笔记\n\n- **16:00** 我们的记录\n  续行\n- **16:30** 另一条\n\n又一段手写\n";
+        let rewritten = remove_note_at(text, 0);
+        assert!(!rewritten.contains("我们的记录"));
+        assert!(!rewritten.contains("续行"));
+        assert!(rewritten.contains("手写的一段笔记"));
+        assert!(rewritten.contains("另一条"));
+        assert!(rewritten.contains("又一段手写"));
+    }
+
+    #[test]
+    fn 删除越界不改动原文() {
+        let text = "# d\n\n- **16:00** 甲\n- **16:30** 乙\n";
+        assert_eq!(remove_note_at(text, 5), text);
+    }
+
+    #[test]
+    fn 删除首条后续行不误伤下一条() {
+        // 删第一条时，其续行删掉；下一条记录的正常两空格缩进不应被误删
+        let text = "# d\n\n- **16:00** 甲\n  甲续行\n- **16:30** 乙\n  乙续行\n";
+        let rewritten = remove_note_at(text, 0);
+        let parsed = parse_notes(&rewritten);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].text, "乙\n乙续行");
     }
 }

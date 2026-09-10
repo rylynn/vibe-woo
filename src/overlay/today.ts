@@ -1,5 +1,6 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import type { Box } from "../interact/hit-test";
 import { panelChrome } from "./chrome";
 import { renderLine } from "./md-inline";
@@ -13,20 +14,32 @@ export interface NoteRow {
 /**
  * 今日速记回看。
  *
- * 刻意只做只读列表，不做编辑、搜索、删除 —— 那些交给 Obsidian，
- * 它比我们做得好（设计文档 6.5）。我们只负责「捕获」这一步。
+ * 列表只读；删除走「编辑模式」—— 标题栏的编辑按钮切换后，每行右侧出现
+ * × 按钮，点击精准删除该条（含续行），用户在同一文件里的手写内容保留。
+ * 搜索、富编辑等仍交给 Obsidian，我们只做「捕获 + 轻量删错」。
  */
 export class TodayPanel {
   private readonly el: HTMLDivElement;
   private open = false;
   /** 展开的行号（-1 = 全收起）。 */
   private expanded = -1;
+  /** 编辑模式：每行右侧显示 × 删除按钮。 */
+  private editing = false;
 
   constructor() {
     this.el = document.createElement("div");
     this.el.className = "pet-today";
     this.el.style.display = "none";
     document.body.appendChild(this.el);
+
+    // 面板已打开时新增速记（add_note 落盘后发 pet://note-saved）要实时刷新，
+    // 否则「打开面板 → 再调接口记一条」这条链路看不到新记录。
+    void listen("pet://note-saved", () => {
+      if (!this.open) return;
+      // 列表最新在前，新记录插入后旧展开行号会错位，直接收起避免指错行
+      this.expanded = -1;
+      void this.render();
+    }).catch(() => {});
   }
 
   async show(): Promise<void> {
@@ -54,6 +67,7 @@ export class TodayPanel {
     this.el.style.display = "none";
     this.open = false;
     this.expanded = -1;
+    this.editing = false;
   }
 
   get isOpen(): boolean {
@@ -80,19 +94,41 @@ export class TodayPanel {
   }
 
   private async render(): Promise<void> {
-    this.el.replaceChildren();
-
-    const head = panelChrome(this.el, "今日速记", () => this.hide(), {
-      headClass: "pet-today-head",
-    });
-    this.el.appendChild(head);
-
     let notes: NoteRow[] = [];
     try {
       notes = await invoke<NoteRow[]>("list_today_notes");
     } catch {
       // 非 Tauri 环境
     }
+    // 空列表时退出编辑态：没有可删的，按钮文字也回到「编辑」
+    if (notes.length === 0) this.editing = false;
+
+    this.el.replaceChildren();
+
+    const head = panelChrome(this.el, "今日速记", () => this.hide(), {
+      headClass: "pet-today-head",
+    });
+    // 标题栏父容器用 space-between 把「编辑」挤到中间；把编辑+关闭包成一个
+    // actions 容器贴右侧，标题独占左侧，避免「编辑」被推到中间。
+    const closeBtn = head.querySelector(".pet-panel-close");
+    if (closeBtn) closeBtn.remove();
+    const actions = document.createElement("div");
+    actions.className = "pet-today-head-actions";
+    const edit = document.createElement("button");
+    edit.className = "pet-today-edit";
+    edit.textContent = "✏️";
+    edit.title = this.editing ? "完成编辑" : "编辑/删除记录";
+    edit.addEventListener("pointerdown", (e) => {
+      e.stopPropagation();
+      this.editing = !this.editing;
+      // 切换编辑态时收起展开，避免行号语义变化指错行
+      this.expanded = -1;
+      void this.render();
+    });
+    if (closeBtn) actions.append(edit, closeBtn);
+    else actions.append(edit);
+    head.appendChild(actions);
+    this.el.appendChild(head);
 
     if (notes.length === 0) {
       const empty = document.createElement("div");
@@ -104,9 +140,24 @@ export class TodayPanel {
 
     // 最新的在前面；点击多行行展开/收起，点链接只打开链接
     [...notes].reverse().forEach((n, idx) => {
+      // 前端 idx 是倒序（最新在前）；Rust 按文件顺序删，要换算回文件 index
+      const fileIdx = notes.length - 1 - idx;
       const multiline = n.text.includes("\n");
       const row = renderNoteRow(n, this.expanded === idx);
+      if (this.editing) {
+        const del = document.createElement("button");
+        del.className = "pet-today-del";
+        del.textContent = "×";
+        del.title = "删除";
+        del.addEventListener("pointerdown", (e) => {
+          e.stopPropagation();
+          void this.deleteNote(fileIdx);
+        });
+        row.appendChild(del);
+      }
       row.addEventListener("pointerdown", (e) => {
+        // 编辑模式下点行不展开/收起，避免误触；删除由 × 按钮自己的 handler 处理
+        if (this.editing) return;
         const a = (e.target as HTMLElement).closest?.("a");
         if (a) {
           e.stopPropagation();
@@ -123,6 +174,19 @@ export class TodayPanel {
       });
       this.el.appendChild(row);
     });
+  }
+
+  private async deleteNote(fileIdx: number): Promise<void> {
+    try {
+      const ok = await invoke<boolean>("delete_note", { index: fileIdx });
+      if (ok) {
+        // 列表变化，收起展开避免行号错位；保持编辑态继续删下一条
+        this.expanded = -1;
+        await this.render();
+      }
+    } catch (e) {
+      console.warn("[today] 删除失败", e);
+    }
   }
 }
 
