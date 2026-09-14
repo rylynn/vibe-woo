@@ -34,6 +34,7 @@ cargo test plan_schedule                   # 单个 Rust 测试（按名过滤�
 - 包管理器固定 pnpm 10（`package.json` 的 `packageManager`）；pnpm 11 需 `pnpm-workspace.yaml` 里放行 esbuild build script（已配好，两套键共存是刻意的）。
 - 打完整安装包：`pnpm tauri build` 或 `bash scripts/install.sh`（幂等，装进 `/Applications`）。
 - 更新签名只在发版开：`tauri.conf.json` 的 `createUpdaterArtifacts` 默认 `false`，所以日常构建不需要 updater 私钥口令；发版由 `scripts/release.sh` 用 `--config src-tauri/tauri.release.conf.json` 覆盖开启（等价命令 `pnpm run build:release`）。
+- 代码签名/公证：默认 ad-hoc（`src-tauri/entitlements.plist` 由 `bundle.macOS.entitlements` 引用）。配好 `APPLE_SIGNING_IDENTITY` + 公证凭据（`~/.vibe-pet/` 或环境变量）后，`install.sh` / `release.sh` 自动走 Developer ID 正式签名 + notarization + staple；缺凭据自动回退 ad-hoc。正式签名分支只校验、绝不重新 `codesign`（否则覆盖回 ad-hoc）。
 
 ## 架构
 

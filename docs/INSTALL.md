@@ -36,7 +36,7 @@ bash scripts/install.sh --clone <git仓库地址>
 2. `pnpm install` 安装前端依赖
 3. 跑一遍单元测试（确认代码健康）
 4. 构建并打包出 `.app`
-5. **ad-hoc 签名**后装入 `/Applications`（先停掉正在运行的宠物，避免覆盖失败）
+5. **签名**（默认 ad-hoc；配置了 Developer ID 证书则正式签名）后装入 `/Applications`（先停掉正在运行的宠物，避免覆盖失败）
 
 首次编译 Rust 较慢，约 **5–15 分钟**，这是正常的，不是卡住了。
 
@@ -81,6 +81,39 @@ codesign --force --deep --sign - src-tauri/target/release/bundle/macos/vibe-pet.
 cp -R src-tauri/target/release/bundle/macos/vibe-pet.app /Applications/
 ```
 
+## 代码签名与公证（可选）
+
+默认情况下，`install.sh` 与 `release.sh` 使用 **ad-hoc 签名**：应用能正常在本地运行，但通过网上下载分发时，Gatekeeper 会拦截并提示「无法验证开发者」（右键打开即可放行）。
+
+配置 Apple **Developer ID 证书 + 公证（notarization）** 后可彻底消除该拦截。脚本检测到凭据后自动走正式签名 + 公证 + staple；未配置时自动回退 ad-hoc，不影响日常使用。
+
+1. 申请 [Apple Developer](https://developer.apple.com/) 付费账号，创建 **Developer ID Application** 证书并安装到本机钥匙串。证书名可用 `security find-identity -v -p codesigning` 查看，形如 `Developer ID Application: Your Name (TEAMID)`。
+2. 准备公证凭据（二选一）：
+   - **App Store Connect API Key**（推荐自动化）：Issuer ID、Key ID、`AuthKey_xxx.p8` 文件。
+   - **Apple ID + App 专用密码**：Team ID、Apple ID、专用密码。
+3. 把凭据写入环境变量或 `~/.vibe-pet/` 本机文件（脚本优先读环境变量，其次读文件，绝不回显内容）：
+
+   | 环境变量 | 本机文件（`~/.vibe-pet/`） | 说明 |
+   |---|---|---|
+   | `APPLE_SIGNING_IDENTITY` | `signing-identity.txt` | 证书名 |
+   | `APPLE_API_ISSUER` | `apple-api-issuer.txt` | API Key 的 Issuer（方式一） |
+   | `APPLE_API_KEY` | `apple-api-key.txt` | API Key 的 Key ID（方式一） |
+   | `APPLE_API_KEY_PATH` | `apple-api-key-path.txt` | `AuthKey_xxx.p8` 路径（方式一） |
+   | `APPLE_ID` | `apple-id.txt` | Apple ID（方式二） |
+   | `APPLE_PASSWORD` | `apple-password.txt` | App 专用密码（方式二） |
+   | `APPLE_TEAM_ID` | `apple-team-id.txt` | Team ID（方式二） |
+
+   示例（API Key 方式）：
+   ```bash
+   mkdir -p ~/.vibe-pet
+   printf '%s' "Developer ID Application: Your Name (TEAMID)" > ~/.vibe-pet/signing-identity.txt
+   printf '%s' "YOUR_ISSUER_ID" > ~/.vibe-pet/apple-api-issuer.txt
+   printf '%s' "YOUR_KEY_ID" > ~/.vibe-pet/apple-api-key.txt
+   printf '%s' "/path/to/AuthKey_YOUR_KEY_ID.p8" > ~/.vibe-pet/apple-api-key-path.txt
+   ```
+
+4. 重新运行 `bash scripts/install.sh`（或 `bash scripts/release.sh`），脚本检测到凭据后即走正式签名 + 公证。
+
 ## 启动与日常使用
 
 ```bash
@@ -95,7 +128,7 @@ open -a vibe-pet        # 启动（也可在启动台点）
 | 拖动宠物 | 直接拖 |
 | 退出 | `Ctrl+Alt+Cmd+Q`，或托盘菜单 → 退出 |
 
-首次打开若被系统拦下：**系统设置 → 隐私与安全性 → 仍要打开**（自建应用未走公证，属正常现象）。
+首次打开若被系统拦下：**系统设置 → 隐私与安全性 → 仍要打开**（ad-hoc 签名未走公证，属正常现象；配置 Developer ID 证书 + 公证后可消除，见上文「代码签名与公证」）。
 
 > 开机自启：配置项已预留，界面暂未开放。需要的话手动把 `/Applications/vibe-pet.app` 加进「系统设置 → 通用 → 登录项」。
 
@@ -226,7 +259,7 @@ registry = "sparse+https://mirrors.ustc.edu.cn/crates.io-index/"
 有残留的 vite 占着端口：`pnpm stop`。
 
 **提示「应用已损坏，无法打开」**
-右键应用 → 打开；或 系统设置 → 隐私与安全性 → 仍要打开。脚本已做 ad-hoc 签名，通常不会遇到。
+右键应用 → 打开；或 系统设置 → 隐私与安全性 → 仍要打开。脚本已做 ad-hoc 签名，通常不会遇到；配置 Developer ID 证书 + 公证后（见「代码签名与公证」）可彻底消除。
 
 **桌面点不动其他应用**
 宠物窗口的穿透逻辑异常时会拦截点击。终端执行 `pkill -9 -f vibe-pet`（这是必须记住的兜底手段）。

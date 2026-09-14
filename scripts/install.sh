@@ -451,6 +451,20 @@ if [[ "$MODE" == "dev" ]]; then
 fi
 
 # ---------- 8. 构建打包 ----------
+# 代码签名身份（可选）：有 Developer ID 身份（APPLE_SIGNING_IDENTITY）时走正式签名；
+# 否则保持默认 ad-hoc（日常装机通常无证书，不影响安装）。
+# 凭据来源与 release.sh 一致：环境变量优先，其次 ~/.vibe-pet/ 本机文件。
+SIGNING_IDENTITY="${APPLE_SIGNING_IDENTITY:-}"
+if [[ -z "$SIGNING_IDENTITY" && -f "$HOME/.vibe-pet/signing-identity.txt" ]]; then
+  SIGNING_IDENTITY="$(head -n 1 "$HOME/.vibe-pet/signing-identity.txt")"
+fi
+if [[ -n "$SIGNING_IDENTITY" ]]; then
+  export APPLE_SIGNING_IDENTITY="$SIGNING_IDENTITY"
+  ok "使用 Developer ID 正式签名（身份不回显）"
+else
+  say "  ${C_DIM}未配置签名身份，使用 ad-hoc 签名（本地安装可正常打开）${C_RESET}"
+fi
+
 step "构建并打包（首次编译 Rust 较慢，约 5–15 分钟，请耐心等待）"
 say "  ${C_DIM}编译期间会滚动大量 Rust 输出，属正常现象${C_RESET}"
 BUILD_START="$(date +%s)"
@@ -479,10 +493,17 @@ else
   pkill -f 'vibe-pet' >/dev/null 2>&1 || true
 fi
 
-# ad-hoc 签名：未签名的自建应用会被 Gatekeeper 拦成「已损坏」
-codesign --force --deep --sign - "$APP_PATH" >/dev/null 2>&1 \
-  && ok "已 ad-hoc 签名（避免系统提示「已损坏」）" \
-  || warn "签名失败，若打不开请右键应用 → 打开"
+# 签名校验/回退：正式签名（有身份）只校验不覆盖；ad-hoc（无身份）保持原有行为
+if [[ -n "${APPLE_SIGNING_IDENTITY:-}" ]]; then
+  codesign --verify --deep --strict "$APP_PATH" >/dev/null 2>&1 \
+    && ok "正式签名校验通过" \
+    || warn "正式签名校验未通过（可 codesign -dv --verbose=4 排查）"
+else
+  # ad-hoc 签名：未签名的自建应用会被 Gatekeeper 拦成「已损坏」
+  codesign --force --deep --sign - "$APP_PATH" >/dev/null 2>&1 \
+    && ok "已 ad-hoc 签名（避免系统提示「已损坏」）" \
+    || warn "签名失败，若打不开请右键应用 → 打开"
+fi
 
 rm -rf "$INSTALLED_APP"
 cp -R "$APP_PATH" "$INSTALLED_APP"

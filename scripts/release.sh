@@ -125,6 +125,52 @@ if [[ -z "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" ]]; then
 fi
 ok "更新签名私钥已就绪（内容不回显）"
 
+# ---------- 5.5 代码签名 + 公证凭据（可选，缺省回退 ad-hoc） ----------
+# 正式签名（Developer ID）+ 公证（notarization）+ staple 是可选项：
+#   签名身份：APPLE_SIGNING_IDENTITY（如 "Developer ID Application: Name (TEAMID)"）
+#   公证凭据：App Store Connect API Key（APPLE_API_ISSUER / APPLE_API_KEY / APPLE_API_KEY_PATH）
+#             或 Apple ID + App 专用密码（APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID）
+# 凭据来源：环境变量优先，其次 ~/.vibe-pet/ 下的本机文件（绝不入库、不回显）。
+# 签名身份 + 任一组公证凭据齐全才走正式签名+公证；否则回退 ad-hoc，不阻塞发版。
+read_secret() {  # read_secret <环境变量当前值> <fallback文件> → 打印值（环境变量优先，其次文件首行）
+  local val="$1" file_path="$2"
+  if [[ -n "$val" ]]; then
+    printf '%s' "$val"
+  elif [[ -f "$file_path" ]]; then
+    head -n 1 "$file_path"
+  fi
+}
+APPLE_SIGNING_IDENTITY="$(read_secret "${APPLE_SIGNING_IDENTITY:-}" "${HOME}/.vibe-pet/signing-identity.txt")"
+APPLE_API_ISSUER="$(read_secret "${APPLE_API_ISSUER:-}" "${HOME}/.vibe-pet/apple-api-issuer.txt")"
+APPLE_API_KEY="$(read_secret "${APPLE_API_KEY:-}" "${HOME}/.vibe-pet/apple-api-key.txt")"
+APPLE_API_KEY_PATH="$(read_secret "${APPLE_API_KEY_PATH:-}" "${HOME}/.vibe-pet/apple-api-key-path.txt")"
+APPLE_ID="$(read_secret "${APPLE_ID:-}" "${HOME}/.vibe-pet/apple-id.txt")"
+APPLE_PASSWORD="$(read_secret "${APPLE_PASSWORD:-}" "${HOME}/.vibe-pet/apple-password.txt")"
+APPLE_TEAM_ID="$(read_secret "${APPLE_TEAM_ID:-}" "${HOME}/.vibe-pet/apple-team-id.txt")"
+
+SIGNING=0
+if [[ -n "$APPLE_SIGNING_IDENTITY" ]]; then
+  if [[ -n "$APPLE_API_ISSUER" && -n "$APPLE_API_KEY" ]]; then
+    SIGNING=1
+  elif [[ -n "$APPLE_ID" && -n "$APPLE_PASSWORD" && -n "$APPLE_TEAM_ID" ]]; then
+    SIGNING=1
+  else
+    warn "已配签名身份但缺公证凭据（API Key 或 Apple ID），将回退 ad-hoc 签名"
+  fi
+else
+  warn "未配置 Developer ID 签名凭据，回退 ad-hoc 签名（下载者首次打开需右键，属正常现象）"
+fi
+if [[ $SIGNING -eq 1 ]]; then
+  export APPLE_SIGNING_IDENTITY
+  [[ -n "$APPLE_API_ISSUER" ]] && export APPLE_API_ISSUER
+  [[ -n "$APPLE_API_KEY" ]] && export APPLE_API_KEY
+  [[ -n "$APPLE_API_KEY_PATH" ]] && export APPLE_API_KEY_PATH
+  [[ -n "$APPLE_ID" ]] && export APPLE_ID
+  [[ -n "$APPLE_PASSWORD" ]] && export APPLE_PASSWORD
+  [[ -n "$APPLE_TEAM_ID" ]] && export APPLE_TEAM_ID
+  ok "代码签名 + 公证凭据已就绪（内容不回显），将走正式签名 + 公证"
+fi
+
 # ---------- 6. 测试 ----------
 export PATH="$HOME/.cargo/bin:$PATH"
 if [[ $SKIP_TESTS -eq 1 ]]; then
@@ -167,15 +213,48 @@ if [[ ! -f "$ART" || ! -f "$SIG" ]]; then
 fi
 ok "更新产物就绪：$(basename "$ART")（含 .sig）"
 
-# ---------- 8. ad-hoc 签名 + 打 dmg ----------
-codesign --force --deep --sign - "$APP_PATH" >/dev/null 2>&1 \
-  && ok "已 ad-hoc 签名（避免下载后提示「已损坏」）" \
-  || warn "签名失败，下载者首次打开需右键 → 打开"
+# ---------- 8. 签名校验 + 打 dmg +（可选）dmg 公证 ----------
+if [[ $SIGNING -eq 1 ]]; then
+  # 正式签名：Tauri 已在构建期用 Developer ID 签名 + Hardened Runtime + 公证 + staple .app，
+  # 这里只做校验，绝不重新 codesign（否则会把正式签名覆盖回 ad-hoc）。
+  step "校验正式签名与公证"
+  codesign -dv --verbose=4 "$APP_PATH" 2>&1 | grep -q "Authority=Developer ID Application" \
+    && ok "已用 Developer ID 正式签名" \
+    || warn "签名身份未匹配 Developer ID（可 codesign -dv --verbose=4 排查）"
+  spctl --assess --type execute --verbose=4 "$APP_PATH" >/dev/null 2>&1 \
+    && ok "Gatekeeper 校验通过（.app 已公证）" \
+    || warn "spctl 校验未通过（公证可能未生效，首次打开或仍被拦截）"
+else
+  # ad-hoc 回退：保持原有行为（避免下载后提示「已损坏」）
+  codesign --force --deep --sign - "$APP_PATH" >/dev/null 2>&1 \
+    && ok "已 ad-hoc 签名（避免下载后提示「已损坏」）" \
+    || warn "签名失败，下载者首次打开需右键 → 打开"
+fi
 DMG="dist/vibe-pet_${V}_universal.dmg"   # universal 包双架构通用，文件名不再区分本机架构
 mkdir -p dist
 rm -f "$DMG"
 hdiutil create -volname "Vibe Pet" -srcfolder "$APP_PATH" -ov -format UDZO "$DMG" >/dev/null
 ok "打包完成：${DMG}（$(du -h "$DMG" | cut -f1)）"
+
+# 仅正式签名分支：对 dmg 也公证 + staple，双击打开时 Gatekeeper 直接放行。
+# .app 已公证即可保证核心可用；dmg 公证失败不阻塞发版（warn 不 die）。
+if [[ $SIGNING -eq 1 ]]; then
+  step "公证 dmg"
+  NOTARY_ARGS=()
+  if [[ -n "$APPLE_API_KEY" && -n "$APPLE_API_ISSUER" ]]; then
+    NOTARY_ARGS+=(--key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER")
+    [[ -n "$APPLE_API_KEY_PATH" ]] && NOTARY_ARGS+=(--key "$APPLE_API_KEY_PATH")
+  else
+    NOTARY_ARGS+=(--apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID")
+  fi
+  if xcrun notarytool submit "$DMG" "${NOTARY_ARGS[@]}" --wait >/dev/null 2>&1; then
+    xcrun stapler staple "$DMG" >/dev/null 2>&1 \
+      && ok "dmg 已公证 + staple" \
+      || warn "dmg 公证通过但 staple 失败"
+  else
+    warn "dmg 公证失败（.app 已公证不影响核心可用，dmg 首次打开可能仍被 Gatekeeper 提示）"
+  fi
+fi
 
 # ---------- 9. latest.json（updater 清单：两个 darwin 平台指向同一 universal 直链） ----------
 # 发版期生成物，不提交仓库；URL 是匿名直链（仓库私有期匿名 404，公开后自动生效）
@@ -207,4 +286,8 @@ gh release create "$TAG" --target "$BRANCH" \
   "$DMG#$(basename "$DMG")" \
   --title "$TAG" --generate-notes
 ok "已发布：$(gh release view "$TAG" --json url -q .url)"
-printf '  %s提示%s：仓库公开后自动更新检查才生效（私有期匿名检查 404 静默失败）；下载者首次打开若被拦，右键应用 → 打开（自建应用未公证，属正常现象）。\n' "$C_WARN" "$C_RESET"
+if [[ $SIGNING -eq 1 ]]; then
+  printf '  %s提示%s：仓库公开后自动更新检查才生效（私有期匿名检查 404 静默失败）；本次已正式签名 + 公证，下载者可正常打开。\n' "$C_WARN" "$C_RESET"
+else
+  printf '  %s提示%s：仓库公开后自动更新检查才生效（私有期匿名检查 404 静默失败）；下载者首次打开若被拦，右键应用 → 打开（本次为 ad-hoc 签名，未公证，属正常现象）。\n' "$C_WARN" "$C_RESET"
+fi
