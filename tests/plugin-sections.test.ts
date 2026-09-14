@@ -17,15 +17,66 @@ describe("股市面板分区", () => {
     indices: [],
   };
 
-  it("未开盘时显示未开盘而不是历史数字", () => {
+  it("未开盘且无数据时只显示状态文案", () => {
     const el = stockFrontend.renderSection!({ ...base, market: "closed" }, host);
     expect(el.textContent).toBe("未开盘");
     expect(el.querySelector(".pet-stock-row")).toBeNull();
   });
 
+  it("未开盘但有收盘数据时展示并标注截至时刻", () => {
+    const el = stockFrontend.renderSection!(
+      {
+        ...base,
+        market: "closed",
+        quotes: [
+          {
+            symbol: "sh000001",
+            name: "上证指数",
+            price: 3200.1,
+            change_pct: -0.3,
+            date: "2026-09-11",
+            time: "09-11 15:00",
+            stale: true,
+          },
+        ],
+        as_of: "09-11 15:00",
+      },
+      host,
+    );
+    expect(el.textContent).toContain("未开盘 · 数据截至 09-11 15:00");
+    expect(el.textContent).toContain("上证指数");
+    expect(el.querySelector(".pet-stock-row")).toBeTruthy();
+    expect(el.classList.contains("pet-stock-muted")).toBe(true);
+  });
+
   it("周末显示周末休市", () => {
     const el = stockFrontend.renderSection!({ ...base, market: "weekend" }, host);
     expect(el.textContent).toBe("周末休市");
+  });
+
+  it("周末休市但有收盘数据时置灰展示", () => {
+    const el = stockFrontend.renderSection!(
+      {
+        ...base,
+        market: "weekend",
+        quotes: [
+          {
+            symbol: "sh000001",
+            name: "上证指数",
+            price: 3200.1,
+            change_pct: -0.3,
+            date: "2026-09-11",
+            time: "09-11 15:00",
+            stale: true,
+          },
+        ],
+        as_of: "09-11 15:00",
+      },
+      host,
+    );
+    expect(el.textContent).toContain("周末休市 · 数据截至 09-11 15:00");
+    expect(el.classList.contains("pet-stock-muted")).toBe(true);
+    expect(el.querySelector(".pet-stock-row")).toBeTruthy();
   });
 
   it("有当日行情时照常显示数字", () => {
@@ -40,6 +91,43 @@ describe("股市面板分区", () => {
     );
     expect(el.textContent).toContain("贵州茅台");
     expect(el.querySelector(".pet-stock-row")).toBeTruthy();
+    expect(el.querySelector(".pet-stock-status")).toBeNull();
+    expect(el.classList.contains("pet-stock-muted")).toBe(false);
+  });
+
+  it("停牌行挂小时间标签", () => {
+    const el = stockFrontend.renderSection!(
+      {
+        ...base,
+        quotes: [
+          { symbol: "sh600519", name: "贵州茅台", price: 1297.5, change_pct: -0.16, date: "2026-09-14", time: "09-14 15:00" },
+          { symbol: "sz000625", name: "长安汽车", price: 8.45, change_pct: -2.1, date: "2026-09-10", time: "09-10 10:30", stale: true },
+        ],
+        as_of: "09-14 15:00",
+      },
+      host,
+    );
+    const tags = el.querySelectorAll(".pet-stock-ts");
+    // 只有停牌行挂标签
+    expect(tags.length).toBe(1);
+    expect(tags[0].textContent).toBe("09-10 10:30");
+    expect(el.querySelectorAll(".pet-stock-stale").length).toBe(1);
+  });
+
+  it("as_of缺失时状态行不显示数据截至", () => {
+    const el = stockFrontend.renderSection!(
+      {
+        ...base,
+        market: "weekend",
+        quotes: [
+          { symbol: "sh000001", name: "上证指数", price: 3200.1, change_pct: -0.3, date: "2026-09-11", stale: true },
+        ],
+      },
+      host,
+    );
+    expect(el.textContent).toContain("周末休市");
+    expect(el.textContent).not.toContain("数据截至");
+    expect(el.querySelector(".pet-stock-ts")).toBeNull();
   });
 
   it("旧版后端没有 market 字段时退回原有文案", () => {

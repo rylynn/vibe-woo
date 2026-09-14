@@ -9,6 +9,10 @@
 //!  （频率控制第一道闸；第二道是出卡间隔 45 分钟）。
 //! - **没配置标的也有得看**：默认展示上证/恒指/纳指三大指数；
 //!   配置个股后高优展示个股，指数退到卡片二级视图（「查看指数」）。
+//! - **休市也有的看**：周末/节假日/盘前，面板展示最近收盘数据并标注
+//!   「周末休市/未开盘 · 数据截至 …」（非实时行置灰，停牌行挂小时间
+//!   标签）；**出卡仍要求严格当日行情**（`card_gate` 不变）——
+//!   展示归展示，打扰归打扰。
 //! - 每天收盘后出一次「收盘总结」卡（`summarized_after` 时刻，
 //!   `summarized_date` 防重启重复发）。
 //!
@@ -159,20 +163,22 @@ fn us_dst_offset(d: NaiveDate) -> i32 {
     if is_us_dst(d) { -4 } else { -5 }
 }
 
-/// 把一个时区的本地时刻换算成北京日期。
+/// 把一个时区的本地时刻换算成北京时刻。
 /// `local_offset_hours` 为该时区相对 UTC 的偏移（美东 -5 / -4）。
-fn shift_to_beijing(local: NaiveDateTime, local_offset_hours: i32) -> String {
+fn shift_to_beijing(local: NaiveDateTime, local_offset_hours: i32) -> NaiveDateTime {
     let utc = local - chrono::Duration::hours(local_offset_hours as i64);
-    (utc + chrono::Duration::hours(8)).format("%Y-%m-%d").to_string()
+    utc + chrono::Duration::hours(8)
 }
 
-/// 从行情字段里扫描时间戳，换算成**本地（北京）日期** `YYYY-MM-DD`；
-/// 扫不到返回空串 —— 调用方一律视为陈旧（安全方向：宁可不显示，不显示错的）。
+/// 从行情字段里扫描时间戳，换算成**北京时刻**，返回
+/// （日期 `YYYY-MM-DD`，时刻 `MM-DD HH:MM`）；扫不到返回双空串 ——
+/// 调用方一律视为陈旧（安全方向：宁可不显示，不显示错的）。
 ///
 /// 时间戳字段**下标在 A股/港股/美股间会漂移**（实测 A股在第 28 位、美股在
 /// 第 30 位），所以不认下标，扫描全部字段匹配两种格式；时区按 symbol 前缀
-/// 判（比按格式判更稳）。
-fn quote_ts_local_date(fields: &[&str], symbol: &str) -> String {
+/// 判（比按格式判更稳）。时刻与日期同源，供面板展示「数据截至」与
+/// 停牌行的小时间标签（定长零填充 → 字典序即时间序）。
+fn quote_ts(fields: &[&str], symbol: &str) -> (String, String) {
     let eastern = symbol.starts_with("us");
     for raw in fields {
         let t = raw.trim();
@@ -192,13 +198,17 @@ fn quote_ts_local_date(fields: &[&str], symbol: &str) -> String {
             None
         };
         let Some(naive) = naive else { continue };
-        return if eastern {
+        let bj = if eastern {
             shift_to_beijing(naive, us_dst_offset(naive.date()))
         } else {
-            naive.date().format("%Y-%m-%d").to_string()
+            naive
         };
+        return (
+            bj.format("%Y-%m-%d").to_string(),
+            bj.format("%m-%d %H:%M").to_string(),
+        );
     }
-    String::new()
+    (String::new(), String::new())
 }
 
 /// `YYYY-MM-DD` 是否为周六或周日。解析失败按工作日处理 ——
@@ -275,12 +285,49 @@ pub struct Quote {
     ///（旧缓存缺字段自动补空串 → 一律判为陈旧，安全方向正确）。
     #[serde(default)]
     pub date: String,
+    /// 行情时间戳换算出的**北京时刻** `MM-DD HH:MM`（展示用）；空串 = 同上。
+    /// 旧缓存缺字段自动补空串，一次拉取后即补全。
+    #[serde(default)]
+    pub time: String,
+}
+
+/// 面板展示视图：Quote + 读取时推导的 `stale`（**不落盘**，只在 `meta()`
+/// 组装时存在 —— 「今天是不是周末 / 时间戳是不是今天」随读取时刻变化，
+/// 落盘会变成过期快照污染缓存）。flatten 序列化后字段扁平。
+/// 卡片 payload 继续用 `Quote`，类型层面保证卡片不带 stale。
+#[derive(Debug, Clone, Serialize)]
+struct QuoteView {
+    #[serde(flatten)]
+    q: Quote,
+    /// 行情不是实时的（周末 / 时间戳非今日 / 没解析出时间戳）→ 前端置灰。
+    stale: bool,
+}
+
+/// 面板单条的 stale 判定：周末全部非实时（周六凌晨美股时间戳换算过来
+/// 是「今天」也照样休市）；工作日按「时间戳是不是今天」逐条判
+///（停牌个股时间戳停在过去，自然落入陈旧）。
+fn quote_view(q: &Quote, today: &str, weekend: bool) -> QuoteView {
+    QuoteView {
+        q: q.clone(),
+        stale: weekend || q.date != today,
+    }
+}
+
+/// 全部展示行里最新的数据时刻（`MM-DD HH:MM` 定长零填充 → 字典序即时间序）。
+/// 全空返回空串 → 前端不显示「数据截至」。
+fn latest_time<'a>(all: impl Iterator<Item = &'a QuoteView>) -> String {
+    all.map(|v| v.q.time.as_str())
+        .filter(|t| !t.is_empty())
+        .max()
+        .unwrap_or("")
+        .to_string()
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 struct StocksState {
     date: String,
-    /// 最近一次成功拉取的快照（当日有效）。
+    /// 最近一次成功拉取的快照（跨天保留 —— 面板休市时展示最近收盘靠它；
+    /// 出卡另有 `card_gate` 的时间戳闸门，不靠这里清）。
     quotes: Vec<Quote>,
     /// 上次出卡时的快照（变动比较基准；空 = 尚未建立基准）。
     last_card_quotes: Vec<Quote>,
@@ -312,13 +359,18 @@ fn load_state(app: &tauri::AppHandle) {
     with_state(|g| *g = s);
 }
 
-/// 跨天重置（纯函数，单测入口）。
+/// 跨天重置（纯函数，单测入口）。**保留行情快照**：周末/清晨面板要展示
+/// 最近收盘数据，空窗比旧数据更糟（周六 00:00 后周末拉取间隔 30 分钟，
+/// 清空了就要空窗到下次拉取）。只清「当日性」字段：出卡基准、总结防重、
+/// LLM 点评。出卡安全不受影响 —— 保留的快照时间戳全部非「今天」，
+/// `card_gate` 会挡住；开盘后 2 分钟一轮的拉取自然覆盖。
 fn rollover(s: &mut StocksState, today: &str) {
     if s.date != today {
-        *s = StocksState {
-            date: today.to_string(),
-            ..Default::default()
-        };
+        s.date = today.to_string();
+        s.last_card_quotes.clear();
+        s.summarized_date.clear();
+        s.digest.clear();
+        // 保留：quotes / last_fetch_mins / last_card_mins（全局时钟，跨天只会更严）
     }
 }
 
@@ -347,14 +399,15 @@ fn parse_line(line: &str) -> Option<Quote> {
     }
     let change_pct = (price - prev_close) / prev_close * 100.0;
     let name = f[1].trim().to_string();
-    // symbol 会被 move，date 必须在构造 Quote 之前算好。
-    let date = quote_ts_local_date(&f, &symbol);
+    // symbol 会被 move，时间戳必须在构造 Quote 之前算好。
+    let (date, time) = quote_ts(&f, &symbol);
     Some(Quote {
         symbol,
         name,
         price,
         change_pct,
         date,
+        time,
     })
 }
 
@@ -649,6 +702,24 @@ fn epoch_mins() -> u64 {
         .unwrap_or(0)
 }
 
+/// 面板组装（纯函数，单测入口）：市场状态 + 主从视图（带 stale）+ 数据截至时刻。
+/// 与出卡不同，面板**不滤掉陈旧行情** —— 休市/盘前/停牌时展示最近收盘数据，
+/// 状态与「截至什么时候」说清楚即可。`market_state` 用**全量** quotes 判：
+/// 周末优先于时间戳，周六凌晨美股时间戳换算成「今天」也判 Weekend。
+fn panel_views(
+    quotes: &[Quote],
+    symbols: &[String],
+    today: &str,
+) -> (MarketState, Vec<QuoteView>, Vec<QuoteView>, String) {
+    let weekend = is_weekend(today);
+    let market = market_state(today, quotes);
+    let (primary, indices) = split_views(quotes, symbols);
+    let pv: Vec<QuoteView> = primary.iter().map(|q| quote_view(q, today, weekend)).collect();
+    let iv: Vec<QuoteView> = indices.iter().map(|q| quote_view(q, today, weekend)).collect();
+    let as_of = latest_time(pv.iter().chain(iv.iter()));
+    (market, pv, iv, as_of)
+}
+
 /// 左键面板 / 设置用元信息。
 pub fn meta(app: &tauri::AppHandle) -> PluginMeta {
     let cfg = load_config(app);
@@ -656,15 +727,15 @@ pub fn meta(app: &tauri::AppHandle) -> PluginMeta {
         .map(|c| c.date)
         .unwrap_or_default();
     let s = STATE.lock().ok().and_then(|g| g.clone());
-    let fresh = match s {
-        Some(mut s) if s.date == today => {
+    // 无条件 rollover（克隆上改，不落盘，tick 才落）：跨天瞬间（tick 未跑）
+    // 也能展示昨日收盘 —— rollover 保留行情快照正是为此。
+    let (market, primary, indices, as_of) = match s {
+        Some(mut s) => {
             rollover(&mut s, &today);
-            fresh_quotes(&s.quotes, &today)
+            panel_views(&s.quotes, &cfg.symbols, &today)
         }
-        _ => Vec::new(),
+        None => (market_state(&today, &[]), Vec::new(), Vec::new(), String::new()),
     };
-    let market = market_state(&today, &fresh);
-    let (primary, indices) = split_views(&fresh, &cfg.symbols);
     PluginMeta {
         id: ID.into(),
         name: "股市投资".into(),
@@ -673,10 +744,10 @@ pub fn meta(app: &tauri::AppHandle) -> PluginMeta {
             "enabled": cfg.enabled,
             "symbols": cfg.symbols,
             "market": market,
-            // 非 live 时 fresh 本就是空 —— 收口在 Rust 侧：
-            // 旧版前端即使没更新也拿不到历史数字
             "quotes": primary,
             "indices": indices,
+            // 数据截至时刻（全部展示行最新的 time）；空串 = 没解析出时间戳
+            "as_of": as_of,
         }),
     }
 }
@@ -787,7 +858,7 @@ mod tests {
     }
 
     #[test]
-    fn 跨天重置快照与总结防重标记() {
+    fn 跨天保留行情快照_重置出卡与总结状态() {
         let mut s = StocksState {
             date: "2026-09-01".into(),
             quotes: vec![Quote {
@@ -797,13 +868,23 @@ mod tests {
                 change_pct: 1.0,
                 ..Default::default()
             }],
+            last_card_quotes: vec![Quote {
+                symbol: "s".into(),
+                name: "n".into(),
+                price: 1.0,
+                change_pct: 1.0,
+                ..Default::default()
+            }],
+            last_fetch_mins: 100,
+            last_card_mins: 100,
             summarized_date: "2026-09-01".into(),
             digest: "旧点评".into(),
-            ..Default::default()
         };
         rollover(&mut s, "2026-09-02");
         assert_eq!(s.date, "2026-09-02");
-        assert!(s.quotes.is_empty());
+        assert_eq!(s.quotes.len(), 1, "行情快照保留 —— 休市/清晨面板要展示最近收盘");
+        assert!(s.last_card_quotes.is_empty(), "出卡基准清空，重建基准的首拉取不出卡");
+        assert_eq!(s.last_fetch_mins, 100, "全局时钟保留，跨天只会更严");
         assert_eq!(s.summarized_date, "", "新的一天允许再发总结");
         assert!(s.digest.is_empty());
     }
@@ -819,21 +900,27 @@ mod tests {
     }
 
     #[test]
-    fn 行情时间戳换算本地日期() {
+    fn 行情时间戳换算北京日期与时刻() {
         // A股：14 位紧凑格式，已是北京时间
         let f: Vec<&str> = A_SHARE.split('~').collect();
-        assert_eq!(quote_ts_local_date(&f, "sh600519"), "2026-09-02");
+        assert_eq!(
+            quote_ts(&f, "sh600519"),
+            ("2026-09-02".into(), "09-02 16:14".into())
+        );
         // 港股同样 +8
-        assert_eq!(quote_ts_local_date(&f, "hkHSI"), "2026-09-02");
+        assert_eq!(quote_ts(&f, "hkHSI"), ("2026-09-02".into(), "09-02 16:14".into()));
         // 美股：19 位带空格格式，美东 2026-09-01 16:00 → 北京 2026-09-02 04:00
         let uf: Vec<&str> = US_SHARE.split('~').collect();
         assert_eq!(
-            quote_ts_local_date(&uf, "usAAPL"),
-            "2026-09-02",
+            quote_ts(&uf, "usAAPL"),
+            ("2026-09-02".into(), "09-02 04:00".into()),
             "美东 9/1 16:00（夏令时 -4）= 北京 9/2 04:00"
         );
-        // 扫不到时间戳 → 空串（调用方视为陈旧）
-        assert_eq!(quote_ts_local_date(&["1", "名", "0"], "sh600519"), "");
+        // 扫不到时间戳 → 双空串（调用方视为陈旧）
+        assert_eq!(
+            quote_ts(&["1", "名", "0"], "sh600519"),
+            (String::new(), String::new())
+        );
     }
 
     #[test]
@@ -850,12 +937,14 @@ mod tests {
     }
 
     #[test]
-    fn 解析结果带上本地日期() {
+    fn 解析结果带上本地日期与时刻() {
         let q = parse_line(A_SHARE).unwrap();
         assert_eq!(q.symbol, "sh600519");
         assert_eq!(q.date, "2026-09-02", "A股 14 位时间戳 → 本地日期");
+        assert_eq!(q.time, "09-02 16:14");
         let q2 = parse_line(US_SHARE).unwrap();
         assert_eq!(q2.date, "2026-09-02", "美股美东 9/1 16:00 → 北京 9/2");
+        assert_eq!(q2.time, "09-02 04:00");
     }
 
     #[test]
@@ -928,6 +1017,85 @@ mod tests {
         assert!(card_gate("2026-09-07", &[q("2026-09-04")]).is_none(), "历史数据 → 不出卡（含总结）");
         assert!(card_gate("2026-09-07", &[]).is_none());
         assert!(card_gate("2026-09-05", &[q("2026-09-05")]).is_none(), "周末 → 不出卡");
+    }
+
+    #[test]
+    fn 周末全部行情判为非实时() {
+        let q = |sym: &str, d: &str, t: &str| Quote {
+            symbol: sym.into(),
+            name: sym.into(),
+            price: 1.0,
+            change_pct: 0.0,
+            date: d.into(),
+            time: t.into(),
+        };
+        // 周六凌晨：美股周五收盘时间戳换算过来是「今天」，但确实休市 ——
+        // 不再裸奔显示数字，全部判非实时并给足数据截至时刻
+        let quotes = vec![
+            q("sh600519", "2026-09-04", "09-04 15:00"),
+            q("usAAPL", "2026-09-05", "09-05 04:00"),
+        ];
+        let (market, pv, iv, as_of) =
+            panel_views(&quotes, &["sh600519".into(), "usAAPL".into()], "2026-09-05");
+        assert_eq!(market, MarketState::Weekend, "周末优先于时间戳");
+        assert!(pv.iter().chain(iv.iter()).all(|v| v.stale), "周末全部判非实时");
+        assert_eq!(pv.len(), 2, "陈旧行情不再被滤掉");
+        assert_eq!(as_of, "09-05 04:00", "数据截至取最新时刻");
+    }
+
+    #[test]
+    fn 停牌行保留并单独标陈旧() {
+        let q = |sym: &str, d: &str, t: &str| Quote {
+            symbol: sym.into(),
+            name: sym.into(),
+            price: 1.0,
+            change_pct: 0.0,
+            date: d.into(),
+            time: t.into(),
+        };
+        let quotes = vec![
+            q("sh600519", "2026-09-07", "09-07 15:00"),
+            q("sz000625", "2026-09-02", "09-02 10:30"), // 停牌，时间戳停在上周
+        ];
+        let (market, pv, _, as_of) =
+            panel_views(&quotes, &["sh600519".into(), "sz000625".into()], "2026-09-07");
+        assert_eq!(market, MarketState::Live, "任一条当日 → Live");
+        assert_eq!(pv.len(), 2, "停牌行不再被滤掉");
+        assert!(!pv[0].stale, "当日行实时");
+        assert!(pv[1].stale, "停牌行标陈旧（前端挂小时间标签）");
+        assert_eq!(as_of, "09-07 15:00");
+    }
+
+    #[test]
+    fn 数据截至取最新_全空降级为空串() {
+        let mk = |t: &str| {
+            quote_view(
+                &Quote {
+                    symbol: "s".into(),
+                    name: "n".into(),
+                    price: 1.0,
+                    change_pct: 0.0,
+                    date: "2026-09-07".into(),
+                    time: t.into(),
+                },
+                "2026-09-07",
+                false,
+            )
+        };
+        let all = vec![mk("09-07 15:00"), mk(""), mk("09-07 09:31")];
+        assert_eq!(latest_time(all.iter()), "09-07 15:00");
+        assert_eq!(latest_time([mk(""), mk("")].iter()), "", "全空 → 不显示数据截至");
+    }
+
+    #[test]
+    fn 旧缓存缺time字段补空串() {
+        let q: Quote = serde_json::from_str(
+            r#"{"symbol":"sh600519","name":"n","price":1.0,"change_pct":0.0,"date":"2026-09-07"}"#,
+        )
+        .unwrap();
+        assert_eq!(q.time, "", "旧缓存没有 time → 空串");
+        let v = quote_view(&q, "2026-09-07", false);
+        assert!(!v.stale, "time 缺失不影响当日判定（date 仍在）");
     }
 
     #[test]

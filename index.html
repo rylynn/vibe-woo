@@ -961,6 +961,28 @@
         color: #9aa0a6;
       }
 
+      /* 休市/非交易时段：状态行 + 整体置灰（红涨绿跌降饱和） */
+      .pet-stock-status {
+        margin-bottom: 4px;
+        font-size: 11px;
+        color: #9aa0a6;
+      }
+
+      .pet-stock-muted {
+        opacity: 0.7;
+      }
+
+      /* 停牌/数据滞后行：名称降饱和 + 小时间标签 */
+      .pet-stock-row.pet-stock-stale .pet-stock-name {
+        color: #8b93a7;
+      }
+
+      .pet-stock-ts {
+        font-size: 10px;
+        color: #8b93a7;
+        white-space: nowrap;
+      }
+
       /* 插件设置表单（设置面板「插件」分区内） */
       .pet-plugin-settings {
         padding: 6px 14px 12px;

@@ -8,6 +8,13 @@ interface Quote {
   change_pct: number;
   /** 行情时间戳换算出的本地日期 YYYY-MM-DD；空串 = 没能解析出时间戳。 */
   date: string;
+  /** 北京时间 "MM-DD HH:MM"；空串/旧缓存缺失 = 没能解析出时间戳。 */
+  time?: string;
+}
+
+/** 面板行情行：Quote + Rust 读取时推导的 stale。卡片 payload 没有 stale。 */
+interface QuoteView extends Quote {
+  stale?: boolean;
 }
 
 /** 卡片 payload（与 Rust stocks.rs 契约一致）。 */
@@ -62,8 +69,9 @@ function fmtPct(v: number): string {
   return `${v >= 0 ? "+" : ""}${v.toFixed(2)}%`;
 }
 
-/** 一组行情行（主视图/指数视图共用）。 */
-function renderRows(list: Quote[]): HTMLDivElement {
+/** 一组行情行（主视图/指数视图共用）。asOf 非空时，时刻更旧的行
+ *  （停牌/数据滞后）挂小时间标签 —— Rust 侧已判好 stale，这里只比时刻。 */
+function renderRows(list: QuoteView[], asOf?: string): HTMLDivElement {
   const box = document.createElement("div");
   for (const q of list) {
     const row = document.createElement("div");
@@ -77,6 +85,15 @@ function renderRows(list: Quote[]): HTMLDivElement {
     pct.className = q.change_pct >= 0 ? "pet-stock-up" : "pet-stock-down";
     pct.textContent = fmtPct(q.change_pct);
     row.append(name, price, pct);
+    // 定长 "MM-DD HH:MM" 字典序比较（跨年错序是可接受边界，只影响挂不挂标签）
+    if (q.stale && asOf && q.time && q.time < asOf) {
+      row.classList.add("pet-stock-stale");
+      const ts = document.createElement("span");
+      ts.className = "pet-stock-ts";
+      ts.textContent = q.time;
+      ts.title = `数据截至 ${q.date}`;
+      row.appendChild(ts);
+    }
     box.appendChild(row);
   }
   return box;
@@ -130,8 +147,10 @@ export const stockFrontend: PluginFrontend = {
       symbols: string[];
       /** Rust 侧推导的市场状态；旧版后端没有这个字段时为 undefined。 */
       market?: "live" | "weekend" | "closed";
-      quotes: Quote[];
-      indices: Quote[];
+      quotes: QuoteView[];
+      indices: QuoteView[];
+      /** 数据截至时刻（全部展示行最新的 time）；旧版后端/解析失败时缺失。 */
+      as_of?: string;
     };
     const el = document.createElement("div");
     el.className = "pet-card-stock-section";
@@ -140,8 +159,8 @@ export const stockFrontend: PluginFrontend = {
       return el;
     }
     if (s.quotes.length === 0) {
-      // 非 live 时 Rust 已经把 quotes 清空了 —— 这里只负责把状态说清楚。
-      // market 缺失（旧版后端）走最后的兜底分支，不会显示历史数字。
+      // 一条行情都没有（首拉取前/接口持续失败）—— 只负责把状态说清楚。
+      // market 缺失（旧版后端）走最后的兜底分支。
       if (s.market === "weekend") {
         el.textContent = "周末休市";
       } else if (s.market === "closed") {
@@ -154,13 +173,23 @@ export const stockFrontend: PluginFrontend = {
       }
       return el;
     }
-    el.appendChild(renderRows(s.quotes));
+    // 休市/非交易时段：不藏数字 —— 展示最近收盘数据，状态行说清「截至什么时候」
+    const muted = s.market === "weekend" || s.market === "closed";
+    if (muted) {
+      el.classList.add("pet-stock-muted");
+      const status = document.createElement("div");
+      status.className = "pet-stock-status";
+      const label = s.market === "weekend" ? "周末休市" : "未开盘";
+      status.textContent = s.as_of ? `${label} · 数据截至 ${s.as_of}` : label;
+      el.appendChild(status);
+    }
+    el.appendChild(renderRows(s.quotes, s.as_of));
     if (s.indices.length > 0) {
       const head = document.createElement("div");
       head.className = "pet-stock-section-head";
       head.textContent = "指数";
       el.appendChild(head);
-      el.appendChild(renderRows(s.indices));
+      el.appendChild(renderRows(s.indices, s.as_of));
     }
     return el;
   },
