@@ -14,17 +14,20 @@ use crate::configcmd;
 
 /// 内置同步服务地址。请求路径直接拼在后面（/api/heartbeat、/api/greet …）。
 ///
-/// **必须带 `/api`**：边缘函数文件在 `edge-functions/api/[[default]].js`，
-/// 按 Pages 的文件路由它只挂在 `/api/*` 上；请求 `/heartbeat` 根本不会命中。
-/// 自托管同理：国内云主机未备案时只能用 IP + 非标端口，见
-/// `worker-edgeone/local-dev.js` 顶部的用法说明。
-pub const DEFAULT_SYNC_BASE_URL: &str = "https://vibe-woo-moyzkajk.edgeone.cool/api";
-
-/// 实际使用的服务地址：配置留空 → 内置域名。
+/// 当前是自托管在腾讯云的那台机器。为什么不是 EdgeOne：域名还在备案，
+/// EdgeOne 只能靠 3 小时过期的预览链接访问（客户端用不了），
+/// 而 Cloudflare 的 `workers.dev` 在国内被 DNS 污染。
+/// **备案下来后换成自己的域名，只改这一行。**
 ///
-/// 只放行 https 与本机 http —— 设置面板那个覆盖口子一旦被填成
-/// `http://`，Bearer token 就明文上网了。不合规的地址静默回落内置域名，
-/// 总好过把会话令牌送出去。
+/// 明文 http 只在 host 是 IP 时才被放行（见 `host_is_ip`），
+/// 有域名一律要求 https —— 会话 token 不能裸奔。
+pub const DEFAULT_SYNC_BASE_URL: &str = "http://119.45.169.217:8787/api";
+
+/// 实际使用的服务地址：配置留空 → 内置地址。
+///
+/// 只放行 https，以及 http + IP（IP 没法备案，只能明文）。
+/// 有域名却填 `http://` 会被拒绝并回落 —— 设置面板那个覆盖口子
+/// 一旦被填成明文域名，Bearer token 就上网裸奔了。
 pub fn base_url() -> String {
     let cfg = configcmd::current();
     let s = cfg.social.server.trim();
@@ -131,10 +134,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn 内置地址不带结尾斜杠() {
-        // 路径是直接拼的，结尾带斜杠会拼出 //heartbeat
-        assert!(!DEFAULT_SYNC_BASE_URL.ends_with('/'));
-        assert!(DEFAULT_SYNC_BASE_URL.starts_with("https://"));
+    fn 内置地址自身必须合规() {
+        // 内置地址是所有人的默认值：它自己过不了校验，等于全网连不上。
+        // 不写死 https —— 自托管阶段是 http + IP（IP 无从备案），
+        // 备案后会换回 https 域名，两种都要能通过。
+        assert!(
+            !DEFAULT_SYNC_BASE_URL.ends_with('/'),
+            "路径是直接拼的，结尾带斜杠会拼出 //heartbeat"
+        );
+        let ok = DEFAULT_SYNC_BASE_URL.starts_with("https://")
+            || (DEFAULT_SYNC_BASE_URL.starts_with("http://")
+                && host_is_ip(DEFAULT_SYNC_BASE_URL));
+        assert!(ok, "内置地址不合规：{DEFAULT_SYNC_BASE_URL}");
     }
 
     #[test]
