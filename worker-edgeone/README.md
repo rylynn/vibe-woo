@@ -118,7 +118,7 @@ ADMIN_USER=xxx ADMIN_PASS=yyy node worker-edgeone/local-dev.js 8787   # 带 admi
 
 ### 用 systemd 守护（不然 SSH 断开就挂了）
 
-完整手册见 **[docs/deploy-selfhost.md](../../docs/deploy-selfhost.md)**：
+完整手册见 **[DEPLOY.md](./DEPLOY.md)**：
 专用用户、数据目录分离、安全加固、自动备份、故障排查，命令可直接复制。
 
 只想快速跑起来，最小配置：
