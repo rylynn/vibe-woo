@@ -118,29 +118,34 @@ ADMIN_USER=xxx ADMIN_PASS=yyy node worker-edgeone/local-dev.js 8787   # 带 admi
 
 ### 用 systemd 守护（不然 SSH 断开就挂了）
 
+完整手册见 **[docs/deploy-selfhost.md](../../docs/deploy-selfhost.md)**：
+专用用户、数据目录分离、安全加固、自动备份、故障排查，命令可直接复制。
+
+只想快速跑起来，最小配置：
+
 ```ini
 # /etc/systemd/system/vibe-pet-sync.service
 [Unit]
 Description=Vibe Pet Sync
-After=network.target
+After=network-online.target
 
 [Service]
 Type=simple
 WorkingDirectory=/opt/vibe-woo
-ExecStart=/usr/bin/node worker-edgeone/local-dev.js 8787
-Environment=ADMIN_USER=xxx
-Environment=ADMIN_PASS=yyy
+# 绝对路径：systemd 不加载 bash 环境，写 node 会找不到
+ExecStart=/opt/node-v18.20.4-linux-x64/bin/node worker-edgeone/local-dev.js 8787
 Environment=SYNC_DATA_FILE=/var/lib/vibe-pet/sync.json
 Restart=always
-RestartSec=3
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
 ```
 
 ```bash
+sudo systemctl daemon-reload
 sudo systemctl enable --now vibe-pet-sync
-sudo systemctl status vibe-pet-sync
+sudo journalctl -u vibe-pet-sync -f
 ```
 
 ### 别忘了这三件事
