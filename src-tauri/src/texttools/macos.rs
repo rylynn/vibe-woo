@@ -115,6 +115,9 @@ extern "C" {
     fn CFRelease(cf: *const std::ffi::c_void);
 
     static kCFBooleanTrue: CFTypeRef;
+    // AX 授权提示开关的 key 常量本体：符号名带前导 k，字符串值是
+    // "AXTrustedCheckOptionPrompt"（没有 k）—— 手搓字符串极易抄错，必须导入本体。
+    static kAXTrustedCheckOptionPrompt: CFStringRef;
     static kCFTypeDictionaryKeyCallBacks: CFDictionaryKeyCallBacks;
     static kCFTypeDictionaryValueCallBacks: CFDictionaryValueCallBacks;
 }
@@ -159,15 +162,21 @@ pub fn frontmost_is_self() -> bool {
 }
 
 /// 查询辅助功能授权。prompt=true 时弹系统授权提示（仅用户主动点击后调用）。
+///
+/// options 的 key 必须用 HIServices 导出的 `kAXTrustedCheckOptionPrompt` 常量本体。
+/// 曾手搓成带前导 k 的字符串，AX 内部按真常量查 dict 得到 NULL 且不判空，
+/// 直接段错误（2026-09-16 崩溃报告，符号名 ≠ 字符串值）。全局常量不归我们释放，
+/// dict 存续期间由 kCFTypeDictionaryKeyCallBacks 自动持有。
 pub fn ax_trusted(prompt: bool) -> bool {
     unsafe {
         if !prompt {
             // 纯查询，不弹任何提示
             return AXIsProcessTrustedWithOptions(std::ptr::null_mut()) == 1;
         }
-        let Some(key) = cf_string("kAXTrustedCheckOptionPrompt") else {
+        let key = kAXTrustedCheckOptionPrompt;
+        if key.is_null() {
             return false;
-        };
+        }
         let keys = [key];
         let values = [kCFBooleanTrue];
         let dict = CFDictionaryCreate(
@@ -186,7 +195,6 @@ pub fn ax_trusted(prompt: bool) -> bool {
         if !dict.is_null() {
             CFRelease(dict);
         }
-        CFRelease(key);
         trusted
     }
 }
