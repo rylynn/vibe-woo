@@ -207,6 +207,31 @@ describe("取词浮窗", () => {
     expect(ta?.value).toBe("第二轮");
   });
 
+  it("结果事件先于会话号返回时不丢失（IPC 顺序竞争）", async () => {
+    const panel = new TextToolsPanel();
+    // 不 await：invoke 仍在途，会话号还没回到前端
+    const pending = panel.start("selection");
+    // Rust 阻塞读取线程先把结果事件推到了（两条消息各走各的通道，顺序无保证）
+    panel.onResult(payload({ session: 1, outcome: { kind: "ok", text: "先到的结果", sourceApp: null } }));
+    await pending; // 此刻才 adopt —— 若结果被当过期丢弃，面板将永远停在读取中
+
+    const ta = document.querySelector<HTMLTextAreaElement>(".pet-tt-original");
+    expect(ta?.value).toBe("先到的结果");
+  });
+
+  it("结果彻底丢失时读取态有兜底超时，不会永远读取中", async () => {
+    vi.useFakeTimers();
+    try {
+      const panel = new TextToolsPanel();
+      await panel.start("selection");
+      // 什么结果都不来（事件投递失败等极端情况）
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(document.querySelector(".pet-tt-error")?.textContent).toContain("超时");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("译文按纯文本渲染（外部服务返回的内容不被当 HTML 执行）", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "text_tools_read_selection") return nextSession++;

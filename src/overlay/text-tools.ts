@@ -34,6 +34,12 @@ import {
 /** 面板状态机：待读取 → 可操作 / 处理中 / 成功 / 失败。 */
 type PanelStatus = "reading" | "ready" | "translating" | "error";
 
+/**
+ * selection 读取态兜底超时：Rust 侧 AX 读取有 1.5s 消息超时，正常 2s 内必有结果；
+ * 结果事件彻底丢失（投递失败等极端情况）时到点转成超时错误，绝不永久读取中。
+ */
+const READING_WATCHDOG_MS = 5_000;
+
 const SOURCE_LABELS: Record<TextSource, string> = {
   selection: "选中文字",
   ocr: "屏幕框选",
@@ -45,6 +51,12 @@ export class TextToolsPanel {
   private readonly guard = new SessionGuard();
   /** 是否已请求输入焦点（begin_text_input / end_text_input 必须配对）。 */
   private focused = false;
+  /** 触发序号：重复触发/关闭后，旧 start() 的迟到 adopt 一律作废。 */
+  private startSeq = 0;
+  /** 会话号在途时先到的结果（IPC 顺序竞争），adopt 后回放。 */
+  private heldResult: ResultPayload | null = null;
+  /** 读取态兜底超时句柄。 */
+  private readingTimer: number | null = null;
   private cfg: ConfigView | null = null;
   private source: TextSource | null = null;
   private sourceApp: string | null = null;
@@ -96,6 +108,7 @@ export class TextToolsPanel {
    * 框选期间也不铺浮窗：480px 的实色面板会挡住用户要看的屏幕区域。
    */
   async start(source: TextSource): Promise<void> {
+    const seq = ++this.startSeq;
     this.source = source;
     this.status = "reading";
     this.original = "";
@@ -105,17 +118,28 @@ export class TextToolsPanel {
     this.searchFailed = false;
     this.sourceApp = null;
     this.guard.cancel();
+    this.heldResult = null;
+    this.clearReadingTimer();
     try {
       const session =
         source === "selection" ? await readSelection() : await startOcr();
+      if (seq !== this.startSeq) return; // 已被更新的触发或关闭取代：不认领
       this.guard.adopt(session);
+      // 回放竞争期先到的结果（会话号不匹配的照旧按过期丢弃）
+      const held = this.takeHeldResult();
+      if (held && this.guard.accepts(held.session)) {
+        this.deliver(held);
+        return;
+      }
       // 框选要看着屏幕操作，此时不显示浮窗；选区取词很快，给个读取态
       if (source === "selection") {
         this.show(false);
+        this.armReadingWatchdog(session);
       } else {
         this.open = true;
       }
     } catch (e) {
+      if (seq !== this.startSeq) return;
       // 入口调用失败（如取词命令不存在）：直接给出可读错误
       this.status = "error";
       this.readError = "failed";
@@ -126,7 +150,20 @@ export class TextToolsPanel {
 
   /** 结果回调（main.ts 转发 pet://text-tools-result）。迟到结果直接丢弃。 */
   onResult(payload: ResultPayload): void {
-    if (!this.guard.accepts(payload.session)) return;
+    if (!this.guard.accepts(payload.session)) {
+      // IPC 顺序竞争：结果事件可能先于会话号（invoke 返回）到达 ——
+      // 此刻守卫必然拒收，直接丢弃会让面板永远停在读取中。先暂存最新一份，
+      // adopt 后回放；若它本来就不是本会话的结果，回放时仍会被守卫拦下。
+      if (this.status === "reading") this.heldResult = payload;
+      return;
+    }
+    this.deliver(payload);
+  }
+
+  /** 交付并渲染一份已通过会话守卫的结果。 */
+  private deliver(payload: ResultPayload): void {
+    this.clearReadingTimer();
+    this.heldResult = null;
     this.source = payload.source;
     if (payload.outcome.kind === "ok") {
       this.original = payload.outcome.text;
@@ -148,6 +185,31 @@ export class TextToolsPanel {
     this.show(false);
   }
 
+  /** 取走暂存结果（竞争期先到的那份），取后即清。 */
+  private takeHeldResult(): ResultPayload | null {
+    const held = this.heldResult;
+    this.heldResult = null;
+    return held;
+  }
+
+  /** 读取态兜底：到点仍在读取且会话仍活跃，转成超时错误（不永久读取中）。 */
+  private armReadingWatchdog(session: number): void {
+    this.readingTimer = window.setTimeout(() => {
+      this.readingTimer = null;
+      if (this.status !== "reading" || !this.guard.accepts(session)) return;
+      this.readError = "timeout";
+      this.status = "error";
+      this.render();
+    }, READING_WATCHDOG_MS);
+  }
+
+  private clearReadingTimer(): void {
+    if (this.readingTimer !== null) {
+      clearTimeout(this.readingTimer);
+      this.readingTimer = null;
+    }
+  }
+
   /**
    * @param focus 是否请求输入焦点。读取中不要焦点（会让宠物变前台，
    *              破坏 AX 取词的前提）；结果就绪后才为编辑与键盘操作取焦点。
@@ -163,6 +225,10 @@ export class TextToolsPanel {
   }
 
   hide(): void {
+    // 关闭即终结：在途的 start() 不再认领会话，兜底计时器一并撤掉
+    this.startSeq++;
+    this.heldResult = null;
+    this.clearReadingTimer();
     if (!this.open && !this.focused) {
       // 框选中的会话没显示过面板，也要把会话作废
       this.guard.cancel();
