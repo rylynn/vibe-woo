@@ -6,6 +6,8 @@ import { SettingsPanel } from "./overlay/settings";
 import { AboutPanel } from "./overlay/about";
 import { QuickNote, onQuickNoteOpen } from "./overlay/quick-note";
 import { TodayPanel } from "./overlay/today";
+import { TextToolsPanel } from "./overlay/text-tools";
+import { listenResult, type ResultPayload } from "./text-tools";
 import { Bubble, Banner } from "./overlay/bubble";
 import {
   RemindersPanel,
@@ -73,6 +75,8 @@ function applyConfig(c: ConfigView): void {
   menu.setLabel(0, `记一笔  (${prettyShortcut(c.shortcut_note)})`);
   menu.setLabel(1, `每日提醒  (${prettyShortcut(c.shortcut_reminder)})`);
   menu.setLabel(2, `插件面板  (${prettyShortcut(c.shortcut_hub)})`);
+  // 取词面板的翻译方向/引擎跟随配置
+  textTools.setConfig(c);
 }
 
 // 首次安装领养流程：确认后持久化并立即换装
@@ -105,6 +109,7 @@ const settings = new SettingsPanel(
 
 const quickNote = new QuickNote();
 const today = new TodayPanel();
+const textTools = new TextToolsPanel();
 
 // 速记仪式感：呼出时宠物走过来，落盘后点头示意收到
 quickNote.onOpen = () => {
@@ -178,6 +183,7 @@ dismiss.register(remindersPanel);
 dismiss.register(friendsPanel);
 dismiss.register(avatarPicker);
 dismiss.register(hub);
+dismiss.register(textTools);
 dismiss.setPetBox(() => (pet.isHidden ? null : pet.body));
 
 const counters: EventCounters = {
@@ -228,6 +234,7 @@ window.addEventListener("pointerdown", (e) => {
   if (avatarPicker.isOpen && avatarPicker.contains(e.clientX, e.clientY))
     return;
   if (about.isOpen && about.contains(e.clientX, e.clientY)) return;
+  if (textTools.isOpen && textTools.contains(e.clientX, e.clientY)) return;
   if (quickNote.isOpen) return;
   if (today.isOpen && today.contains(e.clientX, e.clientY)) return;
   if (today.isOpen && !today.contains(e.clientX, e.clientY)) today.hide();
@@ -302,6 +309,7 @@ window.addEventListener(
       friendsPanel.hide();
       avatarPicker.hide();
       hub.hide();
+      textTools.hide();
       bubble.dismiss();
       banner.dismiss();
     }
@@ -331,6 +339,21 @@ void onReminderPanelOpen(() => {
 void listen("pet://hub-open", () => {
   void hub.toggle();
 }).catch((e) => console.warn("[hub] 快捷键监听失败", e));
+
+// Ctrl+Alt+T 取词（读取当前前台应用选区）；重复触发即开启新会话，旧结果作废
+void listen("pet://text-tools-selection", () => {
+  void textTools.start("selection");
+}).catch((e) => console.warn("[text-tools] 取词监听失败", e));
+
+// Ctrl+Alt+O 屏幕框选 OCR
+void listen("pet://text-tools-ocr", () => {
+  void textTools.start("ocr");
+}).catch((e) => console.warn("[text-tools] 框选监听失败", e));
+
+// 取词结果（Rust 只发给 pet 窗口）：交给面板按会话号判断是否为最新
+void listenResult((p: ResultPayload) => textTools.onResult(p)).catch((e) =>
+  console.warn("[text-tools] 结果监听失败", e),
+);
 
 // 接收 Rust 传感器推送的状态。宠物的表情、配色、呼吸节奏都由它驱动。
 void onStateChange((s) => {
@@ -373,6 +396,8 @@ startBoxReporter(() => {
   if (pickerBox) boxes.push(pickerBox);
   const hubBox = hub.box;
   if (hubBox) boxes.push(hubBox);
+  const textToolsBox = textTools.box;
+  if (textToolsBox) boxes.push(textToolsBox);
   // 气泡与通知条：可交互（「知道了」按钮 / 整条点击关闭），必须参与命中判定
   const bubbleBox = bubble.box;
   if (bubbleBox) boxes.push(bubbleBox);
@@ -400,6 +425,7 @@ startBoxReporter(() => {
       // 访客气泡不需要拖动连续性，命中框已经够了；算进来会平白
       // 抢走用户在编辑器里按住鼠标的那几秒
       hub.isOpen ||
+      textTools.isOpen ||
       bubble.isOpen ||
       banner.isOpen,
     counters,

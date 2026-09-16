@@ -38,6 +38,9 @@ struct ChatRequest<'a> {
     /// 官方 OpenAI 会拒绝未知字段 —— 只在用户显式开启时携带。
     #[serde(skip_serializing_if = "Option::is_none")]
     enable_thinking: Option<bool>,
+    /// 输出预算。None = 不发送该字段（沿用网关默认值）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     response_format: Option<ResponseFormat>,
 }
@@ -114,6 +117,27 @@ fn default_kind() -> String {
     "note".into()
 }
 
+/// 单轮对话的可调参数（翻译等长文场景使用）。默认值与 complete() 现行为一致。
+#[derive(Debug, Clone, Copy)]
+pub struct CompleteOptions {
+    /// 采样温度。默认 0.9（与现有说话/整理一致）。
+    pub temperature: f32,
+    /// 输出预算（tokens）。None = 各协议现有默认（1024，开思考时抬高）。
+    pub max_output_tokens: Option<u32>,
+    /// 响应文本长度上限（字符数）。超出返回错误，绝不静默截断。
+    pub max_output_chars: usize,
+}
+
+impl Default for CompleteOptions {
+    fn default() -> Self {
+        Self {
+            temperature: 0.9,
+            max_output_tokens: None,
+            max_output_chars: usize::MAX,
+        }
+    }
+}
+
 /// 单轮对话统一入口：发 system+user，流式收完，返回完整输出文本。
 ///
 /// Err 携带可读的失败原因（供「测试连接」直接展示给用户）：
@@ -124,6 +148,17 @@ pub async fn complete(
     user: &str,
     json_mode: bool,
 ) -> Result<String, String> {
+    complete_with(llm, system, user, json_mode, CompleteOptions::default()).await
+}
+
+/// 带参数的单轮对话（翻译用）：低温、独立输出预算、响应长度上限。
+pub async fn complete_with(
+    llm: &LlmConfig,
+    system: &str,
+    user: &str,
+    json_mode: bool,
+    opts: CompleteOptions,
+) -> Result<String, String> {
     let client = reqwest::Client::builder()
         // 推理模型（如 hy4-preview）会先生成大量 reasoning token，实测单轮
         // 可超过 30 秒，20s 会让「测试连接」在正常情况下误报失败
@@ -131,17 +166,23 @@ pub async fn complete(
         .build()
         .map_err(|e| format!("创建 HTTP 客户端失败：{e}"))?;
 
-    match llm.protocol {
+    let text = match llm.protocol {
         LlmProtocol::OpenaiCompletions => {
-            openai_completions(&client, llm, system, user, json_mode).await
+            openai_completions(&client, llm, system, user, json_mode, &opts).await
         }
         LlmProtocol::OpenaiResponse => {
-            openai_response(&client, llm, system, user, json_mode).await
+            openai_response(&client, llm, system, user, json_mode, &opts).await
         }
         LlmProtocol::AnthropicMessages => {
-            anthropic_messages(&client, llm, system, user).await
+            anthropic_messages(&client, llm, system, user, &opts).await
         }
+    }?;
+
+    // 响应长度上限：超限报错（不静默截断），错误信息不含原文
+    if text.chars().count() > opts.max_output_chars {
+        return Err(format!("输出超过 {} 字符上限", opts.max_output_chars));
     }
+    Ok(text)
 }
 
 /// 非 2xx 时读回响应体片段，让用户看到真实原因（401 key 错、404 路径错…）。
@@ -228,6 +269,7 @@ async fn openai_completions(
     system: &str,
     user: &str,
     json_mode: bool,
+    opts: &CompleteOptions,
 ) -> Result<String, String> {
     let url = format!("{}/chat/completions", llm.base_url.trim_end_matches('/'));
     let body = ChatRequest {
@@ -242,9 +284,10 @@ async fn openai_completions(
                 content: user.to_string(),
             },
         ],
-        temperature: 0.9,
+        temperature: opts.temperature,
         stream: true,
         enable_thinking: llm.thinking.then_some(true),
+        max_tokens: opts.max_output_tokens,
         response_format: json_mode.then_some(ResponseFormat {
             kind: "json_object",
         }),
@@ -275,13 +318,14 @@ async fn openai_response(
     system: &str,
     user: &str,
     json_mode: bool,
+    opts: &CompleteOptions,
 ) -> Result<String, String> {
     let url = format!("{}/responses", llm.base_url.trim_end_matches('/'));
     let body = ResponsesRequest {
         model: &llm.model,
         instructions: system,
         input: user,
-        max_output_tokens: 1024,
+        max_output_tokens: opts.max_output_tokens.unwrap_or(1024),
         stream: true,
         reasoning: llm.thinking.then_some(Reasoning { effort: "medium" }),
         text: json_mode.then_some(ResponsesText {
@@ -315,6 +359,7 @@ async fn anthropic_messages(
     llm: &LlmConfig,
     system: &str,
     user: &str,
+    opts: &CompleteOptions,
 ) -> Result<String, String> {
     // base 常见两种写法：https://api.anthropic.com 与 https://api.anthropic.com/v1。
     // 已带 /v1 就不重复拼。
@@ -325,10 +370,15 @@ async fn anthropic_messages(
         format!("{base}/v1/messages")
     };
 
+    // 开思考时必须 max_tokens > budget_tokens（1024）
+    let mut max_tokens = opts.max_output_tokens.unwrap_or(1024);
+    if llm.thinking {
+        max_tokens = max_tokens.max(2048);
+    }
+
     let body = AnthropicRequest {
         model: &llm.model,
-        // 开思考时必须 max_tokens > budget_tokens
-        max_tokens: if llm.thinking { 2048 } else { 1024 },
+        max_tokens,
         system,
         stream: true,
         thinking: llm.thinking.then_some(AnthropicThinking {

@@ -29,10 +29,34 @@ pub const EVENT_REMINDER_OPEN: &str = "pet://reminder-open";
 /// 插件面板呼出事件名。
 pub const EVENT_HUB_OPEN: &str = "pet://hub-open";
 
+/// 取词（读取其他应用选区）呼出事件名。
+pub const EVENT_SELECTION_OPEN: &str = "pet://text-tools-selection";
+
+/// 屏幕框选 OCR 呼出事件名。
+pub const EVENT_OCR_OPEN: &str = "pet://text-tools-ocr";
+
 /// 各快捷键的默认值（config.rs 的 Default 与前端 FALLBACK 与此保持一致）。
 pub const DEFAULT_SHORTCUT_NOTE: &str = "Alt+Space";
 pub const DEFAULT_SHORTCUT_REMINDER: &str = "Alt+R";
 pub const DEFAULT_SHORTCUT_HUB: &str = "Alt+P";
+pub const DEFAULT_SHORTCUT_SELECTION: &str = "Ctrl+Alt+T";
+pub const DEFAULT_SHORTCUT_OCR: &str = "Ctrl+Alt+O";
+
+/// 不依赖任何 UI 的强制退出快捷键：Ctrl+Alt+Cmd+Q。
+///
+/// 存在理由：宠物是全屏透明置顶窗口，一旦穿透逻辑出问题就可能拦截整个桌面
+/// 的点击，此时托盘也点不到。必须有一条纯键盘的逃生通道。
+/// 任何自定义快捷键不得占用此组合（validate_shortcuts 强制）。
+pub fn kill_switch() -> Shortcut {
+    Shortcut::new(
+        Some(
+            Modifiers::CONTROL
+                .union(Modifiers::ALT)
+                .union(Modifiers::SUPER),
+        ),
+        Code::KeyQ,
+    )
+}
 
 /// 当前已注册的自定义快捷键（存储格式），改键时先按它反注册。
 static REGISTERED: Mutex<Vec<String>> = Mutex::new(Vec::new());
@@ -171,12 +195,24 @@ fn named_code(t: &str) -> Option<Code> {
     })
 }
 
-/// 按当前配置注册速记 / 提醒 / 插件面板快捷键。
+/// 单次 apply 的注册结果。
+///
+/// 注册失败（被系统或其他应用占用）的条目会记录在这里，
+/// 设置页据此反馈用户并回退键位，而不是只写日志。
+#[derive(Debug, Default)]
+pub struct ApplyOutcome {
+    /// 注册失败的条目：(条目名, 键位, 原因)。
+    pub failures: Vec<(String, String, String)>,
+}
+
+/// 按当前配置注册全部自定义快捷键。
 ///
 /// 改键流程 = 先按 REGISTERED 记录反注册旧的，再注册新的；
-/// 某一条失败（被系统或其他应用占用）不影响其余条目，只打日志。
+/// 某一条失败（被系统或其他应用占用）不影响其余条目，失败明细
+/// 通过返回值交给调用方（设置页据此回退并提示）。
 /// 启动注册与设置页改键共用此入口。
-pub fn apply_from_config(app: &AppHandle) {
+pub fn apply_from_config(app: &AppHandle) -> ApplyOutcome {
+    let mut outcome = ApplyOutcome::default();
     let guard = REGISTERED.lock().unwrap_or_else(|p| p.into_inner());
     let mut registered = guard;
     for old in registered.drain(..) {
@@ -188,9 +224,11 @@ pub fn apply_from_config(app: &AppHandle) {
     }
     let cfg = configcmd::current();
     for (name, spec) in [
-        ("note", cfg.shortcut_note.as_str()),
-        ("reminder", cfg.shortcut_reminder.as_str()),
-        ("hub", cfg.shortcut_hub.as_str()),
+        ("速记", cfg.shortcut_note.as_str()),
+        ("提醒", cfg.shortcut_reminder.as_str()),
+        ("插件面板", cfg.shortcut_hub.as_str()),
+        ("取词", cfg.shortcut_selection.as_str()),
+        ("框选识别", cfg.shortcut_ocr.as_str()),
     ] {
         match parse(spec) {
             Ok(s) => match app.global_shortcut().register(s) {
@@ -198,15 +236,48 @@ pub fn apply_from_config(app: &AppHandle) {
                     registered.push(spec.to_string());
                     eprintln!("[shortcut] {name}: {spec}");
                 }
-                Err(e) => eprintln!("[shortcut] 无法注册 {name}={spec}（可能被占用）：{e}"),
+                Err(e) => {
+                    eprintln!("[shortcut] 无法注册 {name}={spec}（可能被占用）：{e}");
+                    outcome
+                        .failures
+                        .push((name.to_string(), spec.to_string(), e.to_string()));
+                }
             },
-            Err(e) => eprintln!("[shortcut] {name}={spec} 配置无效，已跳过：{e}"),
+            Err(e) => {
+                eprintln!("[shortcut] {name}={spec} 配置无效，已跳过：{e}");
+                outcome
+                    .failures
+                    .push((name.to_string(), spec.to_string(), e));
+            }
         }
     }
+    outcome
 }
 
 fn eq_spec(pressed: &Shortcut, spec: &str) -> bool {
     matches!(parse(spec), Ok(s) if &s == pressed)
+}
+
+/// 校验一组快捷键：格式必须有效、规范化后互不冲突、且不得占用逃生键。
+///
+/// specs 为 (条目名, 键位) 列表；冲突判定基于解析后的物理组合，
+/// 因此 "Ctrl+Alt+T" 与 "alt + ctrl + t" 视为同一键位。
+/// Err 带可直接展示的中文说明。
+pub fn validate_shortcuts(specs: &[(&str, &str)]) -> Result<(), String> {
+    let mut seen: Vec<(&str, Shortcut)> = Vec::new();
+    for (name, spec) in specs {
+        let s = parse(spec).map_err(|e| format!("{name}的{e}"))?;
+        if s == kill_switch() {
+            return Err(format!(
+                "{name}不能使用 Ctrl+Alt+Cmd+Q —— 它是逃生快捷键，必须保持独立"
+            ));
+        }
+        if let Some((other, _)) = seen.iter().find(|(_, x)| *x == s) {
+            return Err(format!("{name}与{other}的快捷键冲突（{spec}）"));
+        }
+        seen.push((name, s));
+    }
+    Ok(())
 }
 
 /// 处理全局快捷键事件。逃生在 main.rs 中单独注册以保持零依赖。
@@ -224,6 +295,12 @@ pub fn handle(app: &AppHandle, shortcut: &Shortcut, event: ShortcutState) {
     } else if eq_spec(shortcut, &cfg.shortcut_hub) {
         eprintln!("[hub] 插件面板已呼出");
         let _ = app.emit(EVENT_HUB_OPEN, ());
+    } else if eq_spec(shortcut, &cfg.shortcut_selection) {
+        eprintln!("[text-tools] 取词已触发");
+        let _ = app.emit(EVENT_SELECTION_OPEN, ());
+    } else if eq_spec(shortcut, &cfg.shortcut_ocr) {
+        eprintln!("[text-tools] 框选识别已触发");
+        let _ = app.emit(EVENT_OCR_OPEN, ());
     }
 }
 
@@ -294,5 +371,53 @@ mod tests {
     fn parse_maps_arrow_aliases() {
         let s = parse("Alt+Up").unwrap();
         assert_eq!(s, Shortcut::new(Some(Modifiers::ALT), Code::ArrowUp));
+    }
+
+    #[test]
+    fn parse_accepts_text_tools_defaults() {
+        assert!(parse(DEFAULT_SHORTCUT_SELECTION).is_ok());
+        assert!(parse(DEFAULT_SHORTCUT_OCR).is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_all_default_shortcuts_together() {
+        let specs = [
+            ("速记", DEFAULT_SHORTCUT_NOTE),
+            ("提醒", DEFAULT_SHORTCUT_REMINDER),
+            ("插件面板", DEFAULT_SHORTCUT_HUB),
+            ("取词", DEFAULT_SHORTCUT_SELECTION),
+            ("框选识别", DEFAULT_SHORTCUT_OCR),
+        ];
+        assert!(validate_shortcuts(&specs).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_after_normalization() {
+        // 修饰键顺序、大小写、空格差异后的同一物理组合必须判为冲突
+        let specs = [("取词", "Ctrl+Alt+T"), ("框选识别", "alt + ctrl + t")];
+        let err = validate_shortcuts(&specs).unwrap_err();
+        assert!(err.contains("取词") && err.contains("框选识别"), "报错要指明冲突双方：{err}");
+    }
+
+    #[test]
+    fn validate_rejects_escape_key_reservation() {
+        // Ctrl+Alt+Cmd+Q 是逃生键，任何自定义快捷键不得占用
+        let err = validate_shortcuts(&[("取词", "Ctrl+Alt+Cmd+Q")]).unwrap_err();
+        assert!(err.contains("逃生"), "报错要说明逃生键：{err}");
+    }
+
+    #[test]
+    fn validate_rejects_invalid_format_with_entry_name() {
+        let err = validate_shortcuts(&[("框选识别", "Shift+O")]).unwrap_err();
+        assert!(err.contains("框选识别"), "报错要带上条目名：{err}");
+    }
+
+    #[test]
+    fn kill_switch_is_ctrl_alt_cmd_q() {
+        let s = kill_switch();
+        assert_eq!(s, Shortcut::new(
+            Some(Modifiers::CONTROL | Modifiers::ALT | Modifiers::SUPER),
+            Code::KeyQ,
+        ));
     }
 }

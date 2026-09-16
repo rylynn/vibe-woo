@@ -36,28 +36,14 @@ mod talkdrive;
 mod shortcut;
 mod sensor;
 mod state;
+mod texttools;
 mod tray;
 mod usage;
 mod updater;
 mod window;
 
 use tauri::Manager;
-use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
-
-/// 不依赖任何 UI 的强制退出快捷键：Ctrl+Alt+Cmd+Q。
-///
-/// 存在理由：宠物是全屏透明置顶窗口，一旦穿透逻辑出问题就可能拦截整个桌面
-/// 的点击，此时托盘也点不到。必须有一条纯键盘的逃生通道。
-fn kill_switch() -> Shortcut {
-    Shortcut::new(
-        Some(
-            Modifiers::CONTROL
-                .union(Modifiers::ALT)
-                .union(Modifiers::SUPER),
-        ),
-        Code::KeyQ,
-    )
-}
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 fn main() {
     let builder = tauri::Builder::default()
@@ -75,7 +61,7 @@ fn main() {
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
-                    if shortcut == &kill_switch() && event.state() == ShortcutState::Pressed {
+                    if shortcut == &shortcut::kill_switch() && event.state() == ShortcutState::Pressed {
                         eprintln!("[pet] kill switch pressed, exiting");
                         app.exit(0);
                         return;
@@ -113,6 +99,16 @@ fn main() {
             reminddrive::snooze_reminder,
             shortcut::begin_capture,
             shortcut::end_capture,
+            texttools::text_tools_read_selection,
+            texttools::text_tools_start_ocr,
+            texttools::text_tools_permission,
+            texttools::text_tools_request_permission,
+            texttools::text_tools_screen_permission,
+            texttools::text_tools_request_screen_permission,
+            texttools::text_tools_cancel,
+            texttools::text_tools_copy,
+            texttools::text_tools_translate,
+            texttools::text_tools_search,
             plugin::plugin_summary,
             plugin::plugin_get_config,
             plugin::plugin_set_config,
@@ -127,7 +123,7 @@ fn main() {
 
             // 先注册逃生快捷键，再显示窗口 —— 顺序很重要：
             // 万一窗口逻辑有问题，用户至少已经能退出了。
-            app.global_shortcut().register(kill_switch())?;
+            app.global_shortcut().register(shortcut::kill_switch())?;
             // 速记 / 提醒 / 插件面板的快捷键由配置决定，必须在配置载入之后注册
             let cfg = configcmd::init(app.handle());
             shortcut::apply_from_config(app.handle());

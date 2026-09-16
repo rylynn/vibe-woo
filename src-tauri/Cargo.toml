@@ -1,6 +1,6 @@
 [package]
 name = "vibe-pet"
-version = "0.12.0"
+version = "1.0.0"
 edition = "2021"
 rust-version = "1.77"
 
@@ -41,5 +41,59 @@ tauri-plugin-updater = "2"
 [target.'cfg(target_os = "macos")'.dependencies]
 tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", branch = "v2.1" }
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", features = ["NSWorkspace", "NSRunningApplication"] }
-objc2-foundation = { version = "0.3", features = ["NSDate", "NSCalendar", "NSString"] }
+objc2-app-kit = { version = "0.3", features = [
+    "NSWorkspace",
+    "NSRunningApplication",
+    "NSPasteboard",
+    # 框选层（texttools/selection_panel.rs）
+    "NSApplication",
+    "NSAttributedString",
+    "NSBezierPath",
+    "NSColor",
+    "NSEvent",
+    "NSFont",
+    "NSGraphics",
+    "NSPanel",
+    "NSResponder",
+    "NSScreen",
+    "NSView",
+    "NSWindow",
+] }
+objc2-foundation = { version = "0.3", features = [
+    "NSDate",
+    "NSCalendar",
+    "NSString",
+    "NSArray",
+    "NSDictionary",
+    "NSError",
+    "NSObject",
+    "NSValue",
+] }
+# 取词框选 OCR（texttools/capture.rs）：
+# ScreenCaptureKit 单帧截图 + Vision 本地识别，全部 objc2 0.6 生态同版本。
+dispatch2 = "0.3"
+block2 = "0.6"
+objc2-core-video = { version = "0.3", default-features = false, features = ["CVPixelBuffer"] }
+objc2-core-media = { version = "0.3", default-features = false, features = ["CMSampleBuffer", "objc2-core-video"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["CFCGTypes", "CFDictionary"] }
+objc2-screen-capture-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "SCError",
+    "SCShareableContent",
+    "SCStream",
+    "dispatch2",
+    "block2",
+    "libc",
+    "objc2-core-media",
+    "objc2-core-graphics",
+    "objc2-core-foundation",
+] }
+objc2-vision = { version = "0.3", default-features = false, features = [
+    "std",
+    "VNRecognizeTextRequest",
+    "VNRequest",
+    "VNRequestHandler",
+    "VNObservation",
+    "objc2-core-video",
+    "objc2-core-foundation",
+] }

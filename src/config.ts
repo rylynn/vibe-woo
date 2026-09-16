@@ -15,6 +15,14 @@ export type LlmProtocol =
   | "openai-response"
   | "anthropic-messages";
 
+/** 取词翻译方向。en2zh=英译中（默认）· zh2en=中译英。 */
+export type TranslationDirection = "en2zh" | "zh2en";
+/** 取词搜索引擎。 */
+export type SearchEngine = "google" | "bing" | "baidu";
+
+export const TRANSLATION_DIRECTIONS: TranslationDirection[] = ["en2zh", "zh2en"];
+export const SEARCH_ENGINES: SearchEngine[] = ["google", "bing", "baidu"];
+
 export const LLM_PROTOCOLS: LlmProtocol[] = [
   "openai-completions",
   "openai-response",
@@ -58,6 +66,14 @@ export interface ConfigView {
   shortcut_note: string;
   shortcut_reminder: string;
   shortcut_hub: string;
+  /** 取词（读取其他应用选区）快捷键。 */
+  shortcut_selection: string;
+  /** 屏幕框选 OCR 快捷键。 */
+  shortcut_ocr: string;
+  /** 取词翻译方向，默认英译中。 */
+  translation_direction: TranslationDirection;
+  /** 取词搜索引擎，默认 Google。 */
+  search_engine: SearchEngine;
 }
 
 export interface ConfigPatch {
@@ -86,6 +102,10 @@ export interface ConfigPatch {
   shortcut_note?: string;
   shortcut_reminder?: string;
   shortcut_hub?: string;
+  shortcut_selection?: string;
+  shortcut_ocr?: string;
+  translation_direction?: TranslationDirection;
+  search_engine?: SearchEngine;
 }
 
 /** 快捷键默认值（与 Rust 侧 shortcut.rs 的 DEFAULT_* 保持一致）。 */
@@ -93,6 +113,8 @@ export const DEFAULT_SHORTCUTS = {
   shortcut_note: "Alt+Space",
   shortcut_reminder: "Alt+R",
   shortcut_hub: "Alt+P",
+  shortcut_selection: "Ctrl+Alt+T",
+  shortcut_ocr: "Ctrl+Alt+O",
 } as const;
 
 export const FALLBACK_CONFIG: ConfigView = {
@@ -123,6 +145,8 @@ export const FALLBACK_CONFIG: ConfigView = {
   social_invite_code: "",
   social_hidden: false,
   avatar: null,
+  translation_direction: "en2zh",
+  search_engine: "google",
   ...DEFAULT_SHORTCUTS,
 };
 
@@ -142,4 +166,14 @@ export async function updateConfig(patch: ConfigPatch): Promise<ConfigView> {
     console.warn("[config] 保存失败", e);
     return FALLBACK_CONFIG;
   }
+}
+
+/**
+ * 严格保存：失败直接抛错，不返回默认配置。
+ *
+ * 取词设置（快捷键冲突、注册失败）必须让用户看到真实原因 ——
+ * 静默返回默认值会让界面假装保存成功。
+ */
+export async function updateConfigStrict(patch: ConfigPatch): Promise<ConfigView> {
+  return await invoke<ConfigView>("update_config", { patch });
 }

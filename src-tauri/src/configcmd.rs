@@ -90,6 +90,13 @@ pub struct ConfigView {
     pub shortcut_note: String,
     pub shortcut_reminder: String,
     pub shortcut_hub: String,
+    /// 取词（读取其他应用选区）与屏幕框选 OCR 的快捷键。
+    pub shortcut_selection: String,
+    pub shortcut_ocr: String,
+    /// 取词翻译方向，默认英译中。
+    pub translation_direction: config::TranslationDirection,
+    /// 取词搜索引擎。
+    pub search_engine: config::SearchEngine,
 }
 
 fn to_view(c: &Config) -> ConfigView {
@@ -124,6 +131,10 @@ fn to_view(c: &Config) -> ConfigView {
         shortcut_note: c.shortcut_note.clone(),
         shortcut_reminder: c.shortcut_reminder.clone(),
         shortcut_hub: c.shortcut_hub.clone(),
+        shortcut_selection: c.shortcut_selection.clone(),
+        shortcut_ocr: c.shortcut_ocr.clone(),
+        translation_direction: c.translation_direction,
+        search_engine: c.search_engine,
     }
 }
 
@@ -163,12 +174,34 @@ pub struct ConfigPatch {
     pub shortcut_note: Option<String>,
     pub shortcut_reminder: Option<String>,
     pub shortcut_hub: Option<String>,
+    pub shortcut_selection: Option<String>,
+    pub shortcut_ocr: Option<String>,
+    pub translation_direction: Option<config::TranslationDirection>,
+    pub search_engine: Option<config::SearchEngine>,
 }
 
-#[tauri::command]
-pub fn update_config(app: AppHandle, patch: ConfigPatch) -> Result<ConfigView, String> {
-    let mut cfg = current();
+/// 校验配置中全部自定义快捷键（格式 / 冲突 / 逃生键占用）。
+fn validate_config_shortcuts(cfg: &Config) -> Result<(), String> {
+    crate::shortcut::validate_shortcuts(&[
+        ("速记", cfg.shortcut_note.as_str()),
+        ("提醒", cfg.shortcut_reminder.as_str()),
+        ("插件面板", cfg.shortcut_hub.as_str()),
+        ("取词", cfg.shortcut_selection.as_str()),
+        ("框选识别", cfg.shortcut_ocr.as_str()),
+    ])
+}
 
+/// 把五个快捷键字段恢复为 old 的值（注册失败回退用）。
+fn restore_shortcuts(cfg: &mut Config, old: &Config) {
+    cfg.shortcut_note = old.shortcut_note.clone();
+    cfg.shortcut_reminder = old.shortcut_reminder.clone();
+    cfg.shortcut_hub = old.shortcut_hub.clone();
+    cfg.shortcut_selection = old.shortcut_selection.clone();
+    cfg.shortcut_ocr = old.shortcut_ocr.clone();
+}
+
+/// 把补丁应用到配置副本。返回快捷键是否被改动。纯函数（消耗 patch），无副作用。
+fn apply_patch(cfg: &mut Config, patch: ConfigPatch) -> bool {
     if let Some(v) = patch.size_index {
         // 越界会让 SIZE_STEPS 取到 undefined，宠物直接消失
         cfg.size_index = v.min(3);
@@ -237,6 +270,12 @@ pub fn update_config(app: AppHandle, patch: ConfigPatch) -> Result<ConfigView, S
     if let Some(v) = patch.avatar {
         cfg.avatar = Some(v);
     }
+    if let Some(v) = patch.translation_direction {
+        cfg.translation_direction = v;
+    }
+    if let Some(v) = patch.search_engine {
+        cfg.search_engine = v;
+    }
 
     let mut shortcuts_changed = false;
     if let Some(v) = patch.shortcut_note {
@@ -251,19 +290,131 @@ pub fn update_config(app: AppHandle, patch: ConfigPatch) -> Result<ConfigView, S
         cfg.shortcut_hub = v;
         shortcuts_changed = true;
     }
+    if let Some(v) = patch.shortcut_selection {
+        cfg.shortcut_selection = v;
+        shortcuts_changed = true;
+    }
+    if let Some(v) = patch.shortcut_ocr {
+        cfg.shortcut_ocr = v;
+        shortcuts_changed = true;
+    }
+    shortcuts_changed
+}
+
+#[tauri::command]
+pub fn update_config(app: AppHandle, patch: ConfigPatch) -> Result<ConfigView, String> {
+    let mut cfg = current();
+    let old = cfg.clone();
+    let shortcuts_changed = apply_patch(&mut cfg, patch);
+
+    // 快捷键改动先做静态校验（格式 / 冲突 / 逃生键），不通过不落盘
+    if shortcuts_changed {
+        validate_config_shortcuts(&cfg)?;
+    }
 
     config::save(&app, &cfg)?;
     if let Ok(mut g) = CURRENT.lock() {
         *g = Some(cfg.clone());
     }
 
-    // 快捷键变了要立刻重新注册（先反注册旧的再注册新的，见 apply_from_config）
+    // 快捷键变了要立刻重新注册（先反注册旧的再注册新的，见 apply_from_config）。
+    // 注册失败（多被其他应用占用）时回退到旧键位，避免用户失去全部快捷键，
+    // 并以 Err 反馈设置页 —— 不能只写日志假装保存成功。
     if shortcuts_changed {
-        crate::shortcut::apply_from_config(&app);
+        let outcome = crate::shortcut::apply_from_config(&app);
+        if !outcome.failures.is_empty() {
+            restore_shortcuts(&mut cfg, &old);
+            config::save(&app, &cfg)?;
+            if let Ok(mut g) = CURRENT.lock() {
+                *g = Some(cfg.clone());
+            }
+            crate::shortcut::apply_from_config(&app);
+            let detail = outcome
+                .failures
+                .iter()
+                .map(|(name, spec, _)| format!("{name}（{spec}）"))
+                .collect::<Vec<_>>()
+                .join("、");
+            return Err(format!(
+                "快捷键注册失败：{detail}，可能被其他应用占用，已保留原键位"
+            ));
+        }
     }
 
     let view = to_view(&cfg);
     // 通知前端应用新配置（尺寸、活跃度需要立即生效）
     let _ = app.emit(EVENT_CONFIG, &view);
     Ok(view)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apply_patch_sets_text_tools_fields_and_flags_shortcut_change() {
+        let mut cfg = Config::default();
+        let patch = ConfigPatch {
+            shortcut_selection: Some("Ctrl+Shift+T".into()),
+            shortcut_ocr: Some("Ctrl+Shift+O".into()),
+            translation_direction: Some(config::TranslationDirection::Zh2En),
+            search_engine: Some(config::SearchEngine::Bing),
+            ..Default::default()
+        };
+        let changed = apply_patch(&mut cfg, patch);
+        assert!(changed, "改动了快捷键必须标记 changed");
+        assert_eq!(cfg.shortcut_selection, "Ctrl+Shift+T");
+        assert_eq!(cfg.shortcut_ocr, "Ctrl+Shift+O");
+        assert_eq!(cfg.translation_direction, config::TranslationDirection::Zh2En);
+        assert_eq!(cfg.search_engine, config::SearchEngine::Bing);
+    }
+
+    #[test]
+    fn apply_patch_non_shortcut_change_does_not_flag() {
+        let mut cfg = Config::default();
+        let patch = ConfigPatch {
+            search_engine: Some(config::SearchEngine::Baidu),
+            translation_direction: Some(config::TranslationDirection::Zh2En),
+            ..Default::default()
+        };
+        assert!(!apply_patch(&mut cfg, patch), "只改翻译方向/搜索引擎不应触发快捷键重注册");
+    }
+
+    #[test]
+    fn validate_config_shortcuts_covers_new_fields() {
+        let mut cfg = Config::default();
+        assert!(validate_config_shortcuts(&cfg).is_ok(), "默认配置的五个快捷键应互不冲突");
+        cfg.shortcut_selection = cfg.shortcut_note.clone();
+        let err = validate_config_shortcuts(&cfg).unwrap_err();
+        assert!(err.contains("取词") && err.contains("速记"), "报错要指明冲突双方：{err}");
+    }
+
+    #[test]
+    fn restore_shortcuts_reverts_all_five() {
+        let old = Config::default();
+        let mut cfg = old.clone();
+        cfg.shortcut_note = "Alt+X".into();
+        cfg.shortcut_reminder = "Alt+Y".into();
+        cfg.shortcut_hub = "Alt+Z".into();
+        cfg.shortcut_selection = "Alt+S".into();
+        cfg.shortcut_ocr = "Alt+D".into();
+        restore_shortcuts(&mut cfg, &old);
+        assert_eq!(cfg.shortcut_note, old.shortcut_note);
+        assert_eq!(cfg.shortcut_reminder, old.shortcut_reminder);
+        assert_eq!(cfg.shortcut_hub, old.shortcut_hub);
+        assert_eq!(cfg.shortcut_selection, old.shortcut_selection);
+        assert_eq!(cfg.shortcut_ocr, old.shortcut_ocr);
+    }
+
+    #[test]
+    fn to_view_includes_text_tools_fields() {
+        let mut cfg = Config::default();
+        cfg.translation_direction = config::TranslationDirection::Zh2En;
+        cfg.search_engine = config::SearchEngine::Bing;
+        let view = to_view(&cfg);
+        assert_eq!(view.shortcut_selection, "Ctrl+Alt+T");
+        assert_eq!(view.shortcut_ocr, "Ctrl+Alt+O");
+        assert_eq!(view.translation_direction, config::TranslationDirection::Zh2En);
+        assert_eq!(view.search_engine, config::SearchEngine::Bing);
+    }
 }

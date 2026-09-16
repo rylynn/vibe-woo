@@ -3,13 +3,24 @@ import type { Box } from "../interact/hit-test";
 import {
   getConfig,
   updateConfig,
+  updateConfigStrict,
   DEFAULT_SHORTCUTS,
   LLM_PROTOCOLS,
+  TRANSLATION_DIRECTIONS,
+  SEARCH_ENGINES,
   type ConfigView,
   type LlmProtocol,
   type Persona,
   type RoamScope,
+  type SearchEngine,
+  type TranslationDirection,
 } from "../config";
+import {
+  axPermission,
+  requestAxPermission,
+  screenPermission,
+  requestScreenPermission,
+} from "../text-tools";
 import { prettyShortcut, shortcutFromEvent, isValidShortcut } from "../shortcut";
 import { panelChrome } from "./chrome";
 import { avatarFromView, type PetAvatar } from "../avatar/types";
@@ -49,6 +60,19 @@ const PERSONA_LABELS: Record<Persona, string> = {
 };
 
 const PERSONA_ORDER: Persona[] = ["quiet", "reserved", "occasional", "chatty"];
+
+/** 取词翻译方向的中文标签（默认英译中）。 */
+const DIRECTION_LABELS: Record<TranslationDirection, string> = {
+  en2zh: "英译中",
+  zh2en: "中译英",
+};
+
+/** 搜索引擎的中文标签。 */
+const ENGINE_LABELS: Record<SearchEngine, string> = {
+  google: "Google",
+  bing: "Bing",
+  baidu: "百度",
+};
 
 /**
  * 设置面板。
@@ -152,17 +176,42 @@ export class SettingsPanel {
     this.render();
   }
 
+  /**
+   * 严格保存：失败抛错而非静默回退默认值。
+   *
+   * 快捷键冲突、注册被占用这类失败必须让用户看到真实原因 ——
+   * 取词设置尤其如此，否则界面会假装保存成功而快捷键其实没生效。
+   */
+  private async patchStrict(
+    p: Parameters<typeof updateConfigStrict>[0],
+    anchor: HTMLElement,
+  ): Promise<void> {
+    try {
+      this.cfg = await updateConfigStrict(p);
+    } catch (err) {
+      this.showErrorBubble(anchor, String(err));
+      return;
+    }
+    this.onApply(this.cfg);
+    this.render();
+  }
+
   private render(): void {
     const c = this.cfg;
     if (!c) return;
 
-    // 页面分发：插件清单（二级）/ 插件表单（三级）/ 快捷键（二级）/ 主表单
+    // 页面分发：插件清单（二级）/ 插件表单（三级）/ 快捷键（二级）/
+    // 取词与翻译（二级）/ 主表单
     if (this.page === "plugins") {
       this.renderPluginsPage();
       return;
     }
     if (this.page === "shortcuts") {
       this.renderShortcutsPage();
+      return;
+    }
+    if (this.page === "texttools") {
+      this.renderTextToolsPage();
       return;
     }
     if (this.page.startsWith("plugin:")) {
@@ -237,11 +286,19 @@ export class SettingsPanel {
       }),
     );
 
-    // 快捷键：入口行 → 二级页（速记 / 提醒 / 插件面板）
+    // 快捷键：入口行 → 二级页（速记 / 提醒 / 插件面板 / 取词 / 框选）
     this.el.appendChild(this.divider("快捷键"));
     this.el.appendChild(
       this.entryRow("自定义快捷键", () => {
         this.page = "shortcuts";
+        this.render();
+      }),
+    );
+
+    // 取词与翻译：入口行 → 二级页（方向 / 引擎 / 快捷键 / 权限）
+    this.el.appendChild(
+      this.entryRow("取词与翻译", () => {
+        this.page = "texttools";
         this.render();
       }),
     );
@@ -402,7 +459,7 @@ export class SettingsPanel {
     new PluginSettingsShell().renderPlugin(box, id);
   }
 
-  /** 二级页：自定义全局快捷键（速记 / 提醒 / 插件面板）。 */
+  /** 二级页：自定义全局快捷键（五项，含取词与屏幕框选）。 */
   private renderShortcutsPage(): void {
     this.el.replaceChildren();
     this.el.appendChild(
@@ -424,6 +481,10 @@ export class SettingsPanel {
       this.rowShortcutCapture("插件面板", "shortcut_hub", c),
     );
     this.el.appendChild(
+      this.rowShortcutCapture("取词翻译", "shortcut_selection", c),
+    );
+    this.el.appendChild(this.rowShortcutCapture("屏幕框选", "shortcut_ocr", c));
+    this.el.appendChild(
       this.hint(
         "点按钮后按下新的快捷键；需包含 Alt / Ctrl / Cmd 修饰键；Esc 取消。配置自动保存并立即生效。",
       ),
@@ -436,6 +497,8 @@ export class SettingsPanel {
     "shortcut_note",
     "shortcut_reminder",
     "shortcut_hub",
+    "shortcut_selection",
+    "shortcut_ocr",
   ] as const;
 
   private static readonly SHORTCUT_LABELS: Record<
@@ -445,7 +508,120 @@ export class SettingsPanel {
     shortcut_note: "速记",
     shortcut_reminder: "每日提醒",
     shortcut_hub: "插件面板",
+    shortcut_selection: "取词翻译",
+    shortcut_ocr: "屏幕框选",
   };
+
+  /** 二级页：取词与翻译（默认方向 / 搜索引擎 / 快捷键 / 权限 / 隐私说明）。 */
+  private renderTextToolsPage(): void {
+    const c = this.cfg;
+    if (!c) return;
+    this.el.replaceChildren();
+    this.el.appendChild(
+      this.header("取词与翻译", () => {
+        this.cancelCapture(false);
+        this.page = "main";
+        this.render();
+      }),
+    );
+
+    // 默认操作：翻译方向（默认英译中）
+    this.el.appendChild(this.divider("默认操作"));
+    this.el.appendChild(
+      this.rowSelect(
+        "翻译方向",
+        TRANSLATION_DIRECTIONS.map((d) => DIRECTION_LABELS[d]),
+        TRANSLATION_DIRECTIONS.indexOf(c.translation_direction),
+        (i) => {
+          const d = TRANSLATION_DIRECTIONS[i];
+          if (d && d !== c.translation_direction) {
+            void this.patchStrict({ translation_direction: d }, this.el);
+          }
+        },
+      ),
+    );
+    this.el.appendChild(
+      this.rowSelect(
+        "搜索引擎",
+        SEARCH_ENGINES.map((e) => ENGINE_LABELS[e]),
+        SEARCH_ENGINES.indexOf(c.search_engine),
+        (i) => {
+          const e = SEARCH_ENGINES[i];
+          if (e && e !== c.search_engine) {
+            void this.patchStrict({ search_engine: e }, this.el);
+          }
+        },
+      ),
+    );
+
+    // 快捷键：展示取词与框选两项，全部组合在「自定义快捷键」页改
+    this.el.appendChild(this.divider("快捷键"));
+    this.el.appendChild(
+      this.rowShortcutCapture("取词翻译", "shortcut_selection", c),
+    );
+    this.el.appendChild(this.rowShortcutCapture("屏幕框选", "shortcut_ocr", c));
+    this.el.appendChild(
+      this.entryRow("自定义快捷键", () => {
+        this.page = "shortcuts";
+        this.render();
+      }),
+    );
+
+    // 权限：分别展示，只在用户主动点击时申请
+    this.el.appendChild(this.divider("权限"));
+    this.el.appendChild(this.rowPermission("辅助功能", axPermission, requestAxPermission));
+    this.el.appendChild(
+      this.rowPermission("屏幕录制", screenPermission, requestScreenPermission),
+    );
+
+    // 隐私说明：说清本地识别与外发时机
+    this.el.appendChild(
+      this.hint(
+        "取词与框选识别只在你按下快捷键后进行：屏幕框选的画面在本机识别（不上传、不保存）；" +
+          "只有点击「翻译」或「搜索」时，文本才会发往你已配置的服务或搜索引擎。不保存原文、译文与历史。",
+      ),
+    );
+    this.el.appendChild(this.footer());
+  }
+
+  /**
+   * 权限行：实时查询状态，点击按钮才申请（不做后台轮询、不自动弹系统窗）。
+   */
+  private rowPermission(
+    label: string,
+    query: () => Promise<boolean>,
+    request: () => Promise<boolean>,
+  ): HTMLElement {
+    const r = this.row(label);
+    const btn = document.createElement("button");
+    btn.className = "pet-settings-entry";
+    btn.textContent = "查询中…";
+    let granted = false;
+    void query()
+      .then((ok) => {
+        granted = ok;
+        btn.textContent = ok ? "已授权" : "点击授权";
+        btn.disabled = ok;
+      })
+      .catch(() => {
+        btn.textContent = "状态未知";
+      });
+    btn.addEventListener("pointerdown", (e) => {
+      e.stopPropagation();
+      if (granted) return;
+      void request()
+        .then((ok) => {
+          granted = ok;
+          btn.textContent = ok ? "已授权" : "点击授权";
+          btn.disabled = ok;
+        })
+        .catch(() => {
+          this.showErrorBubble(r, "授权请求失败，请在系统设置中手动开启");
+        });
+    });
+    r.appendChild(btn);
+    return r;
+  }
 
   /** 单个快捷键行：按钮显示当前组合，点击进入捕获状态。 */
   private rowShortcutCapture(
@@ -491,7 +667,7 @@ export class SettingsPanel {
     field: (typeof SettingsPanel.SHORTCUT_FIELDS)[number],
     cfg: ConfigView,
   ): void {
-    void invoke("begin_shortcut_capture").catch(() => {});
+    void invoke("begin_capture").catch(() => {});
     btn.textContent = "按下新快捷键…";
     btn.classList.add("pet-shortcut-capturing");
     // document 捕获阶段：早于 main.ts 挂在 window 捕获阶段的 Esc 全局关闭，
@@ -517,7 +693,7 @@ export class SettingsPanel {
     const { handler } = this.capturing;
     this.capturing = null;
     document.removeEventListener("keydown", handler, true);
-    void invoke("end_shortcut_capture").catch(() => {});
+    void invoke("end_capture").catch(() => {});
     if (repaint) this.render();
   }
 
@@ -539,7 +715,7 @@ export class SettingsPanel {
           anchor,
           `与「${SettingsPanel.SHORTCUT_LABELS[f]}」的快捷键冲突，未保存`,
         );
-        void invoke("end_shortcut_capture").catch(() => {});
+        void invoke("end_capture").catch(() => {});
         this.render();
         return;
       }
@@ -549,11 +725,16 @@ export class SettingsPanel {
         anchor,
         "需包含 Alt / Ctrl / Cmd 修饰键（纯 Shift 或裸键会拦截正常打字），未保存",
       );
-      void invoke("end_shortcut_capture").catch(() => {});
+      void invoke("end_capture").catch(() => {});
       this.render();
       return;
     }
-    void this.patch({ [field]: s });
+    // 严格保存：注册被占用等失败必须让用户看到真实原因。
+    // 若用会吞错的 patch，界面会显示成出厂配置并把默认值推给全局。
+    void this.patchStrict({ [field]: s }, anchor).finally(() => {
+      // 无论成败都结束捕获：否则五个全局键会一直停在反注册状态
+      void invoke("end_capture").catch(() => {});
+    });
   }
 
   /** 可点击的入口行（主表单 → 二级页）。 */

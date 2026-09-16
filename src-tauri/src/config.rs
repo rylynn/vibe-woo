@@ -59,6 +59,38 @@ impl Default for LlmProtocol {
     }
 }
 
+/// 取词翻译方向。默认英译中。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TranslationDirection {
+    /// 英译中（默认）。
+    #[serde(rename = "en2zh")]
+    En2Zh,
+    /// 中译英。
+    #[serde(rename = "zh2en")]
+    Zh2En,
+}
+
+impl Default for TranslationDirection {
+    fn default() -> Self {
+        Self::En2Zh
+    }
+}
+
+/// 取词搜索使用的搜索引擎。默认 Google。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SearchEngine {
+    Google,
+    Bing,
+    Baidu,
+}
+
+impl Default for SearchEngine {
+    fn default() -> Self {
+        Self::Google
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LlmConfig {
@@ -292,6 +324,18 @@ pub struct Config {
     /// 插件面板的全局快捷键。
     #[serde(default = "default_shortcut_hub")]
     pub shortcut_hub: String,
+    /// 取词（读取其他应用选区）的全局快捷键。
+    #[serde(default = "default_shortcut_selection")]
+    pub shortcut_selection: String,
+    /// 屏幕框选 OCR 的全局快捷键。
+    #[serde(default = "default_shortcut_ocr")]
+    pub shortcut_ocr: String,
+    /// 取词翻译方向，默认英译中。
+    #[serde(default)]
+    pub translation_direction: TranslationDirection,
+    /// 取词搜索使用的搜索引擎。
+    #[serde(default)]
+    pub search_engine: SearchEngine,
 }
 
 /// 布尔字段的默认值：新功能默认开（详见 `Config::habit_enabled` 的注释）。
@@ -310,6 +354,14 @@ fn default_shortcut_reminder() -> String {
 
 fn default_shortcut_hub() -> String {
     crate::shortcut::DEFAULT_SHORTCUT_HUB.to_string()
+}
+
+fn default_shortcut_selection() -> String {
+    crate::shortcut::DEFAULT_SHORTCUT_SELECTION.to_string()
+}
+
+fn default_shortcut_ocr() -> String {
+    crate::shortcut::DEFAULT_SHORTCUT_OCR.to_string()
 }
 
 impl Default for Config {
@@ -334,6 +386,10 @@ impl Default for Config {
             shortcut_note: crate::shortcut::DEFAULT_SHORTCUT_NOTE.to_string(),
             shortcut_reminder: crate::shortcut::DEFAULT_SHORTCUT_REMINDER.to_string(),
             shortcut_hub: crate::shortcut::DEFAULT_SHORTCUT_HUB.to_string(),
+            shortcut_selection: crate::shortcut::DEFAULT_SHORTCUT_SELECTION.to_string(),
+            shortcut_ocr: crate::shortcut::DEFAULT_SHORTCUT_OCR.to_string(),
+            translation_direction: TranslationDirection::default(),
+            search_engine: SearchEngine::default(),
         }
     }
 }
@@ -360,7 +416,33 @@ pub fn load(app: &AppHandle) -> Config {
     };
     // 手改配置文件可以绕过 update_config 的截断，这里统一收口
     c.user_kind = c.user_kind.chars().take(USER_KIND_MAX_CHARS).collect();
+    sanitize_shortcuts(&mut c);
     c
+}
+
+/// 快捷键兜底：非法 / 互相冲突 / 占用逃生键时整组回退默认值。
+///
+/// 手改 config.json 能绕过 update_config 的校验，这里在载入时再收一次口 ——
+/// 「自定义键坏掉」不该让功能静默失效。返回是否发生过回退。
+fn sanitize_shortcuts(c: &mut Config) -> bool {
+    let ok = crate::shortcut::validate_shortcuts(&[
+        ("速记", c.shortcut_note.as_str()),
+        ("提醒", c.shortcut_reminder.as_str()),
+        ("插件面板", c.shortcut_hub.as_str()),
+        ("取词", c.shortcut_selection.as_str()),
+        ("框选识别", c.shortcut_ocr.as_str()),
+    ])
+    .is_ok();
+    if ok {
+        return false;
+    }
+    eprintln!("[config] 快捷键配置无效（冲突/非法/占用逃生键），已回退默认值");
+    c.shortcut_note = default_shortcut_note();
+    c.shortcut_reminder = default_shortcut_reminder();
+    c.shortcut_hub = default_shortcut_hub();
+    c.shortcut_selection = default_shortcut_selection();
+    c.shortcut_ocr = default_shortcut_ocr();
+    true
 }
 
 /// 写入配置。
@@ -642,5 +724,84 @@ mod tests {
         .unwrap();
         assert!(c.auto_update);
         assert_eq!(c.last_run_version, "");
+    }
+
+    #[test]
+    fn 旧配置缺失取词字段时补默认值() {
+        // 0.11.x 的 config.json 没有取词相关字段，升级后必须补齐默认值
+        let c: Config = serde_json::from_str(r#"{"size_index": 1}"#).unwrap();
+        assert_eq!(c.shortcut_selection, "Ctrl+Alt+T");
+        assert_eq!(c.shortcut_ocr, "Ctrl+Alt+O");
+        assert_eq!(
+            c.translation_direction,
+            TranslationDirection::En2Zh,
+            "默认英译中"
+        );
+        assert_eq!(c.search_engine, SearchEngine::Google);
+    }
+
+    #[test]
+    fn 翻译方向与搜索引擎枚举与前端对齐() {
+        assert_eq!(
+            serde_json::to_string(&TranslationDirection::En2Zh).unwrap(),
+            "\"en2zh\""
+        );
+        assert_eq!(
+            serde_json::to_string(&TranslationDirection::Zh2En).unwrap(),
+            "\"zh2en\""
+        );
+        let d: TranslationDirection = serde_json::from_str("\"zh2en\"").unwrap();
+        assert_eq!(d, TranslationDirection::Zh2En);
+        assert_eq!(
+            serde_json::to_string(&SearchEngine::Google).unwrap(),
+            "\"google\""
+        );
+        assert_eq!(
+            serde_json::to_string(&SearchEngine::Bing).unwrap(),
+            "\"bing\""
+        );
+        assert_eq!(
+            serde_json::to_string(&SearchEngine::Baidu).unwrap(),
+            "\"baidu\""
+        );
+        let e: SearchEngine = serde_json::from_str("\"baidu\"").unwrap();
+        assert_eq!(e, SearchEngine::Baidu);
+    }
+
+    #[test]
+    fn 手改配置造成快捷键冲突时整组回退默认值() {
+        let mut c: Config = serde_json::from_str(r#"{"size_index": 1}"#).unwrap();
+        c.shortcut_selection = c.shortcut_note.clone(); // 与速记冲突
+        assert!(sanitize_shortcuts(&mut c), "冲突必须触发回退");
+        assert_eq!(c.shortcut_note, "Alt+Space");
+        assert_eq!(c.shortcut_selection, "Ctrl+Alt+T");
+    }
+
+    #[test]
+    fn 手改配置占用逃生键时回退默认值() {
+        let mut c: Config = serde_json::from_str(r#"{"size_index": 1}"#).unwrap();
+        c.shortcut_ocr = "Ctrl+Alt+Cmd+Q".into();
+        assert!(sanitize_shortcuts(&mut c));
+        assert_eq!(c.shortcut_ocr, "Ctrl+Alt+O");
+    }
+
+    #[test]
+    fn 合法快捷键不被回退() {
+        let mut c = Config::default();
+        assert!(!sanitize_shortcuts(&mut c), "默认配置不应被改动");
+    }
+
+    #[test]
+    fn 取词配置可往返序列化() {
+        let mut c = Config::default();
+        c.translation_direction = TranslationDirection::Zh2En;
+        c.search_engine = SearchEngine::Baidu;
+        c.shortcut_selection = "Alt+T".into();
+        c.shortcut_ocr = "Alt+O".into();
+        let back: Config = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
+        assert_eq!(back.translation_direction, TranslationDirection::Zh2En);
+        assert_eq!(back.search_engine, SearchEngine::Baidu);
+        assert_eq!(back.shortcut_selection, "Alt+T");
+        assert_eq!(back.shortcut_ocr, "Alt+O");
     }
 }

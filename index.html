@@ -1542,6 +1542,215 @@
         color: #8b6a66;
         text-align: right;
       }
+
+      /* ——— 取词与翻译浮窗 ———
+         桌面工具形态：实色表面 + 薄荷绿强调，不做毛玻璃/半透明遮罩。
+         宽度 480px，可用高度上限 70%（窄屏自动收缩）。 */
+      .pet-text-tools {
+        position: fixed;
+        z-index: 20;
+        pointer-events: auto;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        width: min(480px, calc(100vw - 24px));
+        max-height: 70vh;
+        overflow: hidden auto;
+        padding: 0 0 10px;
+        border-radius: 12px;
+        background: #10141e;
+        border: 1px solid rgba(124, 245, 196, 0.28);
+        box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+        color: #e8ecf4;
+        font: 13px/1.6 "PingFang SC", ui-sans-serif, -apple-system, system-ui,
+          sans-serif;
+      }
+
+      .pet-tt-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 11px 14px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        font-size: 16px;
+        font-weight: 600;
+        color: #7cf5c4;
+        cursor: grab;
+      }
+
+      .pet-tt-head:active {
+        cursor: grabbing;
+      }
+
+      .pet-tt-meta {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 14px 0;
+        font-size: 12px;
+        color: #a8b0c2;
+      }
+
+      .pet-tt-tag {
+        padding: 2px 7px;
+        border-radius: 5px;
+        background: #182032;
+        border: 1px solid rgba(124, 245, 196, 0.22);
+        color: #7cf5c4;
+        font-weight: 600;
+      }
+
+      .pet-tt-from {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      /* 原文：可编辑、保留换行、长内容内部滚动、允许选中复制 */
+      .pet-tt-original {
+        display: block;
+        width: calc(100% - 28px);
+        min-height: 96px;
+        max-height: 30vh;
+        margin: 10px 14px 4px;
+        padding: 9px 10px;
+        resize: vertical;
+        border-radius: 8px;
+        background: #181f2d;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        color: #e8ecf4;
+        font: 14px/1.6 "PingFang SC", ui-sans-serif, -apple-system, system-ui,
+          sans-serif;
+        overflow-y: auto;
+      }
+
+      .pet-tt-original:focus-visible {
+        outline: 2px solid #7cf5c4;
+        outline-offset: 1px;
+      }
+
+      .pet-tt-count {
+        padding: 0 14px;
+        font-size: 12px;
+        color: #a8b0c2;
+      }
+
+      .pet-tt-count.pet-tt-warn {
+        color: #efc779;
+      }
+
+      .pet-tt-divider {
+        margin: 12px 14px 6px;
+        padding-top: 8px;
+        border-top: 1px solid rgba(255, 255, 255, 0.08);
+        font-size: 13px;
+        font-weight: 600;
+        color: #a8b0c2;
+      }
+
+      .pet-tt-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        padding: 10px 14px 2px;
+      }
+
+      .pet-tt-primary,
+      .pet-tt-btn {
+        padding: 7px 13px;
+        border-radius: 8px;
+        font: 600 13px/1 "PingFang SC", ui-sans-serif, -apple-system, system-ui,
+          sans-serif;
+        /* 短时反馈：120ms 实色切换，不用位移/缩放动画 */
+        transition: background-color 120ms linear, border-color 120ms linear;
+        cursor: pointer;
+      }
+
+      .pet-tt-primary {
+        background: #7cf5c4;
+        border: 1px solid #7cf5c4;
+        color: #10141e;
+      }
+
+      .pet-tt-primary:hover:not(:disabled) {
+        background: #61e0ad;
+        border-color: #61e0ad;
+      }
+
+      .pet-tt-btn {
+        background: #253247;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        color: #e8ecf4;
+      }
+
+      .pet-tt-btn:hover:not(:disabled) {
+        background: #2d3d57;
+      }
+
+      .pet-tt-primary:disabled,
+      .pet-tt-btn:disabled {
+        opacity: 0.45;
+        cursor: default;
+      }
+
+      /* 键盘可达：清晰焦点环 */
+      .pet-tt-primary:focus-visible,
+      .pet-tt-btn:focus-visible {
+        outline: 2px solid #7cf5c4;
+        outline-offset: 2px;
+      }
+
+      .pet-tt-result {
+        margin: 4px 14px 0;
+        padding: 9px 10px;
+        max-height: 22vh;
+        overflow-y: auto;
+        border-radius: 8px;
+        background: #182032;
+        border: 1px solid rgba(124, 245, 196, 0.16);
+        color: #e8ecf4;
+        white-space: pre-wrap;
+        word-break: break-word;
+        user-select: text;
+      }
+
+      .pet-tt-error {
+        margin: 8px 14px 0;
+        padding: 9px 10px;
+        border-radius: 8px;
+        background: #1f1820;
+        border: 1px solid #ff8a94;
+        color: #ffc7cc;
+      }
+
+      .pet-tt-hint {
+        margin: 8px 14px 0;
+        font-size: 12px;
+        color: #a8b0c2;
+      }
+
+      .pet-tt-foot {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-top: 12px;
+        padding: 10px 14px 0;
+        border-top: 1px solid rgba(255, 255, 255, 0.08);
+      }
+
+      .pet-tt-tip {
+        margin-left: auto;
+        font-size: 11px;
+        color: #8b93a7;
+      }
+
+      /* 尊重系统的「减少动态效果」设置 */
+      @media (prefers-reduced-motion: reduce) {
+        .pet-tt-primary,
+        .pet-tt-btn {
+          transition: none;
+        }
+      }
     </style>
   </head>
   <body>
