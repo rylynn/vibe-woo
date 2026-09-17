@@ -29,6 +29,9 @@ use crate::configcmd;
 /// 取词结果定向推送事件名（只发 pet 窗口）。
 pub const EVENT_RESULT: &str = "pet://text-tools-result";
 
+/// 框选层确认出现的事件名（广播：框选层属于全屏操作，启动失败要尽快暴露）。
+pub const EVENT_SELECTION_SHOWN: &str = "pet://text-tools-selection-shown";
+
 /// 单次取词文本上限（Unicode 字符数）。超限提示用户编辑或缩小选区。
 pub const TEXT_MAX_CHARS: usize = 4000;
 
@@ -44,6 +47,8 @@ pub enum ReadError {
     AppSwitched,
     /// 当前应用不支持取词（无焦点控件 / 安全输入控件等）。
     Unsupported,
+    /// 焦点在宠物自己的窗口上（先点一下要取词的应用再触发）。
+    PetFocused,
     /// 读取超时（应用无响应）。
     Timeout,
     /// 文本超长。
@@ -187,6 +192,7 @@ fn outcome_kind(outcome: &ReadOutcome) -> &'static str {
             ReadError::NoSelection => "no_selection",
             ReadError::AppSwitched => "app_switched",
             ReadError::Unsupported => "unsupported",
+            ReadError::PetFocused => "pet_focused",
             ReadError::Timeout => "timeout",
             ReadError::TooLong => "too_long",
             ReadError::Cancelled => "cancelled",
@@ -198,10 +204,14 @@ fn outcome_kind(outcome: &ReadOutcome) -> &'static str {
 /// 选区读取编排（阻塞线程内执行）。
 fn read_selection_outcome(source: Option<macos::SourceApp>) -> ReadOutcome {
     let Some(src) = source else {
-        // 前台是宠物自己（或取不到前台应用）—— 无可读选区
-        return ReadOutcome::Error {
-            code: ReadError::Unsupported,
+        // 前台拿不到：区分「是我们自己」与「真没有」—— 前者给专属提示
+        // （点一下要取词的应用即可恢复），后者仍是不支持。
+        let code = if macos::frontmost_is_self() {
+            ReadError::PetFocused
+        } else {
+            ReadError::Unsupported
         };
+        return ReadOutcome::Error { code };
     };
     if !macos::ax_trusted(false) {
         return ReadOutcome::Error {
@@ -266,7 +276,7 @@ pub async fn text_tools_start_ocr(app: AppHandle) -> Result<u64, String> {
     let session = GATE.begin();
     tauri::async_runtime::spawn_blocking(move || {
         let started = Instant::now();
-        let outcome = run_ocr_flow();
+        let outcome = run_ocr_flow(&app);
         eprintln!(
             "[text-tools] 框选识别完成 耗时={:?} 结果={:?}",
             started.elapsed(),
@@ -301,11 +311,11 @@ pub fn text_tools_request_screen_permission() -> bool {
 }
 
 /// 框选 + 截图 + 识别编排（阻塞线程内执行）。
-fn run_ocr_flow() -> ReadOutcome {
+fn run_ocr_flow(app: &AppHandle) -> ReadOutcome {
     use std::time::Duration;
 
     // 1. 框选（阻塞，最多 60s；取消/超时 → Cancelled）
-    let region = match selection_panel::capture_region(Duration::from_secs(60)) {
+    let region = match selection_panel::capture_region(app, Duration::from_secs(60)) {
         Ok(r) => r,
         Err(ReadError::Cancelled) => {
             return ReadOutcome::Error {
@@ -555,6 +565,16 @@ mod tests {
         let v = serde_json::to_value(&e).unwrap();
         assert_eq!(v["kind"], "error");
         assert_eq!(v["code"], "not_trusted");
+    }
+
+    #[test]
+    fn 焦点在宠物自己窗口的错误码与前端对齐() {
+        let e = ReadOutcome::Error {
+            code: ReadError::PetFocused,
+        };
+        let v = serde_json::to_value(&e).unwrap();
+        assert_eq!(v["kind"], "error");
+        assert_eq!(v["code"], "pet_focused");
     }
 
     #[test]

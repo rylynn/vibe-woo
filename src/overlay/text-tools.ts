@@ -35,10 +35,19 @@ import {
 type PanelStatus = "reading" | "ready" | "translating" | "error";
 
 /**
- * selection 读取态兜底超时：Rust 侧 AX 读取有 1.5s 消息超时，正常 2s 内必有结果；
- * 结果事件彻底丢失（投递失败等极端情况）时到点转成超时错误，绝不永久读取中。
+ * selection 读取态兜底超时：Rust 侧 AX 最坏要连发 4 条消息（焦点控件 /
+ * 选区文本 / 选区范围 / 范围取串），各 1.5s 消息超时，慢应用下可能到 6s；
+ * 再加余量到 8s。结果事件彻底丢失时到点转成超时错误，绝不永久读取中
+ * （迟到结果到达仍会覆盖超时错误）。
  */
-const READING_WATCHDOG_MS = 5_000;
+const READING_WATCHDOG_MS = 8_000;
+
+/**
+ * 框选层出现确认的等待上限：Rust 抬窗成功会发 pet://text-tools-selection-shown，
+ * 到点没收到说明框选层没起来（曾经的 bug 是静默吞掉、干等 60s 超时），
+ * 直接报启动失败让用户重试。
+ */
+const SELECTION_SHOWN_WATCHDOG_MS = 1_500;
 
 const SOURCE_LABELS: Record<TextSource, string> = {
   selection: "选中文字",
@@ -57,6 +66,10 @@ export class TextToolsPanel {
   private heldResult: ResultPayload | null = null;
   /** 读取态兜底超时句柄。 */
   private readingTimer: number | null = null;
+  /** 框选层出现确认超时句柄。 */
+  private layerTimer: number | null = null;
+  /** 框选层启动失败（与取词失败分开：提示语与出路不同）。 */
+  private layerFailed = false;
   private cfg: ConfigView | null = null;
   private source: TextSource | null = null;
   private sourceApp: string | null = null;
@@ -116,10 +129,12 @@ export class TextToolsPanel {
     this.readError = null;
     this.translateError = null;
     this.searchFailed = false;
+    this.layerFailed = false;
     this.sourceApp = null;
     this.guard.cancel();
     this.heldResult = null;
     this.clearReadingTimer();
+    this.clearLayerTimer();
     try {
       const session =
         source === "selection" ? await readSelection() : await startOcr();
@@ -131,12 +146,16 @@ export class TextToolsPanel {
         this.deliver(held);
         return;
       }
-      // 框选要看着屏幕操作，此时不显示浮窗；选区取词很快，给个读取态
       if (source === "selection") {
+        // 选区取词很快，给个读取态
         this.show(false);
         this.armReadingWatchdog(session);
       } else {
+        // 框选要看着屏幕操作：先收起旧浮窗（480px 实色面板会挡住
+        // 要框选的区域），结果回来再由 deliver→show 恢复
         this.open = true;
+        this.el.style.display = "none";
+        this.armLayerWatchdog();
       }
     } catch (e) {
       if (seq !== this.startSeq) return;
@@ -146,6 +165,11 @@ export class TextToolsPanel {
       this.show(false);
       console.warn("[text-tools] 取词启动失败", e);
     }
+  }
+
+  /** 框选层出现确认（main.ts 转发 pet://text-tools-selection-shown）。 */
+  onSelectionShown(): void {
+    this.clearLayerTimer();
   }
 
   /** 结果回调（main.ts 转发 pet://text-tools-result）。迟到结果直接丢弃。 */
@@ -163,6 +187,7 @@ export class TextToolsPanel {
   /** 交付并渲染一份已通过会话守卫的结果。 */
   private deliver(payload: ResultPayload): void {
     this.clearReadingTimer();
+    this.clearLayerTimer();
     this.heldResult = null;
     this.source = payload.source;
     if (payload.outcome.kind === "ok") {
@@ -210,6 +235,24 @@ export class TextToolsPanel {
     }
   }
 
+  /** 框选层出现确认兜底：到点仍没收到 shown 事件即报启动失败。 */
+  private armLayerWatchdog(): void {
+    this.layerTimer = window.setTimeout(() => {
+      this.layerTimer = null;
+      if (this.status !== "reading") return;
+      this.layerFailed = true;
+      this.status = "error";
+      this.show(false);
+    }, SELECTION_SHOWN_WATCHDOG_MS);
+  }
+
+  private clearLayerTimer(): void {
+    if (this.layerTimer !== null) {
+      clearTimeout(this.layerTimer);
+      this.layerTimer = null;
+    }
+  }
+
   /**
    * @param focus 是否请求输入焦点。读取中不要焦点（会让宠物变前台，
    *              破坏 AX 取词的前提）；结果就绪后才为编辑与键盘操作取焦点。
@@ -229,6 +272,7 @@ export class TextToolsPanel {
     this.startSeq++;
     this.heldResult = null;
     this.clearReadingTimer();
+    this.clearLayerTimer();
     if (!this.open && !this.focused) {
       // 框选中的会话没显示过面板，也要把会话作废
       this.guard.cancel();
@@ -342,6 +386,22 @@ export class TextToolsPanel {
     if (this.status === "reading") {
       this.el.appendChild(this.hint("正在读取…（Esc 或点底部取消可中止）"));
       this.el.appendChild(this.actionRow(false));
+      return;
+    }
+
+    if (this.status === "error" && this.layerFailed) {
+      const b = document.createElement("div");
+      b.className = "pet-tt-error";
+      b.textContent = "框选层启动失败，请重试";
+      this.el.appendChild(b);
+      const actions = document.createElement("div");
+      actions.className = "pet-tt-actions";
+      const retry = document.createElement("button");
+      retry.className = "pet-tt-primary";
+      retry.textContent = "重试框选";
+      retry.addEventListener("click", () => void this.start("ocr"));
+      actions.appendChild(retry);
+      this.el.appendChild(actions);
       return;
     }
 

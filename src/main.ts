@@ -7,7 +7,7 @@ import { AboutPanel } from "./overlay/about";
 import { QuickNote, onQuickNoteOpen } from "./overlay/quick-note";
 import { TodayPanel } from "./overlay/today";
 import { TextToolsPanel } from "./overlay/text-tools";
-import { listenResult, type ResultPayload } from "./text-tools";
+import { listenResult, listenSelectionShown, type ResultPayload } from "./text-tools";
 import { Bubble, Banner } from "./overlay/bubble";
 import {
   RemindersPanel,
@@ -353,6 +353,11 @@ void listen("pet://text-tools-ocr", () => {
 // 取词结果（Rust 只发给 pet 窗口）：交给面板按会话号判断是否为最新
 void listenResult((p: ResultPayload) => textTools.onResult(p)).catch((e) =>
   console.warn("[text-tools] 结果监听失败", e),
+);
+
+// 框选层抬窗确认：面板据此撤销「框选层启动失败」的兜底计时器
+void listenSelectionShown(() => textTools.onSelectionShown()).catch((e) =>
+  console.warn("[text-tools] 框选层确认监听失败", e),
 );
 
 // 接收 Rust 传感器推送的状态。宠物的表情、配色、呼吸节奏都由它驱动。

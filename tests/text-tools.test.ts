@@ -111,6 +111,10 @@ describe("契约与提示文案", () => {
     expect(translateErrorMessage("llm_disabled")).toContain("启用 AI");
     expect(translateErrorMessage("llm_not_configured")).toContain("配置");
   });
+
+  it("焦点在宠物自己窗口上时给出明确出路", () => {
+    expect(readErrorMessage("pet_focused")).toContain("点一下要取词的应用");
+  });
 });
 
 describe("取词浮窗", () => {
@@ -225,8 +229,72 @@ describe("取词浮窗", () => {
       const panel = new TextToolsPanel();
       await panel.start("selection");
       // 什么结果都不来（事件投递失败等极端情况）
-      await vi.advanceTimersByTimeAsync(5_000);
+      await vi.advanceTimersByTimeAsync(8_000);
       expect(document.querySelector(".pet-tt-error")?.textContent).toContain("超时");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("读取态在 AX 慢读最坏耗时（约 6s）内不误报超时", async () => {
+    vi.useFakeTimers();
+    try {
+      const panel = new TextToolsPanel();
+      const s = await startSession(panel);
+      // Rust 最坏 4 条 AX 消息 × 1.5s —— 5.5s 仍属正常范围
+      await vi.advanceTimersByTimeAsync(5_500);
+      expect(document.querySelector(".pet-tt-error")).toBeNull();
+      // 慢到的结果仍被接受并覆盖
+      panel.onResult(payload({ session: s, outcome: { kind: "ok", text: "慢的结果", sourceApp: null } }));
+      const ta = document.querySelector<HTMLTextAreaElement>(".pet-tt-original");
+      expect(ta?.value).toBe("慢的结果");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("框选期间收起旧浮窗，结果回来再恢复", async () => {
+    const panel = new TextToolsPanel();
+    const first = await startSession(panel, "selection");
+    panel.onResult(payload({ session: first }));
+    const el = document.querySelector<HTMLElement>(".pet-text-tools")!;
+    expect(el.style.display).toBe("block");
+
+    const second = await startSession(panel, "ocr");
+    panel.onSelectionShown(); // Rust 已确认框选层出现
+    // 480px 实色面板不应挡住要框选的屏幕
+    expect(el.style.display).toBe("none");
+
+    panel.onResult(payload({ session: second, outcome: { kind: "ok", text: "框选文字", sourceApp: null }, source: "ocr" }));
+    expect(el.style.display).toBe("block");
+    const ta = document.querySelector<HTMLTextAreaElement>(".pet-tt-original");
+    expect(ta?.value).toBe("框选文字");
+  });
+
+  it("框选层没起来时 1.5s 报启动失败，不干等 60s 超时", async () => {
+    vi.useFakeTimers();
+    try {
+      const panel = new TextToolsPanel();
+      await startSession(panel, "ocr");
+      // Rust 的 shown 事件一直不来（框选层被 AppKit 吞掉等）
+      await vi.advanceTimersByTimeAsync(1_500);
+      expect(document.querySelector(".pet-tt-error")?.textContent).toContain("框选层启动失败");
+      const retry = buttonByText(document.body, "重试框选");
+      expect(retry).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("关闭面板即撤销框选层兜底计时器", async () => {
+    vi.useFakeTimers();
+    try {
+      const panel = new TextToolsPanel();
+      await startSession(panel, "ocr");
+      panel.hide(); // 框选等待中按 Esc
+      await vi.advanceTimersByTimeAsync(1_500);
+      expect(document.querySelector(".pet-tt-error")).toBeNull();
+      expect(panel.isOpen).toBe(false);
     } finally {
       vi.useRealTimers();
     }

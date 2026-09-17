@@ -20,12 +20,13 @@ use objc2_app_kit::{
     NSScreen, NSScreenSaverWindowLevel, NSView, NSWindowCollectionBehavior, NSWindowStyleMask,
 };
 use objc2_core_foundation::{CGFloat, CGPoint, CGRect, CGSize};
+use tauri::{AppHandle, Emitter};
 
 use super::capture::{
     appkit_screen_to_cg, clamp_rect_to_screen, find_screen_for_point, LogicalRect, ScreenInfo,
     SelectedRegion,
 };
-use super::ReadError;
+use super::{ReadError, EVENT_SELECTION_SHOWN};
 
 /// 取消区（底部）与提示条（顶部）高度，逻辑点。
 const BAR_HEIGHT: CGFloat = 32.0;
@@ -298,14 +299,16 @@ pub fn close_all() {
 /// 显示框选面板并阻塞等待选区（在工作线程调用）。
 ///
 /// 返回 Ok(region) 表示用户框选了有效区域；Err(Cancelled) 表示
-/// 取消 / 超时（前端应静默关闭，不弹错误）。
-pub fn capture_region(timeout: Duration) -> Result<SelectedRegion, ReadError> {
+/// 取消 / 超时（前端应静默关闭，不弹错误）。抬窗成功会发
+/// EVENT_SELECTION_SHOWN 事件（前端据此判断框选层是否真的出现）。
+pub fn capture_region(app: &AppHandle, timeout: Duration) -> Result<SelectedRegion, ReadError> {
     let (tx, rx) = mpsc::channel::<Option<SelectedRegion>>();
     // 分代号：先关掉更早的残留面板，再建自己的
     let generation = GENERATION.fetch_add(1, Ordering::SeqCst);
     close_panels_up_to(generation.saturating_sub(1));
+    let app = app.clone();
     dispatch2::DispatchQueue::main().exec_async(move || {
-        setup_panel(tx, generation);
+        setup_panel(&app, tx, generation);
     });
     match rx.recv_timeout(timeout) {
         Ok(Some(region)) => Ok(region),
@@ -318,8 +321,11 @@ pub fn capture_region(timeout: Duration) -> Result<SelectedRegion, ReadError> {
 }
 
 /// 在主线程创建框选面板（鼠标所在显示器）。
-fn setup_panel(tx: mpsc::Sender<Option<SelectedRegion>>, generation: u64) {
+///
+/// 日志只记阶段与分代号（可观测性）—— 绝不记录屏幕内容或选区文本。
+fn setup_panel(app: &AppHandle, tx: mpsc::Sender<Option<SelectedRegion>>, generation: u64) {
     let Some(mtm) = MainThreadMarker::new() else {
+        eprintln!("[text-tools] 框选层创建失败：无主线程标记 gen={generation}");
         let _ = tx.send(None);
         return;
     };
@@ -357,6 +363,7 @@ fn setup_panel(tx: mpsc::Sender<Option<SelectedRegion>>, generation: u64) {
         })
         .collect();
     let Some(screen_info) = find_screen_for_point(&infos, mouse.x, mouse.y) else {
+        eprintln!("[text-tools] 框选层创建失败：鼠标不在任何屏幕 gen={generation}");
         let _ = tx.send(None);
         return;
     };
@@ -368,11 +375,15 @@ fn setup_panel(tx: mpsc::Sender<Option<SelectedRegion>>, generation: u64) {
         CGSize::new(frame.w, frame.h),
     );
     let panel = CapturePanel::alloc(mtm);
+    // NonactivatingPanel：抬窗/点击框选都不激活本应用 ——
+    // 激活会让宠物变成 frontmost，黏住不放后取词（读前台选区）必失败，
+    // 且应用处于「曾激活、无键窗」状态时 makeKeyAndOrderFront 会被
+    // AppKit 无声吞掉（2026-09-17 二次框选不出现的根因）。
     let panel: Retained<CapturePanel> = unsafe {
         msg_send![
             panel,
             initWithContentRect: content_rect,
-            styleMask: NSWindowStyleMask::Borderless,
+            styleMask: NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel,
             backing: NSBackingStoreType::Buffered,
             defer: false
         ]
@@ -395,8 +406,17 @@ fn setup_panel(tx: mpsc::Sender<Option<SelectedRegion>>, generation: u64) {
     let content: &NSView = &view;
     panel.setContentView(Some(content));
     panel.makeKeyAndOrderFront(None);
+    // 兜底：AppKit 在脏激活态下可能吞掉 makeKeyAndOrderFront 的抬窗，
+    // orderFrontRegardless 不受激活状态影响，补一枪确保可见。
+    panel.orderFrontRegardless();
     let responder: &NSResponder = &view;
     panel.makeFirstResponder(Some(responder));
+    eprintln!("[text-tools] 框选层已显示 gen={generation}");
+    // 通知前端框选层真的出现了（前端 1.5s 收不到即报启动失败，
+    // 不再让用户干等 60s 超时）
+    if let Err(e) = app.emit(EVENT_SELECTION_SHOWN, ()) {
+        eprintln!("[text-tools] 框选层显示事件推送失败：{e}");
+    }
 }
 
 #[cfg(test)]

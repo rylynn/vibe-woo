@@ -17,12 +17,16 @@ export type TextSource = "selection" | "ocr";
 /** 取词结果定向推送事件名（Rust 只发给 pet 窗口）。 */
 export const EVENT_RESULT = "pet://text-tools-result";
 
+/** 框选层确认出现的事件名（Rust 框选层抬窗成功后广播）。 */
+export const EVENT_SELECTION_SHOWN = "pet://text-tools-selection-shown";
+
 /** 取词错误类别（蛇形命名，与 Rust ReadError 对齐）。 */
 export type ReadError =
   | "not_trusted"
   | "no_selection"
   | "app_switched"
   | "unsupported"
+  | "pet_focused"
   | "timeout"
   | "too_long"
   | "cancelled"
@@ -149,6 +153,11 @@ export async function listenResult(
   return await listen<ResultPayload>(EVENT_RESULT, (event) => handler(event.payload));
 }
 
+/** 订阅框选层出现确认事件（前端据此判断框选层是否真的起来了）。 */
+export async function listenSelectionShown(handler: () => void): Promise<UnlistenFn> {
+  return await listen(EVENT_SELECTION_SHOWN, () => handler());
+}
+
 // ---------- 纯逻辑（可测） ----------
 
 /** 文本字符数是否超限（用于前端即时提示，不依赖后端往返）。 */
@@ -167,6 +176,8 @@ export function readErrorMessage(code: ReadError): string {
       return "读取期间切换了应用，请重试";
     case "unsupported":
       return "当前应用不支持取词，试试屏幕框选";
+    case "pet_focused":
+      return "焦点在宠物窗口上——点一下要取词的应用后再按快捷键";
     case "timeout":
       return "读取超时，应用可能无响应";
     case "too_long":
