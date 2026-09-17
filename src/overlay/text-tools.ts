@@ -78,6 +78,8 @@ export class TextToolsPanel {
   private translated = "";
   /** 取词失败类别（需要授权引导时渲染额外按钮）。 */
   private readError: ReadError | null = null;
+  /** 已带用户去过系统设置授权页：错误下方显示勾选引导，不再自动重读。 */
+  private permHint = false;
   private translateError: TranslateError | null = null;
   /** 搜索失败（与取词失败分开：不提示「改用屏幕框选」）。 */
   private searchFailed = false;
@@ -130,6 +132,7 @@ export class TextToolsPanel {
     this.translateError = null;
     this.searchFailed = false;
     this.layerFailed = false;
+    this.permHint = false;
     this.sourceApp = null;
     this.guard.cancel();
     this.heldResult = null;
@@ -349,12 +352,16 @@ export class TextToolsPanel {
 
   private async requestPermission(): Promise<void> {
     try {
+      // Rust 直接打开系统设置的「辅助功能」授权页（系统弹窗在 TCC 条目
+      // 陈旧时会静默不弹，不能再依赖）
       await requestAxPermission();
     } catch (e) {
       console.warn("[text-tools] 请求辅助功能授权失败", e);
     }
-    // 授权后重新取词（未授权则仍留错误态，用户可改用框选）
-    void this.start("selection");
+    // 不立即重读：用户还没来得及在系统设置里勾选，马上重读只会把同样的
+    // 错误再弹一遍（看起来像「点了没反应」）。给勾选引导，等用户重按快捷键。
+    this.permHint = true;
+    this.render();
   }
 
   // ---------- 渲染 ----------
@@ -407,13 +414,23 @@ export class TextToolsPanel {
 
     if (this.status === "error" && this.readError) {
       this.el.appendChild(this.errorBlock(this.readError));
+      // 已带用户去过系统设置：给出勾选引导（点按钮自动重读只会弹同样的错误，
+      // 看起来像「点了没反应」，且用户此刻还没来得及勾选）
+      if (this.readError === "not_trusted" && this.permHint) {
+        this.el.appendChild(
+          this.hint(
+            "已打开系统设置——在「隐私与安全性 › 辅助功能」勾选 Vibe Pet" +
+              "（若已在列表里，先移除再加回），然后按 Ctrl+Alt+T 重试",
+          ),
+        );
+      }
       // 未授权时给授权入口；无论如何都保留「改用屏幕框选」的替代路径
       const alt = document.createElement("div");
       alt.className = "pet-tt-actions";
       if (this.readError === "not_trusted") {
         const grant = document.createElement("button");
         grant.className = "pet-tt-primary";
-        grant.textContent = "去授权";
+        grant.textContent = this.permHint ? "再开一次系统设置" : "去系统设置授权";
         grant.addEventListener("click", () => void this.requestPermission());
         alt.appendChild(grant);
       }

@@ -220,17 +220,14 @@ mod native {
     #[link(name = "CoreGraphics", kind = "framework")]
     extern "C-unwind" {
         fn CGPreflightScreenCaptureAccess() -> bool;
-        fn CGRequestScreenCaptureAccess() -> bool;
     }
 
     /// 查询屏幕录制授权（不弹提示）。
+    /// 授权引导（打开系统设置）由 mod.rs 的 open_privacy_pane 统一处理：
+    /// CGRequestScreenCaptureAccess 在 TCC 条目陈旧（重装/重签名）时
+    /// 会静默不弹任何提示。
     pub fn screen_capture_permission() -> bool {
         unsafe { CGPreflightScreenCaptureAccess() }
-    }
-
-    /// 请求屏幕录制授权（打开系统设置，仅用户主动点击后调用）。
-    pub fn request_screen_capture_permission() -> bool {
-        unsafe { CGRequestScreenCaptureAccess() }
     }
 
     // ---- 单帧截图 ----
@@ -521,7 +518,7 @@ mod native {
 }
 
 #[cfg(target_os = "macos")]
-pub use native::{capture_and_recognize, request_screen_capture_permission, screen_capture_permission};
+pub use native::{capture_and_recognize, screen_capture_permission};
 
 #[cfg(not(target_os = "macos"))]
 pub fn capture_and_recognize(_region: &SelectedRegion) -> Result<String, super::ReadError> {

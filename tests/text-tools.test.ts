@@ -335,4 +335,27 @@ describe("取词浮窗", () => {
     alt.click();
     expect(invokeMock.mock.calls.map((c) => c[0])).toContain("text_tools_start_ocr");
   });
+
+  it("未授权点「去系统设置授权」：打开设置并给勾选引导，不自动重读", async () => {
+    const panel = new TextToolsPanel();
+    const s = await startSession(panel);
+    panel.onResult(
+      payload({ session: s, outcome: { kind: "error", code: "not_trusted" } }),
+    );
+
+    buttonByText(document.body, "去系统设置授权").click();
+    // 宏任务刷新：requestPermission 的 await 链与随后的 render 完成
+    await new Promise((r) => setTimeout(r, 0));
+
+    // 已请求打开系统设置（Rust 直接开对应隐私页，不依赖系统弹窗）
+    const cmds = invokeMock.mock.calls.map((c) => c[0]);
+    expect(cmds).toContain("text_tools_request_permission");
+    // 绝不自动重读：用户还没勾选，马上重读只会弹同样的错误（像「点了没反应」）
+    expect(cmds.filter((c) => c === "text_tools_read_selection")).toHaveLength(1);
+    // 错误下方给出勾选引导
+    const hints = [...document.querySelectorAll(".pet-tt-hint")].map((h) => h.textContent ?? "");
+    expect(hints.some((t) => t.includes("系统设置") && t.includes("辅助功能"))).toBe(true);
+    // 按钮变为可重复打开（用户可能误关了设置页）
+    expect(buttonByText(document.body, "再开一次系统设置")).toBeTruthy();
+  });
 });

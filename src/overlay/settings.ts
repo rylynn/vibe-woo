@@ -571,7 +571,7 @@ export class SettingsPanel {
     this.el.appendChild(this.divider("权限"));
     this.el.appendChild(this.rowPermission("辅助功能", axPermission, requestAxPermission));
     this.el.appendChild(
-      this.rowPermission("屏幕录制", screenPermission, requestScreenPermission),
+      this.rowPermission("屏幕录制", screenPermission, requestScreenPermission, true),
     );
 
     // 隐私说明：说清本地识别与外发时机
@@ -586,38 +586,81 @@ export class SettingsPanel {
 
   /**
    * 权限行：实时查询状态，点击按钮才申请（不做后台轮询、不自动弹系统窗）。
+   *
+   * 授权引导 = 直接打开系统设置的对应隐私页（request 命令负责）：系统
+   * 授权弹窗在 TCC 条目陈旧（重装/重签名后）会静默不弹，不能依赖。
+   * 因此首次点击 = 打开设置页；之后的点击 = 刷新状态，等用户勾选完回来确认。
+   *
+   * @param restartAfterGrant 勾选后需重启应用才真正生效（屏幕录制）。
    */
   private rowPermission(
     label: string,
     query: () => Promise<boolean>,
     request: () => Promise<boolean>,
+    restartAfterGrant = false,
   ): HTMLElement {
     const r = this.row(label);
     const btn = document.createElement("button");
     btn.className = "pet-settings-entry";
     btn.textContent = "查询中…";
     let granted = false;
-    void query()
-      .then((ok) => {
-        granted = ok;
-        btn.textContent = ok ? "已授权" : "点击授权";
-        btn.disabled = ok;
-      })
-      .catch(() => {
-        btn.textContent = "状态未知";
-      });
+    // 是否已带用户去过系统设置：去过后按钮语义从「授权」变为「刷新」
+    let opened = false;
+    const refresh = () => {
+      btn.textContent = "查询中…";
+      void query()
+        .then((ok) => {
+          granted = ok;
+          if (ok) {
+            btn.textContent = restartAfterGrant ? "已授权（重启后生效）" : "已授权";
+            btn.disabled = true;
+          } else if (opened) {
+            btn.textContent = "已打开设置 · 点此刷新";
+            this.showErrorBubble(
+              r,
+              restartAfterGrant
+                ? "仍未检测到授权——「屏幕录制」勾选后需重启应用才生效"
+                : "仍未检测到授权——请确认已在「辅助功能」勾选 Vibe Pet（列表里已有但状态不对时，先移除再加回）",
+            );
+          } else {
+            btn.textContent = "点击授权";
+          }
+        })
+        .catch(() => {
+          btn.textContent = "状态未知";
+        });
+    };
+    refresh();
     btn.addEventListener("pointerdown", (e) => {
       e.stopPropagation();
       if (granted) return;
-      void request()
-        .then((ok) => {
-          granted = ok;
-          btn.textContent = ok ? "已授权" : "点击授权";
-          btn.disabled = ok;
-        })
-        .catch(() => {
-          this.showErrorBubble(r, "授权请求失败，请在系统设置中手动开启");
-        });
+      if (!opened) {
+        // 首次点击：打开系统设置对应隐私页，回来后再点按钮刷新
+        opened = true;
+        void request()
+          .then((ok) => {
+            granted = ok;
+            if (ok) {
+              btn.textContent = "已授权";
+              btn.disabled = true;
+              return;
+            }
+            btn.textContent = "已打开设置 · 点此刷新";
+            this.showErrorBubble(
+              r,
+              "已打开系统设置——在「隐私与安全性」里勾选 Vibe Pet" +
+                "（若已在列表中，先移除再加回），完成后回来点这里刷新",
+            );
+          })
+          .catch(() => {
+            opened = false; // 打开失败：还原为授权入口，让用户再试
+            btn.textContent = "点击授权";
+            this.showErrorBubble(r, "打开系统设置失败，请再试一次");
+          });
+        return;
+      }
+      // 已打开过设置：只刷新授权状态
+      refresh();
     });
     r.appendChild(btn);
     return r;

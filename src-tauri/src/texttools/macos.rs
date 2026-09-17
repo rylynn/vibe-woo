@@ -47,25 +47,6 @@ struct CFRange {
     length: CFIndex,
 }
 
-#[repr(C)]
-struct CFDictionaryKeyCallBacks {
-    version: isize,
-    retain: *const std::ffi::c_void,
-    release: *const std::ffi::c_void,
-    copy_description: *const std::ffi::c_void,
-    equal: *const std::ffi::c_void,
-    hash: *const std::ffi::c_void,
-}
-
-#[repr(C)]
-struct CFDictionaryValueCallBacks {
-    version: isize,
-    retain: *const std::ffi::c_void,
-    release: *const std::ffi::c_void,
-    copy_description: *const std::ffi::c_void,
-    equal: *const std::ffi::c_void,
-}
-
 // CFRelease / CFStringCreateWithCString 与 envsense.rs 的声明保持一致
 //（同符号在同 crate 内多次声明必须签名一致）。
 #[link(name = "ApplicationServices", kind = "framework")]
@@ -102,24 +83,10 @@ extern "C" {
         buffer_size: CFIndex,
         encoding: u32,
     ) -> u8;
-    fn CFDictionaryCreate(
-        allocator: *mut std::ffi::c_void,
-        keys: *const CFTypeRef,
-        values: *const CFTypeRef,
-        num_values: CFIndex,
-        key_callbacks: *const CFDictionaryKeyCallBacks,
-        value_callbacks: *const CFDictionaryValueCallBacks,
-    ) -> CFDictionaryRef;
     fn CFGetTypeID(cf: CFTypeRef) -> usize;
     fn CFStringGetTypeID() -> usize;
     fn CFRelease(cf: *const std::ffi::c_void);
 
-    static kCFBooleanTrue: CFTypeRef;
-    // AX 授权提示开关的 key 常量本体：符号名带前导 k，字符串值是
-    // "AXTrustedCheckOptionPrompt"（没有 k）—— 手搓字符串极易抄错，必须导入本体。
-    static kAXTrustedCheckOptionPrompt: CFStringRef;
-    static kCFTypeDictionaryKeyCallBacks: CFDictionaryKeyCallBacks;
-    static kCFTypeDictionaryValueCallBacks: CFDictionaryValueCallBacks;
 }
 
 /// 触发时刻的来源应用快照（pid + bundle id）。
@@ -161,42 +128,19 @@ pub fn frontmost_is_self() -> bool {
     frontmost_is(std::process::id() as i32)
 }
 
-/// 查询辅助功能授权。prompt=true 时弹系统授权提示（仅用户主动点击后调用）。
+/// 查询辅助功能授权（纯查询，不弹任何提示）。
 ///
-/// options 的 key 必须用 HIServices 导出的 `kAXTrustedCheckOptionPrompt` 常量本体。
-/// 曾手搓成带前导 k 的字符串，AX 内部按真常量查 dict 得到 NULL 且不判空，
-/// 直接段错误（2026-09-16 崩溃报告，符号名 ≠ 字符串值）。全局常量不归我们释放，
-/// dict 存续期间由 kCFTypeDictionaryKeyCallBacks 自动持有。
-pub fn ax_trusted(prompt: bool) -> bool {
-    unsafe {
-        if !prompt {
-            // 纯查询，不弹任何提示
-            return AXIsProcessTrustedWithOptions(std::ptr::null_mut()) == 1;
-        }
-        let key = kAXTrustedCheckOptionPrompt;
-        if key.is_null() {
-            return false;
-        }
-        let keys = [key];
-        let values = [kCFBooleanTrue];
-        let dict = CFDictionaryCreate(
-            std::ptr::null_mut(),
-            keys.as_ptr(),
-            values.as_ptr(),
-            1,
-            &kCFTypeDictionaryKeyCallBacks,
-            &kCFTypeDictionaryValueCallBacks,
-        );
-        let trusted = if dict.is_null() {
-            false
-        } else {
-            AXIsProcessTrustedWithOptions(dict) == 1
-        };
-        if !dict.is_null() {
-            CFRelease(dict);
-        }
-        trusted
-    }
+/// 教训链（不要走回头路）：
+///   1. 手搓 prompt 的 key 字符串 → AX 内部查 dict 得 NULL 不判空，段错误
+///      （2026-09-16，符号名 ≠ 字符串值，kAXTrustedCheckOptionPrompt 的
+///      字符串值没有前导 k）；
+///   2. 改用 prompt=true 让系统弹授权 → 应用重装（ad-hoc 重签名）后 TCC
+///      条目陈旧，系统**静默不弹任何东西**，表现为「点授权没反应」
+///      （2026-09-17）。
+/// 所以授权引导一律由上层直接打开系统设置对应隐私页（mod.rs
+/// open_privacy_pane），这里只负责查询。
+pub fn ax_trusted() -> bool {
+    unsafe { AXIsProcessTrustedWithOptions(std::ptr::null_mut()) == 1 }
 }
 
 /// 读取指定应用焦点控件的选区文本。

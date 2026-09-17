@@ -213,7 +213,7 @@ fn read_selection_outcome(source: Option<macos::SourceApp>) -> ReadOutcome {
         };
         return ReadOutcome::Error { code };
     };
-    if !macos::ax_trusted(false) {
+    if !macos::ax_trusted() {
         return ReadOutcome::Error {
             code: ReadError::NotTrusted,
         };
@@ -242,13 +242,31 @@ fn read_selection_outcome(source: Option<macos::SourceApp>) -> ReadOutcome {
 /// 查询辅助功能授权状态（不弹任何提示）。
 #[tauri::command]
 pub fn text_tools_permission() -> bool {
-    macos::ax_trusted(false)
+    macos::ax_trusted()
 }
 
-/// 请求辅助功能授权（用户在面板上明确点击后调用，弹系统授权提示）。
+/// 打开系统设置的隐私 pane（授权引导用，仅用户主动点击后调用）。
+///
+/// 不依赖系统授权弹窗（AXIsProcessTrustedWithOptions 的 prompt /
+/// CGRequestScreenCaptureAccess）：应用重装（ad-hoc 重签名）后 TCC 条目
+/// 陈旧时它们会静默不弹任何东西，用户点了「授权」却毫无反应。
+fn open_privacy_pane(app: &AppHandle, pane: &str) {
+    use tauri_plugin_opener::OpenerExt;
+
+    let url = format!("x-apple.systempreferences:com.apple.preference.security?{pane}");
+    eprintln!("[text-tools] 打开系统设置 pane={pane}");
+    if app.opener().open_url(url, None::<&str>).is_err() {
+        // 只记失败与 pane，不透传错误详情
+        eprintln!("[text-tools] 打开系统设置失败 pane={pane}");
+    }
+}
+
+/// 请求辅助功能授权（用户在面板上明确点击后调用）：
+/// 直接打开系统设置的「辅助功能」授权页，返回当前授权状态。
 #[tauri::command]
-pub fn text_tools_request_permission() -> bool {
-    macos::ax_trusted(true)
+pub fn text_tools_request_permission(app: AppHandle) -> bool {
+    open_privacy_pane(&app, "Privacy_Accessibility");
+    macos::ax_trusted()
 }
 
 /// 取消当前取词会话（面板关闭时调用，迟到结果将被丢弃）。
@@ -304,10 +322,13 @@ pub fn text_tools_screen_permission() -> bool {
     capture::screen_capture_permission()
 }
 
-/// 请求屏幕录制授权（用户在面板上明确点击后调用，打开系统设置）。
+/// 请求屏幕录制授权（用户在面板上明确点击后调用）：
+/// 直接打开系统设置的「屏幕录制」授权页，返回当前授权状态。
+/// （CGRequestScreenAccess 同样有 TCC 陈旧条目下静默不弹的问题，不再使用。）
 #[tauri::command]
-pub fn text_tools_request_screen_permission() -> bool {
-    capture::request_screen_capture_permission()
+pub fn text_tools_request_screen_permission(app: AppHandle) -> bool {
+    open_privacy_pane(&app, "Privacy_ScreenCapture");
+    capture::screen_capture_permission()
 }
 
 /// 框选 + 截图 + 识别编排（阻塞线程内执行）。
