@@ -525,7 +525,7 @@ export class SettingsPanel {
       }),
     );
 
-    // 默认操作：翻译方向（默认英译中）
+    // 默认操作：翻译方向（默认英译中）与自动翻译
     this.el.appendChild(this.divider("默认操作"));
     this.el.appendChild(
       this.rowSelect(
@@ -538,6 +538,14 @@ export class SettingsPanel {
             void this.patchStrict({ translation_direction: d }, this.el);
           }
         },
+      ),
+    );
+    this.el.appendChild(
+      this.rowCheck(
+        "取词后自动翻译",
+        c.auto_translate,
+        (v) => void this.patchStrict({ auto_translate: v }, this.el),
+        "取词结果到达后按上面的方向直接翻译；关闭后需手动点「翻译」",
       ),
     );
     this.el.appendChild(
@@ -578,7 +586,7 @@ export class SettingsPanel {
     this.el.appendChild(
       this.hint(
         "取词与框选识别只在你按下快捷键后进行：屏幕框选的画面在本机识别（不上传、不保存）；" +
-          "只有点击「翻译」或「搜索」时，文本才会发往你已配置的服务或搜索引擎。不保存原文、译文与历史。",
+          "「自动翻译」开启时取词结果会立即发往你已配置的 AI 服务，搜索同理；关闭后只有手动点「翻译」或「搜索」才外发。不保存原文、译文与历史。",
       ),
     );
     this.el.appendChild(this.footer());

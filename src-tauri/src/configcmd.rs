@@ -97,6 +97,8 @@ pub struct ConfigView {
     pub translation_direction: config::TranslationDirection,
     /// 取词搜索引擎。
     pub search_engine: config::SearchEngine,
+    /// 取词结果到达后自动翻译（默认开）。
+    pub auto_translate: bool,
 }
 
 fn to_view(c: &Config) -> ConfigView {
@@ -135,6 +137,7 @@ fn to_view(c: &Config) -> ConfigView {
         shortcut_ocr: c.shortcut_ocr.clone(),
         translation_direction: c.translation_direction,
         search_engine: c.search_engine,
+        auto_translate: c.auto_translate,
     }
 }
 
@@ -178,6 +181,7 @@ pub struct ConfigPatch {
     pub shortcut_ocr: Option<String>,
     pub translation_direction: Option<config::TranslationDirection>,
     pub search_engine: Option<config::SearchEngine>,
+    pub auto_translate: Option<bool>,
 }
 
 /// 校验配置中全部自定义快捷键（格式 / 冲突 / 逃生键占用）。
@@ -275,6 +279,9 @@ fn apply_patch(cfg: &mut Config, patch: ConfigPatch) -> bool {
     }
     if let Some(v) = patch.search_engine {
         cfg.search_engine = v;
+    }
+    if let Some(v) = patch.auto_translate {
+        cfg.auto_translate = v;
     }
 
     let mut shortcuts_changed = false;

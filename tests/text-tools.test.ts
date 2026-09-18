@@ -15,6 +15,17 @@ import {
   type ResultPayload,
 } from "../src/text-tools";
 import { TextToolsPanel } from "../src/overlay/text-tools";
+import type { ConfigView } from "../src/config";
+
+/** 面板配置（浮窗只读方向/引擎/自动翻译三项，其余字段给默认值即可）。 */
+function cfg(p: Partial<ConfigView> = {}): ConfigView {
+  return { auto_translate: true, translation_direction: "en2zh", search_engine: "google", ...p } as ConfigView;
+}
+
+/** 刷新宏任务：让自动翻译的 await 链与随后的 render 完成。 */
+async function flush(): Promise<void> {
+  await new Promise((r) => setTimeout(r, 0));
+}
 
 /** 找到面板里的主按钮（按可见文案定位，避免依赖内部结构）。 */
 function buttonByText(root: ParentNode, text: string): HTMLButtonElement {
@@ -118,17 +129,69 @@ describe("契约与提示文案", () => {
 });
 
 describe("取词浮窗", () => {
-  it("展示原文不会自动外发：只有本地取词，不触发翻译/搜索", async () => {
+  it("取词结果默认自动翻译（无需点击），译文直接呈现", async () => {
     const panel = new TextToolsPanel();
-    await panel.start("selection");
-    const cmds = invokeMock.mock.calls.map((c) => c[0]);
-    expect(cmds).toContain("text_tools_read_selection");
-    expect(cmds).not.toContain("text_tools_translate");
-    expect(cmds).not.toContain("text_tools_search");
+    const s = await startSession(panel);
+    panel.onResult(payload({ session: s }));
+    await flush();
+
+    const call = invokeMock.mock.calls.find((c) => c[0] === "text_tools_translate");
+    expect(call).toBeTruthy();
+    expect((call?.[1] as { text: string }).text).toBe("hello");
+    expect(document.querySelector(".pet-tt-result")?.textContent).toBe("译文");
+  });
+
+  it("关闭自动翻译后不外发，仍可手动点「翻译」", async () => {
+    const panel = new TextToolsPanel();
+    panel.setConfig(cfg({ auto_translate: false }));
+    const s = await startSession(panel);
+    panel.onResult(payload({ session: s }));
+    await flush();
+    expect(invokeMock.mock.calls.map((c) => c[0])).not.toContain("text_tools_translate");
+
+    buttonByText(document.body, "翻译").click();
+    await flush();
+    expect(invokeMock.mock.calls.map((c) => c[0])).toContain("text_tools_translate");
+  });
+
+  it("自动翻译遇 LLM 未配置静默跳过（手动点击仍会看到提示）", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "text_tools_read_selection") return nextSession++;
+      if (cmd === "text_tools_translate") {
+        return { kind: "error", code: "llm_not_configured" };
+      }
+      return undefined;
+    });
+    const panel = new TextToolsPanel();
+    const s = await startSession(panel);
+    panel.onResult(payload({ session: s }));
+    await flush();
+    // 没配服务的用户不该每次取词都看到报错：维持就绪态与引导提示
+    expect(document.querySelector(".pet-tt-error")).toBeNull();
+    expect(document.querySelector(".pet-tt-original")).toBeTruthy();
+
+    buttonByText(document.body, "翻译").click();
+    await flush();
+    expect(document.querySelector(".pet-tt-error")?.textContent).toContain("配置");
+  });
+
+  it("翻译在途时重新取词：旧译文作废，不渲染进新会话", async () => {
+    const panel = new TextToolsPanel();
+    const first = await startSession(panel);
+    panel.onResult(payload({ session: first })); // 触发自动翻译（在途）
+    const second = await startSession(panel, "ocr"); // 翻译没回来就重新取词
+    panel.onSelectionShown();
+    await flush(); // 旧译文此刻才到
+
+    // 新会话仍处于读取态，不得出现旧会话的译文
+    expect(document.querySelector(".pet-tt-result")).toBeNull();
+    expect(invokeMock.mock.calls.filter((c) => c[0] === "text_tools_translate")).toHaveLength(1);
+    expect(second).toBeTruthy();
   });
 
   it("翻译用编辑后的文本（识别结果允许纠错）", async () => {
     const panel = new TextToolsPanel();
+    panel.setConfig(cfg({ auto_translate: false })); // 手动路径：排除自动翻译干扰
     const s = await startSession(panel);
     panel.onResult(payload({ session: s }));
 

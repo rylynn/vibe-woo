@@ -2,8 +2,8 @@
  * 取词与翻译浮窗。
  *
  * 统一承接两个入口的结果（原生选区 / 屏幕框选 OCR）：
- * 先展示原文（可编辑纠错），再由用户主动点「翻译」或「搜索」——
- * 识别是本地的，只有这两步才会外发文本。
+ * 先展示原文（可编辑纠错），默认自动翻译（设置里可关）；
+ * 搜索仍由用户主动点击 —— 识别是本地的，只有翻译/搜索才会外发文本。
  *
  * 会话失效在前端再守一次（Rust 也有 SessionGate）：重复触发、关闭面板、
  * 取消之后，迟到结果一律丢弃，不覆盖用户正在看的内容。
@@ -200,6 +200,11 @@ export class TextToolsPanel {
       this.readError = null;
       // 结果到了才显示（框选路径此前一直没显示）并取输入焦点
       this.show(true);
+      // 自动翻译（默认开，设置里可关）：取词本身就是用户按快捷键主动触发的，
+      // 直接出译文省掉再点一次「翻译」。LLM 未配置时静默跳过（见 doTranslate）。
+      if (this.cfg?.auto_translate !== false) {
+        void this.doTranslate(true);
+      }
       return;
     }
     const code = payload.outcome.code;
@@ -302,7 +307,15 @@ export class TextToolsPanel {
     return ta ? ta.value : this.original;
   }
 
-  private async doTranslate(): Promise<void> {
+  /**
+   * @param auto 是否为取词后的自动尝试（默认开）。自动尝试是尽力而为：
+   *             LLM 未启用/未配置时静默跳过 —— 没配服务的用户不该每次
+   *             取词都看到报错；手动点「翻译」仍会看到明确提示。
+   */
+  private async doTranslate(auto = false): Promise<void> {
+    // 触发序号守卫：翻译在途时用户重新取词或关闭面板（startSeq 递增），
+    // 旧译文必须作废 —— 否则会渲染进新会话的读取态（自动翻译引入的竞争）
+    const seq = this.startSeq;
     const text = this.currentText();
     if (text.trim().length === 0) return;
     this.original = text;
@@ -312,10 +325,15 @@ export class TextToolsPanel {
     this.render();
     try {
       const out = await translateText(text);
-      if (!this.open) return; // 翻译期间面板已关闭
+      if (seq !== this.startSeq) return; // 期间已重新触发或关闭
       if (out.kind === "ok") {
         this.translated = out.text;
         this.status = "ready";
+      } else if (
+        auto &&
+        (out.code === "llm_disabled" || out.code === "llm_not_configured")
+      ) {
+        this.status = "ready"; // 回到就绪态，译文区维持引导提示
       } else {
         this.translateError = out.code;
         this.status = "error";

@@ -336,6 +336,11 @@ pub struct Config {
     /// 取词搜索使用的搜索引擎。
     #[serde(default)]
     pub search_engine: SearchEngine,
+    /// 取词结果到达后自动翻译（用户此前需手动点「翻译」）。
+    /// 新功能默认开：整个取词流程本身就是用户按快捷键主动触发的，
+    /// 自动翻译只省掉确认那一下，外发目标仍是用户自己配置的服务。
+    #[serde(default = "default_true")]
+    pub auto_translate: bool,
 }
 
 /// 布尔字段的默认值：新功能默认开（详见 `Config::habit_enabled` 的注释）。
@@ -390,6 +395,7 @@ impl Default for Config {
             shortcut_ocr: crate::shortcut::DEFAULT_SHORTCUT_OCR.to_string(),
             translation_direction: TranslationDirection::default(),
             search_engine: SearchEngine::default(),
+            auto_translate: true,
         }
     }
 }
@@ -738,6 +744,7 @@ mod tests {
             "默认英译中"
         );
         assert_eq!(c.search_engine, SearchEngine::Google);
+        assert!(c.auto_translate, "旧配置缺失自动翻译字段时补默认开");
     }
 
     #[test]
@@ -798,10 +805,12 @@ mod tests {
         c.search_engine = SearchEngine::Baidu;
         c.shortcut_selection = "Alt+T".into();
         c.shortcut_ocr = "Alt+O".into();
+        c.auto_translate = false;
         let back: Config = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
         assert_eq!(back.translation_direction, TranslationDirection::Zh2En);
         assert_eq!(back.search_engine, SearchEngine::Baidu);
         assert_eq!(back.shortcut_selection, "Alt+T");
         assert_eq!(back.shortcut_ocr, "Alt+O");
+        assert!(!back.auto_translate, "关闭自动翻译必须可持久化");
     }
 }

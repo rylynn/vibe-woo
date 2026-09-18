@@ -74,6 +74,8 @@ export interface ConfigView {
   translation_direction: TranslationDirection;
   /** 取词搜索引擎，默认 Google。 */
   search_engine: SearchEngine;
+  /** 取词结果到达后自动翻译，默认开。 */
+  auto_translate: boolean;
 }
 
 export interface ConfigPatch {
@@ -106,6 +108,7 @@ export interface ConfigPatch {
   shortcut_ocr?: string;
   translation_direction?: TranslationDirection;
   search_engine?: SearchEngine;
+  auto_translate?: boolean;
 }
 
 /** 快捷键默认值（与 Rust 侧 shortcut.rs 的 DEFAULT_* 保持一致）。 */
@@ -147,6 +150,7 @@ export const FALLBACK_CONFIG: ConfigView = {
   avatar: null,
   translation_direction: "en2zh",
   search_engine: "google",
+  auto_translate: true,
   ...DEFAULT_SHORTCUTS,
 };
 
