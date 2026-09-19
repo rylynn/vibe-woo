@@ -8,7 +8,8 @@
  *       心跳**不**写心情（隐私红线）、今日在线推荐（确定性 + 过滤规则）、
  *       打招呼冷却、greet 事件只中转话术文本、串门候选放宽、
  *       隐身用户不进推荐池也打不到招呼、访客进出、greeted_today 下发、
- *       好友申请流（搜索/申请/接受/拒绝 + 收件箱过期）。
+ *       好友申请流（搜索/申请/接受/拒绝 + 收件箱过期）、
+ *       按好友亲密度与碰一碰（60 秒限流 + bump 事件 + 旧 friends 数据兼容）。
  */
 import { webcrypto } from "node:crypto";
 
@@ -246,6 +247,41 @@ ok((beatJ1.events || []).some((e) => e.event.type === "accept"), "申请方收�
 // 老接口语义升级：/friends/add 走申请
 const qOld = await call("POST", "friends/add", { target: a.uid }, j.token);
 ok(!!qOld.pending, `老 /friends/add 返回 pending：${JSON.stringify(qOld)}`);
+
+// ---------- 按好友亲密度与碰一碰 ----------
+const frB2 = await call("GET", "friends", {}, b.token);
+const affJ = frB2.friends.find((f) => f.uid === j.uid);
+ok(affJ.affinity === 5, `接受申请双方 +5：${affJ.affinity}`);
+await call("POST", "greet", { target: b.uid, line: "（小跑过来）" }, j.token);
+const frB3 = await call("GET", "friends", {}, b.token);
+ok(frB3.friends.find((f) => f.uid === j.uid).affinity === 6, "打招呼 +1");
+await call("POST", "visit", { target: b.uid }, j.token);
+const frB4 = await call("GET", "friends", {}, b.token);
+ok(frB4.friends.find((f) => f.uid === j.uid).affinity === 8, "串门 +2");
+// j 先回家再测碰一碰：上一步串门把 j 留在了 B 的访客名单里（15 分钟才过期），
+// 不清掉的话「碰一碰不进访客名单」这条断言验的就不是 bump 而是上一步的串门。
+await call("POST", "home", { target: b.uid }, j.token);
+
+const bp1 = await call("POST", "friends/bump", { target: b.uid }, j.token);
+ok(!!bp1.ok, `碰一碰：${JSON.stringify(bp1)}`);
+const bp2 = await call("POST", "friends/bump", { target: b.uid }, j.token);
+ok(!!bp2.error && bp2.retry_after > 0 && bp2.retry_after <= 60, `60 秒内第二次限流：${bp2.error}/${bp2.retry_after}s`);
+const bpSelf = await call("POST", "friends/bump", { target: j.uid }, j.token);
+ok(!!bpSelf.error, "不能碰自己");
+const bpNotFriend = await call("POST", "friends/bump", { target: h.uid }, d.token);
+ok(!!bpNotFriend.error, `非好友不能碰：${bpNotFriend.error}`);
+const bpOther = await call("POST", "friends/bump", { target: h.uid }, a.token);
+ok(!!bpOther.ok, "不同好友的限流相互独立");
+const beatB5 = await call("POST", "heartbeat", { state: "idle", affinity: 0, pet_name: "小二" }, b.token);
+ok((beatB5.events || []).some((e) => e.event.type === "bump"), "对方收到 bump 事件");
+ok(!beatB5.visitors.some((v) => v.uid === j.uid), "碰一碰不进访客名单");
+const frB6 = await call("GET", "friends", {}, b.token);
+ok(frB6.friends.find((f) => f.uid === j.uid).affinity === 10, "碰一碰 +2");
+
+// 旧数据兼容：手工写一条无 aff 字段的好友条目
+await store.put(`friends_${c.uid}`, JSON.stringify([{ uid: a.uid, at: Date.now() }]));
+const frC = await call("GET", "friends", {}, c.token);
+ok(frC.friends[0].affinity === 0, "旧 friends 数据无 aff 字段默认 0");
 
 console.log(failed === 0 ? "\n全部通过" : `\n${failed} 项失败`);
 process.exit(failed === 0 ? 0 : 1);

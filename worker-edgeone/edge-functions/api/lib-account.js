@@ -17,8 +17,9 @@
  *   sess_<token>       用户会话：{ uid, at }（90 天滚动续期，时间戳判断）
  *   sess_admin_<token> 管理员会话：{ at }（24h 过期，时间戳判断）
  *   invite_<code>      邀请码 → { by, used_by }（一次性）
- *   friends_<uid>      [{ uid, at }]（最多 100，双向各自存储）
+ *   friends_<uid>      [{ uid, at, aff }]（最多 100，双向各自存储；aff = 关系亲密度）
  *   freq_<uid>        好友申请收件箱 [{from, at}]（≤20，7 天读时过期）
+ *   bump_<uid>_<dst>   碰一碰限流标记 { at }（60 秒读时判断，单向 key）
  *   hb_<uid>           心跳：{ state, affinity, last_seen }
  *   visitors_<uid>     当前在家访客 [{ uid, nick, pet_name, at }]（≤3）
  *   events_<uid>       事件队列（读即清空，上限 20 条；无 TTL，靠长度限制）
@@ -64,6 +65,8 @@ const PUBLIC_INVITE = "PET888";
 /** 好友申请收件箱上限与过期。 */
 const MAX_REQUESTS = 20;
 const REQUEST_EXPIRE_MS = 7 * 24 * 3600 * 1000;
+/** 碰一碰冷却：同一发起方对同一好友，60 秒内一次（服务端权威）。 */
+const BUMP_COOLDOWN_MS = 60 * 1000;
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -481,6 +484,64 @@ async function removeFriend(store, uid, bodyReq) {
   return { ok: true };
 }
 
+/** 关系亲密度累加（双向同值，clamp 0-100）。条目缺失时跳过（数据自愈）。 */
+async function addAffinity(store, a, b, delta) {
+  const fa = await friendList(store, a);
+  const fb = await friendList(store, b);
+  let hit = false;
+  for (const f of fa) {
+    if (f.uid === b) {
+      f.aff = Math.min(100, Math.max(0, (f.aff ?? 0) + delta));
+      hit = true;
+    }
+  }
+  for (const f of fb) {
+    if (f.uid === a) f.aff = Math.min(100, Math.max(0, (f.aff ?? 0) + delta));
+  }
+  if (hit) {
+    await store.put(`friends_${a}`, JSON.stringify(fa));
+    await store.put(`friends_${b}`, JSON.stringify(fb));
+  }
+}
+
+// ---------- 碰一碰 ----------
+
+/**
+ * 碰一碰：快闪式互动 —— 推 bump 事件（对方本地播路过动画），双方亲密度 +2。
+ * 不进对方访客名单（那是 8 分钟串门的专属呈现）。
+ * 限流：bump_<uid>_<dst> 时间戳，60 秒内第二次拒绝。KV 无原子写，
+ * 读-检查-写的毫秒级竞态窗口对 1 次/分钟的限流无害（与招呼冷却同模式）。
+ */
+async function bumpFriend(store, uid, bodyReq) {
+  const target = clean(bodyReq.target);
+  if (!validUid(target)) return { error: "找不到该用户" };
+  if (target === uid) return { error: "不能碰自己" };
+
+  const mine = await friendList(store, uid);
+  if (!mine.some((f) => f.uid === target)) return { error: "只能碰一碰好友" };
+
+  const now = Date.now();
+  const key = `bump_${uid}_${target}`;
+  const raw = JSON.parse((await store.get(key)) || "null");
+  if (raw && now - raw.at < BUMP_COOLDOWN_MS) {
+    return {
+      error: "碰得太快啦，歇一会儿",
+      retry_after: Math.ceil((BUMP_COOLDOWN_MS - (now - raw.at)) / 1000),
+    };
+  }
+  await store.put(key, JSON.stringify({ at: now }));
+
+  const meUser = JSON.parse(await store.get(`u_${uid}`));
+  await pushEvent(store, target, {
+    type: "bump",
+    from_uid: uid,
+    from_nick: cpSlice(meUser.nick, 24),
+    pet_name: cpSlice(meUser.pet_name, 16),
+  });
+  await addAffinity(store, uid, target, 2);
+  return { ok: true };
+}
+
 // ---------- 好友申请（加好友必须对方接受，服务端只有这一种语义） ----------
 
 /** 申请收件箱：过滤 7 天过期条目（读时过期，无需清理任务）。 */
@@ -601,7 +662,7 @@ async function listFriends(store, uid) {
       nick: u.nick,
       pet_name: u.pet_name,
       state: online ? hb.state : "offline",
-      affinity: hb ? hb.affinity : 0,
+      affinity: typeof f.aff === "number" ? f.aff : 0,
       online,
       friends_since: f.at,
     });
@@ -849,6 +910,7 @@ async function greet(store, uid, bodyReq) {
   const date = todayKey(now);
   await addGreeted(store, uid, date, target);
   await addGreeted(store, target, date, uid);
+  await addAffinity(store, uid, target, 1);
 
   const meUser = JSON.parse(await store.get(`u_${uid}`));
   // line 由发起方本地按宠物心情挑好；非法或缺失时兜底成一句中性话术，
@@ -947,6 +1009,7 @@ async function visit(store, uid, bodyReq) {
   const meUser = JSON.parse(await store.get(`u_${uid}`));
   visitors.push({ uid, nick: meUser.nick, pet_name: meUser.pet_name, at: now });
   await store.put(`visitors_${target}`, JSON.stringify(visitors));
+  await addAffinity(store, uid, target, 2);
 
   await pushEvent(store, target, {
     type: "visit",
@@ -1221,6 +1284,9 @@ export async function dispatch(store, method, segs, query, body, env, meta = {})
   }
   if (method === "POST" && path === "friends/remove") {
     return await removeFriend(store, auth.uid, body);
+  }
+  if (method === "POST" && path === "friends/bump") {
+    return await bumpFriend(store, auth.uid, body);
   }
   if (method === "GET" && path === "friends") {
     return {
