@@ -581,6 +581,11 @@ export class FriendsPanel {
     for (const f of this.friends) {
       this.el.appendChild(this.friendRow(f));
     }
+    // 「今日在线」loading/空/隐身时 renderOnline 不会走到 startTick，
+    // 碰一碰倒计时会定格 —— 有冷却记录就自己起拍（startTick 有防重入守卫）
+    if (this.bumpUntil.size > 0) {
+      this.startTick();
+    }
   }
 
   private friendRow(f: FriendRow): HTMLElement {
