@@ -220,14 +220,19 @@ mod native {
     #[link(name = "CoreGraphics", kind = "framework")]
     extern "C-unwind" {
         fn CGPreflightScreenCaptureAccess() -> bool;
+        fn CGRequestScreenCaptureAccess() -> bool;
     }
 
     /// 查询屏幕录制授权（不弹提示）。
-    /// 授权引导（打开系统设置）由 mod.rs 的 open_privacy_pane 统一处理：
-    /// CGRequestScreenCaptureAccess 在 TCC 条目陈旧（重装/重签名）时
-    /// 会静默不弹任何提示。
     pub fn screen_capture_permission() -> bool {
         unsafe { CGPreflightScreenCaptureAccess() }
+    }
+
+    /// 触发系统屏幕录制请求：把本应用加入「屏幕录制」列表（未勾选），
+    /// 系统可能附带弹一次确认。仅在 mod.rs 先清掉陈旧 TCC 条目后调用 ——
+    /// 陈旧条目（重装/重签名后 cdhash 不匹配）下它会静默不弹。
+    pub fn request_screen_capture_access() -> bool {
+        unsafe { CGRequestScreenCaptureAccess() }
     }
 
     // ---- 单帧截图 ----
@@ -518,15 +523,20 @@ mod native {
 }
 
 #[cfg(target_os = "macos")]
-pub use native::{capture_and_recognize, screen_capture_permission};
+pub use native::{capture_and_recognize, request_screen_capture_access, screen_capture_permission};
 
 #[cfg(not(target_os = "macos"))]
 pub fn capture_and_recognize(_region: &SelectedRegion) -> Result<String, super::ReadError> {
-    Err(super::ReadError::Unsupported)
+    Err(super::ReadError::Failed)
 }
 
 #[cfg(not(target_os = "macos"))]
 pub fn screen_capture_permission() -> bool {
+    false
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn request_screen_capture_access() -> bool {
     false
 }
 

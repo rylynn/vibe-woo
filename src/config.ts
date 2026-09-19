@@ -66,8 +66,6 @@ export interface ConfigView {
   shortcut_note: string;
   shortcut_reminder: string;
   shortcut_hub: string;
-  /** 取词（读取其他应用选区）快捷键。 */
-  shortcut_selection: string;
   /** 屏幕框选 OCR 快捷键。 */
   shortcut_ocr: string;
   /** 取词翻译方向，默认英译中。 */
@@ -104,7 +102,6 @@ export interface ConfigPatch {
   shortcut_note?: string;
   shortcut_reminder?: string;
   shortcut_hub?: string;
-  shortcut_selection?: string;
   shortcut_ocr?: string;
   translation_direction?: TranslationDirection;
   search_engine?: SearchEngine;
@@ -116,7 +113,6 @@ export const DEFAULT_SHORTCUTS = {
   shortcut_note: "Alt+Space",
   shortcut_reminder: "Alt+R",
   shortcut_hub: "Alt+P",
-  shortcut_selection: "Ctrl+Alt+T",
   shortcut_ocr: "Ctrl+Alt+O",
 } as const;
 

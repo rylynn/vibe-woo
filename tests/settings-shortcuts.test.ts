@@ -40,32 +40,32 @@ describe("录键 IPC 接线", () => {
     expect(SETTINGS_SRC).not.toContain("end_shortcut_capture");
   });
 
-  it("取词与框选的快捷键纳入自定义列表", () => {
-    expect(DEFAULT_SHORTCUTS.shortcut_selection).toBe("Ctrl+Alt+T");
+  it("框选的快捷键纳入自定义列表（原生选区取词已下掉）", () => {
     expect(DEFAULT_SHORTCUTS.shortcut_ocr).toBe("Ctrl+Alt+O");
-    expect(Object.keys(DEFAULT_SHORTCUTS)).toHaveLength(5);
+    expect(Object.keys(DEFAULT_SHORTCUTS)).toHaveLength(4);
   });
 });
 
 describe("取词设置默认值", () => {
-  it("默认英译中、默认 Google", () => {
+  it("默认英译中、默认 Google、默认自动翻译", () => {
     expect(FALLBACK_CONFIG.translation_direction).toBe("en2zh");
     expect(FALLBACK_CONFIG.search_engine).toBe("google");
+    expect(FALLBACK_CONFIG.auto_translate).toBe(true);
   });
 });
 
 describe("保存失败必须可见", () => {
   it("严格保存入口在后端报错时抛错，不返回默认配置", async () => {
     invokeMock.mockRejectedValueOnce(new Error("快捷键注册失败"));
-    await expect(updateConfigStrict({ shortcut_selection: "Alt+X" })).rejects.toThrow(
+    await expect(updateConfigStrict({ shortcut_ocr: "Alt+X" })).rejects.toThrow(
       "快捷键注册失败",
     );
   });
 
   it("兼容入口仍回退默认配置（不改动既有调用方行为）", async () => {
     invokeMock.mockRejectedValueOnce(new Error("失败"));
-    const out = await updateConfig({ shortcut_selection: "Alt+X" });
-    expect(out.shortcut_selection).toBe(DEFAULT_SHORTCUTS.shortcut_selection);
+    const out = await updateConfig({ shortcut_ocr: "Alt+X" });
+    expect(out.shortcut_ocr).toBe(DEFAULT_SHORTCUTS.shortcut_ocr);
   });
 });
 

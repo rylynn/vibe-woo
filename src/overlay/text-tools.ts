@@ -1,9 +1,9 @@
 /**
  * 取词与翻译浮窗。
  *
- * 统一承接两个入口的结果（原生选区 / 屏幕框选 OCR）：
- * 先展示原文（可编辑纠错），默认自动翻译（设置里可关）；
- * 搜索仍由用户主动点击 —— 识别是本地的，只有翻译/搜索才会外发文本。
+ * 承接屏幕框选 OCR 的结果：先展示原文（可编辑纠错），默认自动翻译
+ * （设置里可关）；搜索仍由用户主动点击 —— 识别是本地的，只有翻译/搜索
+ * 才会外发文本。
  *
  * 会话失效在前端再守一次（Rust 也有 SessionGate）：重复触发、关闭面板、
  * 取消之后，迟到结果一律丢弃，不覆盖用户正在看的内容。
@@ -16,9 +16,8 @@ import { panelChrome } from "./chrome";
 import {
   cancel as cancelRead,
   copy as copyText,
-  readSelection,
-  requestAxPermission,
   startOcr,
+  requestScreenPermission,
   search as searchText,
   translate as translateText,
   SessionGuard,
@@ -27,20 +26,11 @@ import {
   TEXT_MAX_CHARS,
   type ReadError,
   type ResultPayload,
-  type TextSource,
   type TranslateError,
 } from "../text-tools";
 
-/** 面板状态机：待读取 → 可操作 / 处理中 / 成功 / 失败。 */
+/** 面板状态机：待框选 → 可操作 / 处理中 / 成功 / 失败。 */
 type PanelStatus = "reading" | "ready" | "translating" | "error";
-
-/**
- * selection 读取态兜底超时：Rust 侧 AX 最坏要连发 4 条消息（焦点控件 /
- * 选区文本 / 选区范围 / 范围取串），各 1.5s 消息超时，慢应用下可能到 6s；
- * 再加余量到 8s。结果事件彻底丢失时到点转成超时错误，绝不永久读取中
- * （迟到结果到达仍会覆盖超时错误）。
- */
-const READING_WATCHDOG_MS = 8_000;
 
 /**
  * 框选层出现确认的等待上限：Rust 抬窗成功会发 pet://text-tools-selection-shown，
@@ -48,11 +38,6 @@ const READING_WATCHDOG_MS = 8_000;
  * 直接报启动失败让用户重试。
  */
 const SELECTION_SHOWN_WATCHDOG_MS = 1_500;
-
-const SOURCE_LABELS: Record<TextSource, string> = {
-  selection: "选中文字",
-  ocr: "屏幕框选",
-};
 
 export class TextToolsPanel {
   private readonly el: HTMLDivElement;
@@ -64,14 +49,11 @@ export class TextToolsPanel {
   private startSeq = 0;
   /** 会话号在途时先到的结果（IPC 顺序竞争），adopt 后回放。 */
   private heldResult: ResultPayload | null = null;
-  /** 读取态兜底超时句柄。 */
-  private readingTimer: number | null = null;
   /** 框选层出现确认超时句柄。 */
   private layerTimer: number | null = null;
   /** 框选层启动失败（与取词失败分开：提示语与出路不同）。 */
   private layerFailed = false;
   private cfg: ConfigView | null = null;
-  private source: TextSource | null = null;
   private sourceApp: string | null = null;
   private status: PanelStatus = "reading";
   private original = "";
@@ -81,7 +63,7 @@ export class TextToolsPanel {
   /** 已带用户去过系统设置授权页：错误下方显示勾选引导，不再自动重读。 */
   private permHint = false;
   private translateError: TranslateError | null = null;
-  /** 搜索失败（与取词失败分开：不提示「改用屏幕框选」）。 */
+  /** 搜索失败（与取词失败分开：不提示重新框选）。 */
   private searchFailed = false;
 
   constructor() {
@@ -114,17 +96,13 @@ export class TextToolsPanel {
   }
 
   /**
-   * 开始一轮取词：建立会话（旧会话立即失效）。
+   * 开始一轮框选取词：建立会话（旧会话立即失效）。
    *
-   * 焦点处理很关键：读取期间**不**请求输入焦点 —— begin_text_input 会让
-   * 宠物变成前台应用，而 AX 取词的前提正是「前台是用户选中的那个应用」，
-   * 抢焦点会让读取直接失败（报不支持或来源切换）。焦点只等结果到了再取。
-   *
-   * 框选期间也不铺浮窗：480px 的实色面板会挡住用户要看的屏幕区域。
+   * 框选期间不铺浮窗：480px 的实色面板会挡住用户要框选的屏幕区域，
+   * 结果回来再由 deliver→show 恢复。
    */
-  async start(source: TextSource): Promise<void> {
+  async start(): Promise<void> {
     const seq = ++this.startSeq;
-    this.source = source;
     this.status = "reading";
     this.original = "";
     this.translated = "";
@@ -136,11 +114,9 @@ export class TextToolsPanel {
     this.sourceApp = null;
     this.guard.cancel();
     this.heldResult = null;
-    this.clearReadingTimer();
     this.clearLayerTimer();
     try {
-      const session =
-        source === "selection" ? await readSelection() : await startOcr();
+      const session = await startOcr();
       if (seq !== this.startSeq) return; // 已被更新的触发或关闭取代：不认领
       this.guard.adopt(session);
       // 回放竞争期先到的结果（会话号不匹配的照旧按过期丢弃）
@@ -149,24 +125,16 @@ export class TextToolsPanel {
         this.deliver(held);
         return;
       }
-      if (source === "selection") {
-        // 选区取词很快，给个读取态
-        this.show(false);
-        this.armReadingWatchdog(session);
-      } else {
-        // 框选要看着屏幕操作：先收起旧浮窗（480px 实色面板会挡住
-        // 要框选的区域），结果回来再由 deliver→show 恢复
-        this.open = true;
-        this.el.style.display = "none";
-        this.armLayerWatchdog();
-      }
+      this.open = true;
+      this.el.style.display = "none";
+      this.armLayerWatchdog();
     } catch (e) {
       if (seq !== this.startSeq) return;
       // 入口调用失败（如取词命令不存在）：直接给出可读错误
       this.status = "error";
       this.readError = "failed";
       this.show(false);
-      console.warn("[text-tools] 取词启动失败", e);
+      console.warn("[text-tools] 框选取词启动失败", e);
     }
   }
 
@@ -189,10 +157,8 @@ export class TextToolsPanel {
 
   /** 交付并渲染一份已通过会话守卫的结果。 */
   private deliver(payload: ResultPayload): void {
-    this.clearReadingTimer();
     this.clearLayerTimer();
     this.heldResult = null;
-    this.source = payload.source;
     if (payload.outcome.kind === "ok") {
       this.original = payload.outcome.text;
       this.sourceApp = payload.outcome.sourceApp;
@@ -223,24 +189,6 @@ export class TextToolsPanel {
     const held = this.heldResult;
     this.heldResult = null;
     return held;
-  }
-
-  /** 读取态兜底：到点仍在读取且会话仍活跃，转成超时错误（不永久读取中）。 */
-  private armReadingWatchdog(session: number): void {
-    this.readingTimer = window.setTimeout(() => {
-      this.readingTimer = null;
-      if (this.status !== "reading" || !this.guard.accepts(session)) return;
-      this.readError = "timeout";
-      this.status = "error";
-      this.render();
-    }, READING_WATCHDOG_MS);
-  }
-
-  private clearReadingTimer(): void {
-    if (this.readingTimer !== null) {
-      clearTimeout(this.readingTimer);
-      this.readingTimer = null;
-    }
   }
 
   /** 框选层出现确认兜底：到点仍没收到 shown 事件即报启动失败。 */
@@ -279,7 +227,6 @@ export class TextToolsPanel {
     // 关闭即终结：在途的 start() 不再认领会话，兜底计时器一并撤掉
     this.startSeq++;
     this.heldResult = null;
-    this.clearReadingTimer();
     this.clearLayerTimer();
     if (!this.open && !this.focused) {
       // 框选中的会话没显示过面板，也要把会话作废
@@ -370,11 +317,11 @@ export class TextToolsPanel {
 
   private async requestPermission(): Promise<void> {
     try {
-      // Rust 直接打开系统设置的「辅助功能」授权页（系统弹窗在 TCC 条目
-      // 陈旧时会静默不弹，不能再依赖）
-      await requestAxPermission();
+      // Rust 侧三步：清陈旧 TCC 条目 → 触发系统请求把本应用加进
+      // 「屏幕录制」列表 → 直达设置页。用户只需在列表里勾选。
+      await requestScreenPermission();
     } catch (e) {
-      console.warn("[text-tools] 请求辅助功能授权失败", e);
+      console.warn("[text-tools] 请求屏幕录制授权失败", e);
     }
     // 不立即重读：用户还没来得及在系统设置里勾选，马上重读只会把同样的
     // 错误再弹一遍（看起来像「点了没反应」）。给勾选引导，等用户重按快捷键。
@@ -386,7 +333,6 @@ export class TextToolsPanel {
 
   private render(): void {
     this.el.replaceChildren();
-    const title = SOURCE_LABELS[this.source ?? "selection"];
     this.el.appendChild(
       panelChrome(this.el, "取词与翻译", () => this.hide(), {
         headClass: "pet-tt-head",
@@ -398,7 +344,7 @@ export class TextToolsPanel {
     meta.className = "pet-tt-meta";
     const tag = document.createElement("span");
     tag.className = "pet-tt-tag";
-    tag.textContent = title;
+    tag.textContent = "屏幕框选";
     meta.appendChild(tag);
     if (this.sourceApp) {
       const from = document.createElement("span");
@@ -409,7 +355,7 @@ export class TextToolsPanel {
     this.el.appendChild(meta);
 
     if (this.status === "reading") {
-      this.el.appendChild(this.hint("正在读取…（Esc 或点底部取消可中止）"));
+      this.el.appendChild(this.hint("正在框选…（Esc 或点底部取消可中止）"));
       this.el.appendChild(this.actionRow(false));
       return;
     }
@@ -424,7 +370,21 @@ export class TextToolsPanel {
       const retry = document.createElement("button");
       retry.className = "pet-tt-primary";
       retry.textContent = "重试框选";
-      retry.addEventListener("click", () => void this.start("ocr"));
+      retry.addEventListener("click", () => void this.start());
+      actions.appendChild(retry);
+      this.el.appendChild(actions);
+      return;
+    }
+
+    if (this.status === "error" && this.readError === "no_selection") {
+      // 框选区域没盖住文字：不算失败，回到「待框选」引导
+      this.el.appendChild(this.hint("待框选：拖选区域要盖住要识别的文字"));
+      const actions = document.createElement("div");
+      actions.className = "pet-tt-actions";
+      const retry = document.createElement("button");
+      retry.className = "pet-tt-primary";
+      retry.textContent = "重新框选";
+      retry.addEventListener("click", () => void this.start());
       actions.appendChild(retry);
       this.el.appendChild(actions);
       return;
@@ -437,12 +397,11 @@ export class TextToolsPanel {
       if (this.readError === "not_trusted" && this.permHint) {
         this.el.appendChild(
           this.hint(
-            "已打开系统设置——在「隐私与安全性 › 辅助功能」勾选 Vibe Pet" +
-              "（若已在列表里，先移除再加回），然后按 Ctrl+Alt+T 重试",
+            "已把 Vibe Pet 加进「屏幕录制」列表并打开系统设置——勾选后" +
+              "重启应用生效，然后按 Ctrl+Alt+O 重试",
           ),
         );
       }
-      // 未授权时给授权入口；无论如何都保留「改用屏幕框选」的替代路径
       const alt = document.createElement("div");
       alt.className = "pet-tt-actions";
       if (this.readError === "not_trusted") {
@@ -452,11 +411,11 @@ export class TextToolsPanel {
         grant.addEventListener("click", () => void this.requestPermission());
         alt.appendChild(grant);
       }
-      const retryOcr = document.createElement("button");
-      retryOcr.className = "pet-tt-btn";
-      retryOcr.textContent = "改用屏幕框选";
-      retryOcr.addEventListener("click", () => void this.start("ocr"));
-      alt.appendChild(retryOcr);
+      const retry = document.createElement("button");
+      retry.className = "pet-tt-btn";
+      retry.textContent = "重新框选";
+      retry.addEventListener("click", () => void this.start());
+      alt.appendChild(retry);
       this.el.appendChild(alt);
       return;
     }
@@ -544,7 +503,7 @@ export class TextToolsPanel {
     const re = document.createElement("button");
     re.className = "pet-tt-btn";
     re.textContent = "重新框选";
-    re.addEventListener("click", () => void this.start("ocr"));
+    re.addEventListener("click", () => void this.start());
 
     row.append(tr, se, re);
     return row;

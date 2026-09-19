@@ -29,9 +29,6 @@ pub const EVENT_REMINDER_OPEN: &str = "pet://reminder-open";
 /// 插件面板呼出事件名。
 pub const EVENT_HUB_OPEN: &str = "pet://hub-open";
 
-/// 取词（读取其他应用选区）呼出事件名。
-pub const EVENT_SELECTION_OPEN: &str = "pet://text-tools-selection";
-
 /// 屏幕框选 OCR 呼出事件名。
 pub const EVENT_OCR_OPEN: &str = "pet://text-tools-ocr";
 
@@ -39,7 +36,6 @@ pub const EVENT_OCR_OPEN: &str = "pet://text-tools-ocr";
 pub const DEFAULT_SHORTCUT_NOTE: &str = "Alt+Space";
 pub const DEFAULT_SHORTCUT_REMINDER: &str = "Alt+R";
 pub const DEFAULT_SHORTCUT_HUB: &str = "Alt+P";
-pub const DEFAULT_SHORTCUT_SELECTION: &str = "Ctrl+Alt+T";
 pub const DEFAULT_SHORTCUT_OCR: &str = "Ctrl+Alt+O";
 
 /// 不依赖任何 UI 的强制退出快捷键：Ctrl+Alt+Cmd+Q。
@@ -227,7 +223,6 @@ pub fn apply_from_config(app: &AppHandle) -> ApplyOutcome {
         ("速记", cfg.shortcut_note.as_str()),
         ("提醒", cfg.shortcut_reminder.as_str()),
         ("插件面板", cfg.shortcut_hub.as_str()),
-        ("取词", cfg.shortcut_selection.as_str()),
         ("框选识别", cfg.shortcut_ocr.as_str()),
     ] {
         match parse(spec) {
@@ -295,9 +290,6 @@ pub fn handle(app: &AppHandle, shortcut: &Shortcut, event: ShortcutState) {
     } else if eq_spec(shortcut, &cfg.shortcut_hub) {
         eprintln!("[hub] 插件面板已呼出");
         let _ = app.emit(EVENT_HUB_OPEN, ());
-    } else if eq_spec(shortcut, &cfg.shortcut_selection) {
-        eprintln!("[text-tools] 取词已触发");
-        let _ = app.emit(EVENT_SELECTION_OPEN, ());
     } else if eq_spec(shortcut, &cfg.shortcut_ocr) {
         eprintln!("[text-tools] 框选识别已触发");
         let _ = app.emit(EVENT_OCR_OPEN, ());
@@ -375,7 +367,6 @@ mod tests {
 
     #[test]
     fn parse_accepts_text_tools_defaults() {
-        assert!(parse(DEFAULT_SHORTCUT_SELECTION).is_ok());
         assert!(parse(DEFAULT_SHORTCUT_OCR).is_ok());
     }
 
@@ -385,7 +376,6 @@ mod tests {
             ("速记", DEFAULT_SHORTCUT_NOTE),
             ("提醒", DEFAULT_SHORTCUT_REMINDER),
             ("插件面板", DEFAULT_SHORTCUT_HUB),
-            ("取词", DEFAULT_SHORTCUT_SELECTION),
             ("框选识别", DEFAULT_SHORTCUT_OCR),
         ];
         assert!(validate_shortcuts(&specs).is_ok());
@@ -394,9 +384,9 @@ mod tests {
     #[test]
     fn validate_rejects_duplicate_after_normalization() {
         // 修饰键顺序、大小写、空格差异后的同一物理组合必须判为冲突
-        let specs = [("取词", "Ctrl+Alt+T"), ("框选识别", "alt + ctrl + t")];
+        let specs = [("速记", "Alt+Space"), ("框选识别", "alt + space")];
         let err = validate_shortcuts(&specs).unwrap_err();
-        assert!(err.contains("取词") && err.contains("框选识别"), "报错要指明冲突双方：{err}");
+        assert!(err.contains("速记") && err.contains("框选识别"), "报错要指明冲突双方：{err}");
     }
 
     #[test]

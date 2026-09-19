@@ -340,14 +340,9 @@ void listen("pet://hub-open", () => {
   void hub.toggle();
 }).catch((e) => console.warn("[hub] 快捷键监听失败", e));
 
-// Ctrl+Alt+T 取词（读取当前前台应用选区）；重复触发即开启新会话，旧结果作废
-void listen("pet://text-tools-selection", () => {
-  void textTools.start("selection");
-}).catch((e) => console.warn("[text-tools] 取词监听失败", e));
-
-// Ctrl+Alt+O 屏幕框选 OCR
+// Ctrl+Alt+O 屏幕框选 OCR；重复触发即开启新会话，旧结果作废
 void listen("pet://text-tools-ocr", () => {
-  void textTools.start("ocr");
+  void textTools.start();
 }).catch((e) => console.warn("[text-tools] 框选监听失败", e));
 
 // 取词结果（Rust 只发给 pet 窗口）：交给面板按会话号判断是否为最新

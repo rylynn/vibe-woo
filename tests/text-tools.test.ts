@@ -38,7 +38,7 @@ function buttonByText(root: ParentNode, text: string): HTMLButtonElement {
 
 function payload(p: Partial<ResultPayload> & { session: number }): ResultPayload {
   return {
-    source: "selection",
+    source: "ocr",
     outcome: { kind: "ok", text: "hello", sourceApp: null },
     ...p,
   } as ResultPayload;
@@ -51,8 +51,8 @@ beforeEach(() => {
   nextSession = 1;
   invokeMock.mockReset();
   invokeMock.mockImplementation(async (cmd: string) => {
-    // 取词入口返回会话号 —— 前端以它为准，不自己递增
-    if (cmd === "text_tools_read_selection" || cmd === "text_tools_start_ocr") {
+    // 框选入口返回会话号 —— 前端以它为准，不自己递增
+    if (cmd === "text_tools_start_ocr") {
       return nextSession++;
     }
     if (cmd === "text_tools_translate") return { kind: "ok", text: "译文" };
@@ -61,12 +61,9 @@ beforeEach(() => {
   document.body.innerHTML = "";
 });
 
-/** 开始一轮取词，返回 Rust 给出的会话号。 */
-async function startSession(
-  panel: TextToolsPanel,
-  source: "selection" | "ocr" = "selection",
-): Promise<number> {
-  await panel.start(source);
+/** 开始一轮框选取词，返回 Rust 给出的会话号。 */
+async function startSession(panel: TextToolsPanel): Promise<number> {
+  await panel.start();
   return nextSession - 1;
 }
 
@@ -117,14 +114,14 @@ describe("契约与提示文案", () => {
   });
 
   it("未授权与超长给出可操作的中文提示", () => {
-    expect(readErrorMessage("not_trusted")).toContain("辅助功能");
+    expect(readErrorMessage("not_trusted")).toContain("屏幕录制");
     expect(readErrorMessage("too_long")).toContain(String(TEXT_MAX_CHARS));
     expect(translateErrorMessage("llm_disabled")).toContain("启用 AI");
     expect(translateErrorMessage("llm_not_configured")).toContain("配置");
   });
 
-  it("焦点在宠物自己窗口上时给出明确出路", () => {
-    expect(readErrorMessage("pet_focused")).toContain("点一下要取词的应用");
+  it("框选区域没有文字时是待框选引导，不是失败", () => {
+    expect(readErrorMessage("no_selection")).toContain("重新框选");
   });
 });
 
@@ -156,7 +153,7 @@ describe("取词浮窗", () => {
 
   it("自动翻译遇 LLM 未配置静默跳过（手动点击仍会看到提示）", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
-      if (cmd === "text_tools_read_selection") return nextSession++;
+      if (cmd === "text_tools_start_ocr") return nextSession++;
       if (cmd === "text_tools_translate") {
         return { kind: "error", code: "llm_not_configured" };
       }
@@ -179,14 +176,14 @@ describe("取词浮窗", () => {
     const panel = new TextToolsPanel();
     const first = await startSession(panel);
     panel.onResult(payload({ session: first })); // 触发自动翻译（在途）
-    const second = await startSession(panel, "ocr"); // 翻译没回来就重新取词
+    const second = await startSession(panel); // 翻译没回来就重新取词
     panel.onSelectionShown();
     await flush(); // 旧译文此刻才到
 
-    // 新会话仍处于读取态，不得出现旧会话的译文
+    // 新会话仍处于框选等待，不得出现旧会话的译文
     expect(document.querySelector(".pet-tt-result")).toBeNull();
     expect(invokeMock.mock.calls.filter((c) => c[0] === "text_tools_translate")).toHaveLength(1);
-    expect(second).toBeTruthy();
+    expect(second).not.toBe(first);
   });
 
   it("翻译用编辑后的文本（识别结果允许纠错）", async () => {
@@ -210,6 +207,7 @@ describe("取词浮窗", () => {
     const panel = new TextToolsPanel();
     const s = await startSession(panel);
     panel.onResult(payload({ session: s }));
+    await flush();
 
     buttonByText(document.body, "搜索").click();
     await Promise.resolve();
@@ -244,7 +242,7 @@ describe("取词浮窗", () => {
         outcome: { kind: "ok", text: "过期内容", sourceApp: null },
       }),
     );
-    // 仍处于读取中，没有把过期文本渲染出来
+    // 仍处于框选等待，没有把过期文本渲染出来
     expect(document.querySelector(".pet-tt-original")).toBeNull();
 
     // 新会话的结果正常生效
@@ -277,8 +275,8 @@ describe("取词浮窗", () => {
   it("结果事件先于会话号返回时不丢失（IPC 顺序竞争）", async () => {
     const panel = new TextToolsPanel();
     // 不 await：invoke 仍在途，会话号还没回到前端
-    const pending = panel.start("selection");
-    // Rust 阻塞读取线程先把结果事件推到了（两条消息各走各的通道，顺序无保证）
+    const pending = panel.start();
+    // Rust 阻塞识别线程先把结果事件推到了（两条消息各走各的通道，顺序无保证）
     panel.onResult(payload({ session: 1, outcome: { kind: "ok", text: "先到的结果", sourceApp: null } }));
     await pending; // 此刻才 adopt —— 若结果被当过期丢弃，面板将永远停在读取中
 
@@ -286,49 +284,20 @@ describe("取词浮窗", () => {
     expect(ta?.value).toBe("先到的结果");
   });
 
-  it("结果彻底丢失时读取态有兜底超时，不会永远读取中", async () => {
-    vi.useFakeTimers();
-    try {
-      const panel = new TextToolsPanel();
-      await panel.start("selection");
-      // 什么结果都不来（事件投递失败等极端情况）
-      await vi.advanceTimersByTimeAsync(8_000);
-      expect(document.querySelector(".pet-tt-error")?.textContent).toContain("超时");
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("读取态在 AX 慢读最坏耗时（约 6s）内不误报超时", async () => {
-    vi.useFakeTimers();
-    try {
-      const panel = new TextToolsPanel();
-      const s = await startSession(panel);
-      // Rust 最坏 4 条 AX 消息 × 1.5s —— 5.5s 仍属正常范围
-      await vi.advanceTimersByTimeAsync(5_500);
-      expect(document.querySelector(".pet-tt-error")).toBeNull();
-      // 慢到的结果仍被接受并覆盖
-      panel.onResult(payload({ session: s, outcome: { kind: "ok", text: "慢的结果", sourceApp: null } }));
-      const ta = document.querySelector<HTMLTextAreaElement>(".pet-tt-original");
-      expect(ta?.value).toBe("慢的结果");
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
   it("框选期间收起旧浮窗，结果回来再恢复", async () => {
     const panel = new TextToolsPanel();
-    const first = await startSession(panel, "selection");
+    const first = await startSession(panel);
+    panel.onSelectionShown();
     panel.onResult(payload({ session: first }));
     const el = document.querySelector<HTMLElement>(".pet-text-tools")!;
     expect(el.style.display).toBe("block");
 
-    const second = await startSession(panel, "ocr");
+    const second = await startSession(panel);
     panel.onSelectionShown(); // Rust 已确认框选层出现
     // 480px 实色面板不应挡住要框选的屏幕
     expect(el.style.display).toBe("none");
 
-    panel.onResult(payload({ session: second, outcome: { kind: "ok", text: "框选文字", sourceApp: null }, source: "ocr" }));
+    panel.onResult(payload({ session: second, outcome: { kind: "ok", text: "框选文字", sourceApp: null } }));
     expect(el.style.display).toBe("block");
     const ta = document.querySelector<HTMLTextAreaElement>(".pet-tt-original");
     expect(ta?.value).toBe("框选文字");
@@ -338,7 +307,7 @@ describe("取词浮窗", () => {
     vi.useFakeTimers();
     try {
       const panel = new TextToolsPanel();
-      await startSession(panel, "ocr");
+      await startSession(panel);
       // Rust 的 shown 事件一直不来（框选层被 AppKit 吞掉等）
       await vi.advanceTimersByTimeAsync(1_500);
       expect(document.querySelector(".pet-tt-error")?.textContent).toContain("框选层启动失败");
@@ -353,7 +322,7 @@ describe("取词浮窗", () => {
     vi.useFakeTimers();
     try {
       const panel = new TextToolsPanel();
-      await startSession(panel, "ocr");
+      await startSession(panel);
       panel.hide(); // 框选等待中按 Esc
       await vi.advanceTimersByTimeAsync(1_500);
       expect(document.querySelector(".pet-tt-error")).toBeNull();
@@ -365,7 +334,7 @@ describe("取词浮窗", () => {
 
   it("译文按纯文本渲染（外部服务返回的内容不被当 HTML 执行）", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
-      if (cmd === "text_tools_read_selection") return nextSession++;
+      if (cmd === "text_tools_start_ocr") return nextSession++;
       if (cmd === "text_tools_translate") {
         return { kind: "ok", text: '<img src=x onerror="alert(1)">危险' };
       }
@@ -384,22 +353,22 @@ describe("取词浮窗", () => {
     expect(out!.querySelector("img")).toBeNull();
   });
 
-  it("取词失败时给出替代入口（改用屏幕框选）", async () => {
+  it("框选区域没有文字时提示待框选，而不是报失败", async () => {
     const panel = new TextToolsPanel();
     const s = await startSession(panel);
     panel.onResult(
-      payload({
-        session: s,
-        outcome: { kind: "error", code: "unsupported" },
-      }),
+      payload({ session: s, outcome: { kind: "error", code: "no_selection" } }),
     );
-    expect(document.querySelector(".pet-tt-error")?.textContent).toContain("屏幕框选");
-    const alt = buttonByText(document.body, "改用屏幕框选");
-    alt.click();
-    expect(invokeMock.mock.calls.map((c) => c[0])).toContain("text_tools_start_ocr");
+    // 待框选引导（而不是「选中失败」式的错误文案）
+    const hints = [...document.querySelectorAll(".pet-tt-hint")].map((h) => h.textContent ?? "");
+    expect(hints.some((t) => t.includes("待框选"))).toBe(true);
+    expect(document.querySelector(".pet-tt-error")).toBeNull();
+    // 一键重新框选
+    buttonByText(document.body, "重新框选").click();
+    expect(invokeMock.mock.calls.filter((c) => c[0] === "text_tools_start_ocr")).toHaveLength(2);
   });
 
-  it("未授权点「去系统设置授权」：打开设置并给勾选引导，不自动重读", async () => {
+  it("未授权点「去系统设置授权」：请求加列表并开设置，给勾选引导，不自动重读", async () => {
     const panel = new TextToolsPanel();
     const s = await startSession(panel);
     panel.onResult(
@@ -410,14 +379,14 @@ describe("取词浮窗", () => {
     // 宏任务刷新：requestPermission 的 await 链与随后的 render 完成
     await new Promise((r) => setTimeout(r, 0));
 
-    // 已请求打开系统设置（Rust 直接开对应隐私页，不依赖系统弹窗）
+    // 已请求屏幕录制授权（Rust 清陈旧条目 + 让系统把应用加进列表 + 开设置页）
     const cmds = invokeMock.mock.calls.map((c) => c[0]);
-    expect(cmds).toContain("text_tools_request_permission");
+    expect(cmds).toContain("text_tools_request_screen_permission");
     // 绝不自动重读：用户还没勾选，马上重读只会弹同样的错误（像「点了没反应」）
-    expect(cmds.filter((c) => c === "text_tools_read_selection")).toHaveLength(1);
-    // 错误下方给出勾选引导
+    expect(cmds.filter((c) => c === "text_tools_start_ocr")).toHaveLength(1);
+    // 错误下方给出勾选引导（含重启生效提示——屏幕录制授权需重启）
     const hints = [...document.querySelectorAll(".pet-tt-hint")].map((h) => h.textContent ?? "");
-    expect(hints.some((t) => t.includes("系统设置") && t.includes("辅助功能"))).toBe(true);
+    expect(hints.some((t) => t.includes("屏幕录制") && t.includes("重启"))).toBe(true);
     // 按钮变为可重复打开（用户可能误关了设置页）
     expect(buttonByText(document.body, "再开一次系统设置")).toBeTruthy();
   });

@@ -1,20 +1,23 @@
 //! 取词与翻译工具（主动触发，非后台感知）。
 //!
-//! 与 sensor/envsense 的零授权零内容采集不同：本模块只在用户按下取词
-//! 快捷键后才读取**当前前台应用的选区文本**，且：
-//!   - 辅助功能授权按需提示，拒绝后仅提示、不重试；
+//! 与 sensor/envsense 的零授权零内容采集不同：本模块只在用户按下框选
+//! 快捷键后才截取**用户框选的屏幕区域**并本地识别，且：
+//!   - 屏幕录制授权按需引导（直接开系统设置对应页），拒绝后仅提示、不重试；
 //!   - 结果只定向发送给 pet 窗口，不广播；
 //!   - 不保存原文、译文或历史；
 //!   - 关闭面板或重新取词即失效旧会话，迟到结果一律丢弃。
 //!
+//! 历史注记：曾有一版「原生选区取词」（AX 读其他应用的选中文字，
+//! Ctrl+Alt+T）。辅助功能授权在 ad-hoc 重签名下反复失效、体验不可靠，
+//! 2026-09-19 整体下掉，只保留屏幕框选 OCR 这一条入口。
+//!
 //! 会话生命周期：
-//!   快捷键 → [会话建立 + 来源快照] → AX 选区读取（受控超时）→
+//!   快捷键 → [会话建立] → 屏幕框选 → 单帧截图 + 本地识别 →
 //!   仅向 pet 窗口交付文本 → 默认自动翻译（设置可关，llm）/
 //!   搜索（用户主动点击，opener）。
 
 #[cfg(target_os = "macos")]
 mod capture;
-mod macos;
 #[cfg(target_os = "macos")]
 mod selection_panel;
 
@@ -40,17 +43,11 @@ pub const TEXT_MAX_CHARS: usize = 4000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReadError {
-    /// 辅助功能未授权。
+    /// 屏幕录制未授权。
     NotTrusted,
-    /// 无选区或选区为空。
+    /// 框选区域里没有识别到文字。
     NoSelection,
-    /// 读取期间来源应用被切换。
-    AppSwitched,
-    /// 当前应用不支持取词（无焦点控件 / 安全输入控件等）。
-    Unsupported,
-    /// 焦点在宠物自己的窗口上（先点一下要取词的应用再触发）。
-    PetFocused,
-    /// 读取超时（应用无响应）。
+    /// 读取超时。
     Timeout,
     /// 文本超长。
     TooLong,
@@ -146,44 +143,6 @@ pub fn validate_text(raw: &str) -> Result<String, ReadError> {
     Ok(text.to_string())
 }
 
-/// 读取当前前台应用的选区（会话建立 + 快照 + AX 读取 + 定向交付）。
-///
-/// AX 读取放在阻塞线程上（无响应应用有 1.5s 消息超时兜底），
-/// 结果回来先过会话门 —— 关闭面板或再次触发后迟到结果直接丢弃。
-///
-/// 返回本次会话号：前端据此判断结果是否属于当前会话（两套计数器
-/// 各自递增必然在某次取消后错位，必须以这里返回的号为准）。
-#[tauri::command]
-pub async fn text_tools_read_selection(app: AppHandle) -> Result<u64, String> {
-    let session = GATE.begin();
-    // 快照来源应用：此刻选区所在应用仍是前台（宠物窗口 nonactivating 不抢焦点）
-    let source = macos::frontmost_source();
-    let _ = app; // 在阻塞线程里使用
-    tauri::async_runtime::spawn_blocking(move || {
-        let started = Instant::now();
-        let outcome = read_selection_outcome(source);
-        eprintln!(
-            "[text-tools] 选区读取完成 耗时={:?} 结果={:?}",
-            started.elapsed(),
-            outcome_kind(&outcome)
-        );
-        if GATE.is_current(session) {
-            let payload = ResultPayload {
-                session,
-                source: "selection",
-                outcome,
-            };
-            // 只定向发给 pet 窗口，不广播原文
-            if let Err(e) = app.emit_to("pet", EVENT_RESULT, &payload) {
-                eprintln!("[text-tools] 结果推送失败：{e}");
-            }
-        } else {
-            eprintln!("[text-tools] 会话已过期，丢弃选区读取结果");
-        }
-    });
-    Ok(session)
-}
-
 /// 错误类别脱敏摘要（日志用，绝不打印原文）。
 fn outcome_kind(outcome: &ReadOutcome) -> &'static str {
     match outcome {
@@ -191,9 +150,6 @@ fn outcome_kind(outcome: &ReadOutcome) -> &'static str {
         ReadOutcome::Error { code } => match code {
             ReadError::NotTrusted => "not_trusted",
             ReadError::NoSelection => "no_selection",
-            ReadError::AppSwitched => "app_switched",
-            ReadError::Unsupported => "unsupported",
-            ReadError::PetFocused => "pet_focused",
             ReadError::Timeout => "timeout",
             ReadError::TooLong => "too_long",
             ReadError::Cancelled => "cancelled",
@@ -202,55 +158,7 @@ fn outcome_kind(outcome: &ReadOutcome) -> &'static str {
     }
 }
 
-/// 选区读取编排（阻塞线程内执行）。
-fn read_selection_outcome(source: Option<macos::SourceApp>) -> ReadOutcome {
-    let Some(src) = source else {
-        // 前台拿不到：区分「是我们自己」与「真没有」—— 前者给专属提示
-        // （点一下要取词的应用即可恢复），后者仍是不支持。
-        let code = if macos::frontmost_is_self() {
-            ReadError::PetFocused
-        } else {
-            ReadError::Unsupported
-        };
-        return ReadOutcome::Error { code };
-    };
-    if !macos::ax_trusted() {
-        return ReadOutcome::Error {
-            code: ReadError::NotTrusted,
-        };
-    }
-    match macos::read_selection(src.pid) {
-        Ok(text) => {
-            // 读取期间来源应用被切换：结果可能是残留选区，不交付。
-            // 若前台变成了宠物自己，那是我们抢的焦点，不算用户切换。
-            if !macos::frontmost_is(src.pid) && !macos::frontmost_is_self() {
-                return ReadOutcome::Error {
-                    code: ReadError::AppSwitched,
-                };
-            }
-            match validate_text(&text) {
-                Ok(valid) => ReadOutcome::Ok {
-                    text: valid,
-                    source_app: src.bundle_id,
-                },
-                Err(code) => ReadOutcome::Error { code },
-            }
-        }
-        Err(code) => ReadOutcome::Error { code },
-    }
-}
-
-/// 查询辅助功能授权状态（不弹任何提示）。
-#[tauri::command]
-pub fn text_tools_permission() -> bool {
-    macos::ax_trusted()
-}
-
 /// 打开系统设置的隐私 pane（授权引导用，仅用户主动点击后调用）。
-///
-/// 不依赖系统授权弹窗（AXIsProcessTrustedWithOptions 的 prompt /
-/// CGRequestScreenCaptureAccess）：应用重装（ad-hoc 重签名）后 TCC 条目
-/// 陈旧时它们会静默不弹任何东西，用户点了「授权」却毫无反应。
 fn open_privacy_pane(app: &AppHandle, pane: &str) {
     use tauri_plugin_opener::OpenerExt;
 
@@ -260,14 +168,6 @@ fn open_privacy_pane(app: &AppHandle, pane: &str) {
         // 只记失败与 pane，不透传错误详情
         eprintln!("[text-tools] 打开系统设置失败 pane={pane}");
     }
-}
-
-/// 请求辅助功能授权（用户在面板上明确点击后调用）：
-/// 直接打开系统设置的「辅助功能」授权页，返回当前授权状态。
-#[tauri::command]
-pub fn text_tools_request_permission(app: AppHandle) -> bool {
-    open_privacy_pane(&app, "Privacy_Accessibility");
-    macos::ax_trusted()
 }
 
 /// 取消当前取词会话（面板关闭时调用，迟到结果将被丢弃）。
@@ -284,7 +184,23 @@ pub fn text_tools_cancel() {
 /// 绝不后台读剪贴板，取词也不经过剪贴板。
 #[tauri::command]
 pub fn text_tools_copy(text: String) -> Result<(), String> {
-    macos::copy_to_clipboard(&text)
+    copy_to_clipboard(&text)
+}
+
+/// 写入系统剪贴板（NSPasteboard，无需任何授权）。
+fn copy_to_clipboard(text: &str) -> Result<(), String> {
+    use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
+    use objc2_foundation::NSString;
+
+    let pb = NSPasteboard::generalPasteboard();
+    pb.clearContents();
+    let s = NSString::from_str(text);
+    let type_string = unsafe { NSPasteboardTypeString };
+    if pb.setString_forType(&s, type_string) {
+        Ok(())
+    } else {
+        Err("写入剪贴板失败".to_string())
+    }
 }
 
 /// 屏幕框选 OCR（会话建立 + 框选 + 单帧截图 + 本地识别 + 定向交付）。
@@ -323,13 +239,40 @@ pub fn text_tools_screen_permission() -> bool {
     capture::screen_capture_permission()
 }
 
-/// 请求屏幕录制授权（用户在面板上明确点击后调用）：
-/// 直接打开系统设置的「屏幕录制」授权页，返回当前授权状态。
-/// （CGRequestScreenAccess 同样有 TCC 陈旧条目下静默不弹的问题，不再使用。）
+/// 请求屏幕录制授权（用户在面板/设置上明确点击后调用）。
+///
+/// 目标：让用户**只需要在系统设置里勾选**，不用点「+」浏览应用。三步：
+///   1. tccutil 清掉本应用的陈旧条目 —— 重装（ad-hoc 重签名）后旧条目
+///      cdhash 不匹配，系统请求会静默不弹、列表里的旧勾选也无效；
+///   2. 干净状态下触发系统请求（CGRequestScreenCaptureAccess）：系统会把
+///      本应用加入「屏幕录制」列表（未勾选），可能附带弹一次系统确认；
+///   3. 直达系统设置的「屏幕录制」页兜底（弹窗没弹或被关掉也能到位）。
+///
+/// 已授权时什么都不做（绝不把有效授权清掉）。
 #[tauri::command]
 pub fn text_tools_request_screen_permission(app: AppHandle) -> bool {
+    if capture::screen_capture_permission() {
+        return true;
+    }
+    reset_tcc_entry(&app, "ScreenCapture");
+    capture::request_screen_capture_access();
     open_privacy_pane(&app, "Privacy_ScreenCapture");
     capture::screen_capture_permission()
+}
+
+/// 用 tccutil 清掉本应用某项服务的 TCC 条目（只动自己，不碰其他应用）。
+/// 失败不致命：后续的系统请求与设置页引导仍会进行。
+fn reset_tcc_entry(app: &AppHandle, service: &str) {
+    let bundle_id = app.config().identifier.clone();
+    match std::process::Command::new("/usr/bin/tccutil")
+        .args(["reset", service, bundle_id.as_str()])
+        .output()
+    {
+        Ok(out) if out.status.success() => {
+            eprintln!("[text-tools] 已清除陈旧授权条目 service={service}");
+        }
+        _ => eprintln!("[text-tools] 清除授权条目失败 service={service}（忽略）"),
+    }
 }
 
 /// 框选 + 截图 + 识别编排（阻塞线程内执行）。
@@ -590,28 +533,18 @@ mod tests {
     }
 
     #[test]
-    fn 焦点在宠物自己窗口的错误码与前端对齐() {
-        let e = ReadOutcome::Error {
-            code: ReadError::PetFocused,
-        };
-        let v = serde_json::to_value(&e).unwrap();
-        assert_eq!(v["kind"], "error");
-        assert_eq!(v["code"], "pet_focused");
-    }
-
-    #[test]
     fn 成功结果载荷字段为驼峰() {
         let p = ResultPayload {
             session: 7,
-            source: "selection",
+            source: "ocr",
             outcome: ReadOutcome::Ok {
                 text: "hello".into(),
-                source_app: Some("com.apple.Safari".into()),
+                source_app: None,
             },
         };
         let v = serde_json::to_value(&p).unwrap();
         assert_eq!(v["session"], 7);
-        assert_eq!(v["outcome"]["sourceApp"], "com.apple.Safari");
+        assert_eq!(v["source"], "ocr");
         assert_eq!(v["outcome"]["kind"], "ok");
         assert_eq!(v["outcome"]["text"], "hello");
     }

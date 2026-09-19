@@ -11,8 +11,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-/** 取词来源：原生文字选区 / 屏幕框选识别。 */
-export type TextSource = "selection" | "ocr";
+/** 取词来源：屏幕框选识别（原生选区读取已下掉，仅剩此入口）。 */
+export type TextSource = "ocr";
 
 /** 取词结果定向推送事件名（Rust 只发给 pet 窗口）。 */
 export const EVENT_RESULT = "pet://text-tools-result";
@@ -24,9 +24,6 @@ export const EVENT_SELECTION_SHOWN = "pet://text-tools-selection-shown";
 export type ReadError =
   | "not_trusted"
   | "no_selection"
-  | "app_switched"
-  | "unsupported"
-  | "pet_focused"
   | "timeout"
   | "too_long"
   | "cancelled"
@@ -65,9 +62,9 @@ export const TEXT_MAX_CHARS = 4000;
 /**
  * 只认当前会话号：重复触发、关闭面板、取消后，旧会话的结果一律丢弃。
  *
- * 会话号**由 Rust 返回**（text_tools_read_selection / text_tools_start_ocr
- * 的返回值），前端绝不自己递增 —— 两套计数器各自递增必然在某次取消后
- * 错位，导致「关过一次面板后再取词永远卡在读取中」。
+ * 会话号**由 Rust 返回**（text_tools_start_ocr 的返回值），前端绝不
+ * 自己递增 —— 两套计数器各自递增必然在某次取消后错位，导致「关过
+ * 一次面板后再取词永远卡在读取中」。
  *
  * Rust 侧还有同样的门（SessionGate），前端再守一次：事件到达与面板状态
  * 可能不同步，两道门都不放宽。
@@ -93,15 +90,7 @@ export class SessionGuard {
 
 // ---------- 受控调用 ----------
 
-/**
- * 读取当前前台应用的选区。
- * 返回本次会话号（Rust 建立会话时给出），结果事件里带回同一个号。
- */
-export async function readSelection(): Promise<number> {
-  return await invoke<number>("text_tools_read_selection");
-}
-
-/** 进入屏幕框选 OCR 流程。返回本次会话号。 */
+/** 进入屏幕框选 OCR 流程。返回本次会话号（结果事件里带回同一个号）。 */
 export async function startOcr(): Promise<number> {
   return await invoke<number>("text_tools_start_ocr");
 }
@@ -126,22 +115,15 @@ export async function search(text: string): Promise<void> {
   return await invoke<void>("text_tools_search", { text });
 }
 
-/** 查询辅助功能授权状态（不弹提示）。 */
-export async function axPermission(): Promise<boolean> {
-  return await invoke<boolean>("text_tools_permission");
-}
-
-/** 请求辅助功能授权（系统弹窗，仅用户主动点击后调用）。 */
-export async function requestAxPermission(): Promise<boolean> {
-  return await invoke<boolean>("text_tools_request_permission");
-}
-
 /** 查询屏幕录制授权状态（不弹提示）。 */
 export async function screenPermission(): Promise<boolean> {
   return await invoke<boolean>("text_tools_screen_permission");
 }
 
-/** 请求屏幕录制授权（打开系统设置，仅用户主动点击后调用）。 */
+/**
+ * 请求屏幕录制授权（仅用户主动点击后调用）：Rust 侧会清陈旧 TCC 条目、
+ * 让系统把本应用加入「屏幕录制」列表，再直达系统设置页 —— 用户只需勾选。
+ */
 export async function requestScreenPermission(): Promise<boolean> {
   return await invoke<boolean>("text_tools_request_screen_permission");
 }
@@ -169,19 +151,13 @@ export function isTooLong(text: string): boolean {
 export function readErrorMessage(code: ReadError): string {
   switch (code) {
     case "not_trusted":
-      return "需要辅助功能授权才能读取选区文字";
+      return "需要「屏幕录制」授权才能截取屏幕";
     case "no_selection":
-      return "没有选中文字，或选区里没有识别到文字";
-    case "app_switched":
-      return "读取期间切换了应用，请重试";
-    case "unsupported":
-      return "当前应用不支持取词，试试屏幕框选";
-    case "pet_focused":
-      return "焦点在宠物窗口上——点一下要取词的应用后再按快捷键";
+      return "框选区域里没有识别到文字——请重新框选，区域要盖住文字";
     case "timeout":
-      return "读取超时，应用可能无响应";
+      return "框选或识别超时，请重试";
     case "too_long":
-      return `文字超过 ${TEXT_MAX_CHARS} 字，请编辑或缩小选区`;
+      return `文字超过 ${TEXT_MAX_CHARS} 字，请缩小框选区域`;
     case "cancelled":
       return "";
     case "failed":

@@ -86,12 +86,10 @@ pub struct ConfigView {
     pub social_hidden: bool,
     /// 已领养的形象，None 表示首次安装未选择。
     pub avatar: Option<config::AvatarConfig>,
-    /// 全局快捷键（速记 / 提醒 / 插件面板），存储格式见 shortcut.rs::parse。
+    /// 全局快捷键（速记 / 提醒 / 插件面板 / 框选识别），存储格式见 shortcut.rs::parse。
     pub shortcut_note: String,
     pub shortcut_reminder: String,
     pub shortcut_hub: String,
-    /// 取词（读取其他应用选区）与屏幕框选 OCR 的快捷键。
-    pub shortcut_selection: String,
     pub shortcut_ocr: String,
     /// 取词翻译方向，默认英译中。
     pub translation_direction: config::TranslationDirection,
@@ -133,7 +131,6 @@ fn to_view(c: &Config) -> ConfigView {
         shortcut_note: c.shortcut_note.clone(),
         shortcut_reminder: c.shortcut_reminder.clone(),
         shortcut_hub: c.shortcut_hub.clone(),
-        shortcut_selection: c.shortcut_selection.clone(),
         shortcut_ocr: c.shortcut_ocr.clone(),
         translation_direction: c.translation_direction,
         search_engine: c.search_engine,
@@ -177,7 +174,6 @@ pub struct ConfigPatch {
     pub shortcut_note: Option<String>,
     pub shortcut_reminder: Option<String>,
     pub shortcut_hub: Option<String>,
-    pub shortcut_selection: Option<String>,
     pub shortcut_ocr: Option<String>,
     pub translation_direction: Option<config::TranslationDirection>,
     pub search_engine: Option<config::SearchEngine>,
@@ -190,17 +186,15 @@ fn validate_config_shortcuts(cfg: &Config) -> Result<(), String> {
         ("速记", cfg.shortcut_note.as_str()),
         ("提醒", cfg.shortcut_reminder.as_str()),
         ("插件面板", cfg.shortcut_hub.as_str()),
-        ("取词", cfg.shortcut_selection.as_str()),
         ("框选识别", cfg.shortcut_ocr.as_str()),
     ])
 }
 
-/// 把五个快捷键字段恢复为 old 的值（注册失败回退用）。
+/// 把四个快捷键字段恢复为 old 的值（注册失败回退用）。
 fn restore_shortcuts(cfg: &mut Config, old: &Config) {
     cfg.shortcut_note = old.shortcut_note.clone();
     cfg.shortcut_reminder = old.shortcut_reminder.clone();
     cfg.shortcut_hub = old.shortcut_hub.clone();
-    cfg.shortcut_selection = old.shortcut_selection.clone();
     cfg.shortcut_ocr = old.shortcut_ocr.clone();
 }
 
@@ -297,10 +291,6 @@ fn apply_patch(cfg: &mut Config, patch: ConfigPatch) -> bool {
         cfg.shortcut_hub = v;
         shortcuts_changed = true;
     }
-    if let Some(v) = patch.shortcut_selection {
-        cfg.shortcut_selection = v;
-        shortcuts_changed = true;
-    }
     if let Some(v) = patch.shortcut_ocr {
         cfg.shortcut_ocr = v;
         shortcuts_changed = true;
@@ -362,7 +352,6 @@ mod tests {
     fn apply_patch_sets_text_tools_fields_and_flags_shortcut_change() {
         let mut cfg = Config::default();
         let patch = ConfigPatch {
-            shortcut_selection: Some("Ctrl+Shift+T".into()),
             shortcut_ocr: Some("Ctrl+Shift+O".into()),
             translation_direction: Some(config::TranslationDirection::Zh2En),
             search_engine: Some(config::SearchEngine::Bing),
@@ -370,7 +359,6 @@ mod tests {
         };
         let changed = apply_patch(&mut cfg, patch);
         assert!(changed, "改动了快捷键必须标记 changed");
-        assert_eq!(cfg.shortcut_selection, "Ctrl+Shift+T");
         assert_eq!(cfg.shortcut_ocr, "Ctrl+Shift+O");
         assert_eq!(cfg.translation_direction, config::TranslationDirection::Zh2En);
         assert_eq!(cfg.search_engine, config::SearchEngine::Bing);
@@ -390,10 +378,10 @@ mod tests {
     #[test]
     fn validate_config_shortcuts_covers_new_fields() {
         let mut cfg = Config::default();
-        assert!(validate_config_shortcuts(&cfg).is_ok(), "默认配置的五个快捷键应互不冲突");
-        cfg.shortcut_selection = cfg.shortcut_note.clone();
+        assert!(validate_config_shortcuts(&cfg).is_ok(), "默认配置的四个快捷键应互不冲突");
+        cfg.shortcut_ocr = cfg.shortcut_note.clone();
         let err = validate_config_shortcuts(&cfg).unwrap_err();
-        assert!(err.contains("取词") && err.contains("速记"), "报错要指明冲突双方：{err}");
+        assert!(err.contains("框选识别") && err.contains("速记"), "报错要指明冲突双方：{err}");
     }
 
     #[test]
@@ -403,13 +391,11 @@ mod tests {
         cfg.shortcut_note = "Alt+X".into();
         cfg.shortcut_reminder = "Alt+Y".into();
         cfg.shortcut_hub = "Alt+Z".into();
-        cfg.shortcut_selection = "Alt+S".into();
         cfg.shortcut_ocr = "Alt+D".into();
         restore_shortcuts(&mut cfg, &old);
         assert_eq!(cfg.shortcut_note, old.shortcut_note);
         assert_eq!(cfg.shortcut_reminder, old.shortcut_reminder);
         assert_eq!(cfg.shortcut_hub, old.shortcut_hub);
-        assert_eq!(cfg.shortcut_selection, old.shortcut_selection);
         assert_eq!(cfg.shortcut_ocr, old.shortcut_ocr);
     }
 
@@ -419,7 +405,6 @@ mod tests {
         cfg.translation_direction = config::TranslationDirection::Zh2En;
         cfg.search_engine = config::SearchEngine::Bing;
         let view = to_view(&cfg);
-        assert_eq!(view.shortcut_selection, "Ctrl+Alt+T");
         assert_eq!(view.shortcut_ocr, "Ctrl+Alt+O");
         assert_eq!(view.translation_direction, config::TranslationDirection::Zh2En);
         assert_eq!(view.search_engine, config::SearchEngine::Bing);

@@ -16,8 +16,6 @@ import {
   type TranslationDirection,
 } from "../config";
 import {
-  axPermission,
-  requestAxPermission,
   screenPermission,
   requestScreenPermission,
 } from "../text-tools";
@@ -480,9 +478,6 @@ export class SettingsPanel {
     this.el.appendChild(
       this.rowShortcutCapture("插件面板", "shortcut_hub", c),
     );
-    this.el.appendChild(
-      this.rowShortcutCapture("取词翻译", "shortcut_selection", c),
-    );
     this.el.appendChild(this.rowShortcutCapture("屏幕框选", "shortcut_ocr", c));
     this.el.appendChild(
       this.hint(
@@ -497,7 +492,6 @@ export class SettingsPanel {
     "shortcut_note",
     "shortcut_reminder",
     "shortcut_hub",
-    "shortcut_selection",
     "shortcut_ocr",
   ] as const;
 
@@ -508,7 +502,6 @@ export class SettingsPanel {
     shortcut_note: "速记",
     shortcut_reminder: "每日提醒",
     shortcut_hub: "插件面板",
-    shortcut_selection: "取词翻译",
     shortcut_ocr: "屏幕框选",
   };
 
@@ -562,11 +555,8 @@ export class SettingsPanel {
       ),
     );
 
-    // 快捷键：展示取词与框选两项，全部组合在「自定义快捷键」页改
+    // 快捷键：展示框选一项，全部组合在「自定义快捷键」页改
     this.el.appendChild(this.divider("快捷键"));
-    this.el.appendChild(
-      this.rowShortcutCapture("取词翻译", "shortcut_selection", c),
-    );
     this.el.appendChild(this.rowShortcutCapture("屏幕框选", "shortcut_ocr", c));
     this.el.appendChild(
       this.entryRow("自定义快捷键", () => {
@@ -575,9 +565,8 @@ export class SettingsPanel {
       }),
     );
 
-    // 权限：分别展示，只在用户主动点击时申请
+    // 权限：屏幕录制（框选截图用），只在用户主动点击时申请
     this.el.appendChild(this.divider("权限"));
-    this.el.appendChild(this.rowPermission("辅助功能", axPermission, requestAxPermission));
     this.el.appendChild(
       this.rowPermission("屏幕录制", screenPermission, requestScreenPermission, true),
     );
@@ -585,8 +574,8 @@ export class SettingsPanel {
     // 隐私说明：说清本地识别与外发时机
     this.el.appendChild(
       this.hint(
-        "取词与框选识别只在你按下快捷键后进行：屏幕框选的画面在本机识别（不上传、不保存）；" +
-          "「自动翻译」开启时取词结果会立即发往你已配置的 AI 服务，搜索同理；关闭后只有手动点「翻译」或「搜索」才外发。不保存原文、译文与历史。",
+        "框选识别只在你按下快捷键后进行：画面在本机识别（不上传、不保存）；" +
+          "「自动翻译」开启时识别结果会立即发往你已配置的 AI 服务，搜索同理；关闭后只有手动点「翻译」或「搜索」才外发。不保存原文、译文与历史。",
       ),
     );
     this.el.appendChild(this.footer());
@@ -628,7 +617,7 @@ export class SettingsPanel {
               r,
               restartAfterGrant
                 ? "仍未检测到授权——「屏幕录制」勾选后需重启应用才生效"
-                : "仍未检测到授权——请确认已在「辅助功能」勾选 Vibe Pet（列表里已有但状态不对时，先移除再加回）",
+                : "仍未检测到授权——请确认已在列表里勾选 Vibe Pet",
             );
           } else {
             btn.textContent = "点击授权";

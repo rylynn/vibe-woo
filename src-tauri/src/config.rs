@@ -324,9 +324,6 @@ pub struct Config {
     /// 插件面板的全局快捷键。
     #[serde(default = "default_shortcut_hub")]
     pub shortcut_hub: String,
-    /// 取词（读取其他应用选区）的全局快捷键。
-    #[serde(default = "default_shortcut_selection")]
-    pub shortcut_selection: String,
     /// 屏幕框选 OCR 的全局快捷键。
     #[serde(default = "default_shortcut_ocr")]
     pub shortcut_ocr: String,
@@ -361,10 +358,6 @@ fn default_shortcut_hub() -> String {
     crate::shortcut::DEFAULT_SHORTCUT_HUB.to_string()
 }
 
-fn default_shortcut_selection() -> String {
-    crate::shortcut::DEFAULT_SHORTCUT_SELECTION.to_string()
-}
-
 fn default_shortcut_ocr() -> String {
     crate::shortcut::DEFAULT_SHORTCUT_OCR.to_string()
 }
@@ -391,7 +384,6 @@ impl Default for Config {
             shortcut_note: crate::shortcut::DEFAULT_SHORTCUT_NOTE.to_string(),
             shortcut_reminder: crate::shortcut::DEFAULT_SHORTCUT_REMINDER.to_string(),
             shortcut_hub: crate::shortcut::DEFAULT_SHORTCUT_HUB.to_string(),
-            shortcut_selection: crate::shortcut::DEFAULT_SHORTCUT_SELECTION.to_string(),
             shortcut_ocr: crate::shortcut::DEFAULT_SHORTCUT_OCR.to_string(),
             translation_direction: TranslationDirection::default(),
             search_engine: SearchEngine::default(),
@@ -435,7 +427,6 @@ fn sanitize_shortcuts(c: &mut Config) -> bool {
         ("速记", c.shortcut_note.as_str()),
         ("提醒", c.shortcut_reminder.as_str()),
         ("插件面板", c.shortcut_hub.as_str()),
-        ("取词", c.shortcut_selection.as_str()),
         ("框选识别", c.shortcut_ocr.as_str()),
     ])
     .is_ok();
@@ -446,7 +437,6 @@ fn sanitize_shortcuts(c: &mut Config) -> bool {
     c.shortcut_note = default_shortcut_note();
     c.shortcut_reminder = default_shortcut_reminder();
     c.shortcut_hub = default_shortcut_hub();
-    c.shortcut_selection = default_shortcut_selection();
     c.shortcut_ocr = default_shortcut_ocr();
     true
 }
@@ -736,7 +726,6 @@ mod tests {
     fn 旧配置缺失取词字段时补默认值() {
         // 0.11.x 的 config.json 没有取词相关字段，升级后必须补齐默认值
         let c: Config = serde_json::from_str(r#"{"size_index": 1}"#).unwrap();
-        assert_eq!(c.shortcut_selection, "Ctrl+Alt+T");
         assert_eq!(c.shortcut_ocr, "Ctrl+Alt+O");
         assert_eq!(
             c.translation_direction,
@@ -778,10 +767,10 @@ mod tests {
     #[test]
     fn 手改配置造成快捷键冲突时整组回退默认值() {
         let mut c: Config = serde_json::from_str(r#"{"size_index": 1}"#).unwrap();
-        c.shortcut_selection = c.shortcut_note.clone(); // 与速记冲突
+        c.shortcut_ocr = c.shortcut_note.clone(); // 与速记冲突
         assert!(sanitize_shortcuts(&mut c), "冲突必须触发回退");
         assert_eq!(c.shortcut_note, "Alt+Space");
-        assert_eq!(c.shortcut_selection, "Ctrl+Alt+T");
+        assert_eq!(c.shortcut_ocr, "Ctrl+Alt+O");
     }
 
     #[test]
@@ -803,13 +792,11 @@ mod tests {
         let mut c = Config::default();
         c.translation_direction = TranslationDirection::Zh2En;
         c.search_engine = SearchEngine::Baidu;
-        c.shortcut_selection = "Alt+T".into();
         c.shortcut_ocr = "Alt+O".into();
         c.auto_translate = false;
         let back: Config = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
         assert_eq!(back.translation_direction, TranslationDirection::Zh2En);
         assert_eq!(back.search_engine, SearchEngine::Baidu);
-        assert_eq!(back.shortcut_selection, "Alt+T");
         assert_eq!(back.shortcut_ocr, "Alt+O");
         assert!(!back.auto_translate, "关闭自动翻译必须可持久化");
     }
