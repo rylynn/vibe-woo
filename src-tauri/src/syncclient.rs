@@ -114,6 +114,35 @@ pub async fn post_authed<T: Serialize>(
     parse(resp).await
 }
 
+/// 带鉴权 POST，但保留服务端完整响应（含 error 之外的伴随字段，
+/// 如碰一碰限流的 retry_after）。业务错误不再折叠成 Err(String) ——
+/// 只有网络/解析失败才返回 Err。需要结构化错误信息的调用方专用。
+pub async fn post_authed_full<T: Serialize>(
+    path: &str,
+    body: &T,
+) -> Result<serde_json::Value, String> {
+    let cfg = configcmd::current();
+    if cfg.social.token.is_empty() {
+        return Err("请先登录".into());
+    }
+    let url = format!("{}{path}", base_url());
+    let resp = client()?
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", cfg.social.token))
+        .json(body)
+        .send()
+        .await
+        .map_err(|e| format!("网络错误：{e}"))?;
+    let status = resp.status();
+    let text = resp.text().await.map_err(|e| format!("读取失败：{e}"))?;
+    let v: serde_json::Value =
+        serde_json::from_str(&text).map_err(|_| "响应解析失败".to_string())?;
+    if !status.is_success() && v["error"].is_null() {
+        return Err("请求失败".to_string());
+    }
+    Ok(v)
+}
+
 /// 免鉴权 POST（注册 / 登录）。
 pub async fn post_public<T: Serialize>(
     path: &str,

@@ -36,6 +36,17 @@ const DEFAULT_HEARTBEAT_SECS: u64 = 180;
 /// 串门时长：到点自动回家。
 const VISIT_DURATION_SECS: u64 = 8 * 60;
 
+/// 出门类型：串门（8 分钟）或碰一碰（45 秒快闪）。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VisitKind {
+    Visit,
+    Bump,
+}
+
+/// 碰一碰出门时长：到点自动回家。
+const BUMP_DURATION_SECS: u64 = 45;
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct FriendView {
     pub uid: String,
@@ -44,6 +55,21 @@ pub struct FriendView {
     pub state: String,
     pub affinity: f64,
     pub online: bool,
+}
+
+/// 待处理的好友申请（心跳随好友列表一起下发）。
+#[derive(Serialize, Deserialize, Clone)]
+pub struct FriendRequestView {
+    pub uid: String,
+    pub nick: String,
+    pub pet_name: String,
+}
+
+/// 好友列表刷新事件载荷（含待处理申请）。
+#[derive(Serialize, Clone)]
+pub struct FriendsNotice {
+    pub friends: Vec<FriendView>,
+    pub requests: Vec<FriendRequestView>,
 }
 
 /// 今日打过招呼、且此刻仍在线的人（服务端已经筛过在线状态）。
@@ -73,6 +99,8 @@ pub struct VisitorView {
 struct Candidate {
     uid: String,
     nick: String,
+    /// 加权随机权重：好友带关系亲密度，仅打过招呼的用基础权重。
+    weight: f64,
 }
 
 /// 离家/回家事件载荷。
@@ -83,12 +111,33 @@ pub struct AwayNotice {
     /// 去谁家（出门时）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub at_nick: Option<String>,
+    /// 出门类型：visit / bump。回家事件不带。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<VisitKind>,
+    /// 本次出门总时长（秒），前端倒计时用。回家事件不带。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_secs: Option<u64>,
 }
 
 #[derive(Clone)]
 struct Visiting {
     target_uid: String,
     target_nick: String,
+    kind: VisitKind,
+    /// 到点自动回家的时刻（存这里而不是局部变量，碰一碰与串门共用一条回家路径）。
+    until: std::time::Instant,
+}
+
+/// 串门候选权重下限：亲密度 0 的新好友也要有机会被选中。
+const CANDIDATE_BASE_WEIGHT: f64 = 10.0;
+
+/// 碰一碰本地限流记录：uid → 冷却截止时刻。进程内存即可
+///（重启丢一次无害，服务端有同款校验兜底）。
+static BUMP_LAST: std::sync::OnceLock<Mutex<std::collections::HashMap<String, std::time::Instant>>> =
+    std::sync::OnceLock::new();
+
+fn bump_last() -> &'static Mutex<std::collections::HashMap<String, std::time::Instant>> {
+    BUMP_LAST.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
 /// 全局离家状态。
@@ -132,15 +181,11 @@ pub fn decide_visit(
 }
 
 /// 碰一碰冷却（秒）：与服务端 BUMP_COOLDOWN_MS 同值，客户端先拦省一次请求。
-/// 碰一碰入口在后续任务接入，先占住常量。
-#[allow(dead_code)]
 pub const BUMP_COOLDOWN_SECS: u64 = 60;
 
 /// 碰一碰本地限流（纯函数）：距冷却截止还需等多少秒（0 = 可碰）。
 /// 存「截止时刻」而不是「上次时刻」—— 服务端限流返回的剩余秒数
 /// 可以直接换算成截止时刻写回来，两端倒计时天然对齐。
-/// 碰一碰入口在后续任务接入，先占住函数。
-#[allow(dead_code)]
 pub fn bump_cooldown_left(
     blocked_until: Option<std::time::Instant>,
     now: std::time::Instant,
@@ -152,8 +197,6 @@ pub fn bump_cooldown_left(
 
 /// 串门目标选择（纯函数）：权重加权随机。roll 为 0..1 均匀随机，
 /// 返回选中的候选下标；池空或总权重非正返回 None。
-/// 串门抽签在后续任务接入，先占住函数。
-#[allow(dead_code)]
 pub fn pick_visit_target(weights: &[f64], roll: f64) -> Option<usize> {
     if weights.is_empty() {
         return None;
@@ -185,6 +228,10 @@ fn set_visiting(app: &AppHandle, v: Option<Visiting>) {
     let notice = AwayNotice {
         away: v.is_some(),
         at_nick: v.as_ref().map(|x| x.target_nick.clone()),
+        kind: v.as_ref().map(|x| x.kind),
+        duration_secs: v
+            .as_ref()
+            .map(|x| x.until.saturating_duration_since(std::time::Instant::now()).as_secs()),
     };
     if let Ok(mut g) = VISITING.lock() {
         *g = v;
@@ -212,6 +259,66 @@ pub fn come_home(app: &AppHandle, target: Option<String>) {
     });
 }
 
+/// 碰一碰出门：45 秒快闪后自动回家。由 friend_bump 命令在服务端确认后调用。
+pub fn go_bump(app: &AppHandle, target_uid: String, target_nick: String) {
+    set_visiting(
+        app,
+        Some(Visiting {
+            target_uid,
+            target_nick,
+            kind: VisitKind::Bump,
+            until: std::time::Instant::now() + Duration::from_secs(BUMP_DURATION_SECS),
+        }),
+    );
+}
+
+/// 碰一碰入口（friend_bump 命令调用）：本地限流先拦（省一次网络往返），
+/// 服务端确认后设置 45 秒出门状态。Err(剩余秒数) = 被冷却拦下。
+/// friend_bump 命令在后续任务接入，届时删掉这条 allow。
+#[allow(dead_code)]
+pub async fn try_begin_bump(
+    app: &AppHandle,
+    target_uid: String,
+    target_nick: String,
+) -> Result<(), u64> {
+    let now = std::time::Instant::now();
+    {
+        let Ok(map) = bump_last().lock() else {
+            return Err(BUMP_COOLDOWN_SECS);
+        };
+        let left = bump_cooldown_left(map.get(&target_uid).copied(), now);
+        if left > 0 {
+            return Err(left);
+        }
+    }
+
+    let body = serde_json::json!({ "target": target_uid });
+    match crate::syncclient::post_authed_full("/friends/bump", &body).await {
+        Ok(v) if v["ok"] == true => {
+            if let Ok(mut map) = bump_last().lock() {
+                map.insert(
+                    target_uid.clone(),
+                    now + Duration::from_secs(BUMP_COOLDOWN_SECS),
+                );
+            }
+            go_bump(app, target_uid, target_nick);
+            Ok(())
+        }
+        Ok(v) => {
+            // 服务端限流（多设备/时钟差）：以服务端剩余秒数对齐本地倒计时
+            let left = v["retry_after"].as_u64().unwrap_or(BUMP_COOLDOWN_SECS);
+            if let Ok(mut map) = bump_last().lock() {
+                map.insert(
+                    target_uid.clone(),
+                    std::time::Instant::now() + Duration::from_secs(left),
+                );
+            }
+            Err(left)
+        }
+        Err(_) => Err(BUMP_COOLDOWN_SECS), // 网络失败按满冷却处理，防连点打爆服务端
+    }
+}
+
 pub fn spawn(app: &AppHandle) {
     let app = app.clone();
     std::thread::spawn(move || {
@@ -225,7 +332,6 @@ pub fn spawn(app: &AppHandle) {
         let mut affinity = Affinity::new();
         let mut last_min_mark = std::time::Instant::now();
         let mut interval = Duration::from_secs(5); // 首拍快速拿数据
-        let mut visit_deadline: Option<std::time::Instant> = None;
         // 心跳连续失败时的退避基数，成功一次即复位
         let mut backoff_secs: u64 = 60;
 
@@ -301,71 +407,96 @@ pub fn spawn(app: &AppHandle) {
                         }
                         backoff_secs = 60; // 打通了，退避复位
 
-                        // 好友列表（可能为空 —— 没有好友也要能基于今日招呼串门）
-                        if let Ok(friends) =
-                            serde_json::from_value::<Vec<FriendView>>(v["friends"].clone())
-                        {
-                            if !friends.is_empty() {
-                                let _ = app.emit(EVENT_FRIENDS, friends.clone());
+                        // 好友列表 + 待处理申请（可能都为空）
+                        let friends = serde_json::from_value::<Vec<FriendView>>(
+                            v["friends"].clone(),
+                        )
+                        .unwrap_or_default();
+                        let requests = serde_json::from_value::<Vec<FriendRequestView>>(
+                            v["requests"].clone(),
+                        )
+                        .unwrap_or_default();
+                        if !friends.is_empty() || !requests.is_empty() {
+                            let _ = app.emit(
+                                EVENT_FRIENDS,
+                                FriendsNotice {
+                                    friends: friends.clone(),
+                                    requests,
+                                },
+                            );
+                        }
+
+                        // —— 串门决策（persona 自动触发，非人工）——
+                        if !friends.is_empty() && !is_away() {
+                            // 候选 = 在线好友 ∪ 今日打过招呼的人（按 uid 去重）。
+                            // 权重 = 关系亲密度 + 10 下限：越熟越常去，新朋友也有机会。
+                            let mut pool: Vec<Candidate> = friends
+                                .iter()
+                                .filter(|f| f.online && f.state != "visiting")
+                                .map(|f| Candidate {
+                                    uid: f.uid.clone(),
+                                    nick: f.nick.clone(),
+                                    weight: f.affinity + CANDIDATE_BASE_WEIGHT,
+                                })
+                                .collect();
+                            for g in
+                                GREETED_TODAY.lock().map(|g| g.clone()).unwrap_or_default()
+                            {
+                                if g.state == "visiting" {
+                                    continue;
+                                }
+                                if pool.iter().any(|p| p.uid == g.uid) {
+                                    continue;
+                                }
+                                pool.push(Candidate {
+                                    uid: g.uid,
+                                    nick: g.nick,
+                                    weight: CANDIDATE_BASE_WEIGHT,
+                                });
                             }
 
-                            // —— 串门决策（persona 自动触发，非人工）——
-                            if !is_away() {
-                                // 候选 = 好友 ∪ 今日打过招呼的人（按 uid 去重）
-                                let mut pool: Vec<Candidate> = friends
-                                    .iter()
-                                    .filter(|f| f.online && f.state != "visiting")
-                                    .map(|f| Candidate {
-                                        uid: f.uid.clone(),
-                                        nick: f.nick.clone(),
-                                    })
-                                    .collect();
-                                for g in GREETED_TODAY.lock().map(|g| g.clone()).unwrap_or_default()
-                                {
-                                    if g.state == "visiting" {
-                                        continue;
-                                    }
-                                    if pool.iter().any(|p| p.uid == g.uid) {
-                                        continue;
-                                    }
-                                    pool.push(Candidate {
-                                        uid: g.uid,
-                                        nick: g.nick,
-                                    });
-                                }
-
-                                let online: Vec<&Candidate> = pool.iter().collect();
+                            if !pool.is_empty() {
                                 let busy = crate::sensedrive::shared_state()
                                     .map(|s| owner_busy(s.doing))
                                     .unwrap_or(false);
                                 use rand::Rng as _;
                                 let roll: f64 = rand::thread_rng().gen();
-                                if !online.is_empty()
-                                    && decide_visit(
-                                        cfg.persona,
-                                        busy,
-                                        affinity.can_visit(),
-                                        roll,
-                                    )
-                                {
-                                    let t =
-                                        online[rand::thread_rng().gen_range(0..online.len())];
-                                    let body = serde_json::json!({ "target": t.uid });
-                                    match crate::syncclient::post_authed("/visit", &body).await
-                                    {
-                                        Ok(_) => {
-                                            eprintln!(
-                                                "[social] 宠物出门去 {} 家串门了",
-                                                t.nick
-                                            );
-                                            affinity.spend_for_visit();
-                                            went_visiting = Some(Visiting {
-                                                target_uid: t.uid.clone(),
-                                                target_nick: t.nick.clone(),
-                                            });
-                                        }
-                                        Err(e) => {
-                                            eprintln!("[social] 串门被拒：{e}");
+                                if decide_visit(
+                                    cfg.persona,
+                                    busy,
+                                    affinity.can_visit(),
+                                    roll,
+                                ) {
+                                    let weights: Vec<f64> =
+                                        pool.iter().map(|c| c.weight).collect();
+                                    let pick =
+                                        pick_visit_target(&weights, rand::thread_rng().gen());
+                                    if let Some(idx) = pick {
+                                        let t = pool.remove(idx);
+                                        let body =
+                                            serde_json::json!({ "target": t.uid });
+                                        match crate::syncclient::post_authed("/visit", &body)
+                                            .await
+                                        {
+                                            Ok(_) => {
+                                                eprintln!(
+                                                    "[social] 宠物出门去 {} 家串门了",
+                                                    t.nick
+                                                );
+                                                affinity.spend_for_visit();
+                                                went_visiting = Some(Visiting {
+                                                    target_uid: t.uid,
+                                                    target_nick: t.nick,
+                                                    kind: VisitKind::Visit,
+                                                    until: std::time::Instant::now()
+                                                        + Duration::from_secs(
+                                                            VISIT_DURATION_SECS,
+                                                        ),
+                                                });
+                                            }
+                                            Err(e) => {
+                                                eprintln!("[social] 串门被拒：{e}");
+                                            }
                                         }
                                     }
                                 }
@@ -408,15 +539,12 @@ pub fn spawn(app: &AppHandle) {
 
             if let Some(v) = went_visiting {
                 set_visiting(&app, Some(v));
-                visit_deadline =
-                    Some(std::time::Instant::now() + Duration::from_secs(VISIT_DURATION_SECS));
             }
 
-            // 串门到点自动回家
-            if let Some(dl) = visit_deadline {
-                if std::time::Instant::now() >= dl && is_away() {
-                    visit_deadline = None;
-                    let target = visiting_uid();
+            // 出门到点自动回家（串门 8 分钟 / 碰一碰 45 秒共用）
+            if let Some(v) = VISITING.lock().ok().and_then(|g| g.clone()) {
+                if std::time::Instant::now() >= v.until {
+                    let target = Some(v.target_uid);
                     rt.block_on(async {
                         let body = serde_json::json!({ "target": target });
                         if let Err(e) = crate::syncclient::post_authed("/home", &body).await {
@@ -481,6 +609,40 @@ fn handle_event(e: &serde_json::Value, affinity: &mut Affinity, app: &AppHandle)
                         "from_nick": from_nick,
                         "pet_name": pet_name,
                         "line": line,
+                    }
+                }),
+            );
+        }
+        "freq" => {
+            let pet_name = e["event"]["pet_name"].as_str().unwrap_or("").to_string();
+            let _ = app.emit(
+                EVENT_SOCIAL,
+                serde_json::json!({
+                    "event": {
+                        "type": "freq",
+                        "from_uid": from_uid,
+                        "from_nick": from_nick,
+                        "pet_name": pet_name,
+                    }
+                }),
+            );
+        }
+        "accept" => {
+            let _ = app.emit(
+                EVENT_SOCIAL,
+                serde_json::json!({ "event": { "type": "accept", "from_nick": from_nick } }),
+            );
+        }
+        "bump" => {
+            let pet_name = e["event"]["pet_name"].as_str().unwrap_or("").to_string();
+            let _ = app.emit(
+                EVENT_SOCIAL,
+                serde_json::json!({
+                    "event": {
+                        "type": "bump",
+                        "from_uid": from_uid,
+                        "from_nick": from_nick,
+                        "pet_name": pet_name,
                     }
                 }),
             );
@@ -612,5 +774,41 @@ mod tests {
             }
         }
         assert!(hi > 850, "高权重命中率应 ≈90%：实际 {hi}/{n}");
+    }
+
+    #[test]
+    fn 好友申请列表能反序列化() {
+        // 服务端带 at 字段（多余字段应被忽略，不能整包解析失败）
+        let v = serde_json::json!([
+            { "uid": "12345678", "nick": "汤圆", "pet_name": "小团子", "at": 1758000000000_u64 }
+        ]);
+        let got: Vec<FriendRequestView> = serde_json::from_value(v).expect("应能解析");
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].nick, "汤圆");
+    }
+
+    #[test]
+    fn 出门通知序列化_回家不带kind与时长() {
+        let n = AwayNotice {
+            away: false,
+            at_nick: None,
+            kind: None,
+            duration_secs: None,
+        };
+        let s = serde_json::to_string(&n).unwrap();
+        assert!(!s.contains("kind") && !s.contains("duration_secs"), "{s}");
+    }
+
+    #[test]
+    fn 出门通知序列化_出门带kind与时长() {
+        let n = AwayNotice {
+            away: true,
+            at_nick: Some("汤圆".into()),
+            kind: Some(VisitKind::Bump),
+            duration_secs: Some(45),
+        };
+        let v = serde_json::to_value(&n).unwrap();
+        assert_eq!(v["kind"], "bump");
+        assert_eq!(v["duration_secs"], 45);
     }
 }
