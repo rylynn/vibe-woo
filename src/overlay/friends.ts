@@ -601,15 +601,22 @@ export async function onSocialEvent(
   }
 }
 
-/** 订阅宠物离家/回家事件。 */
+/** 订阅宠物离家/回家事件（kind/duration_secs 是新字段，旧事件可能缺省）。 */
 export async function onAwayChange(
-  cb: (n: { away: boolean; at_nick?: string }) => void,
+  cb: (n: {
+    away: boolean;
+    at_nick?: string;
+    kind?: "visit" | "bump";
+    duration_secs?: number;
+  }) => void,
 ): Promise<() => void> {
   try {
-    return await listen<{ away: boolean; at_nick?: string }>(
-      "pet://home-away",
-      (e) => cb(e.payload),
-    );
+    return await listen<{
+      away: boolean;
+      at_nick?: string;
+      kind?: "visit" | "bump";
+      duration_secs?: number;
+    }>("pet://home-away", (e) => cb(e.payload));
   } catch {
     return () => {};
   }

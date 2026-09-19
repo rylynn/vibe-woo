@@ -60,6 +60,8 @@ export class Bubble {
    *                         不提供则整泡可点、或 autoDismissMs 后自动消失
    * @param opts.onConfirm   点确认按钮时先跑这个回调，再关闭气泡。
    *                         之前按钮只会 dismiss，「打个招呼」因此是个死按钮
+   * @param opts.altLabel    次按钮（如「拒绝」）文案，与确认按钮并排
+   * @param opts.onAlt       点次按钮时先跑这个回调，再关闭气泡
    * @param opts.ai          内容来自 LLM 时点亮文本前的 AI 徽章
    */
   show(
@@ -67,6 +69,9 @@ export class Bubble {
     opts: {
       confirmLabel?: string;
       onConfirm?: () => void;
+      /** 次按钮（如「拒绝」）：与确认按钮并排，点击后同样关闭气泡。 */
+      altLabel?: string;
+      onAlt?: () => void;
       autoDismissMs?: number;
       ai?: boolean;
     } = {},
@@ -91,6 +96,18 @@ export class Bubble {
         this.dismiss();
       });
       this.actionsEl.appendChild(btn);
+    }
+
+    if (opts.altLabel) {
+      const alt = document.createElement("button");
+      alt.className = "pet-bubble-confirm";
+      alt.textContent = opts.altLabel;
+      alt.addEventListener("pointerdown", (e) => {
+        e.stopPropagation();
+        opts.onAlt?.();
+        this.dismiss();
+      });
+      this.actionsEl.appendChild(alt);
     }
 
     if (this.timer) clearTimeout(this.timer);
@@ -276,6 +293,64 @@ export class Banner {
     this.open = true;
     // 贴宠物模式下先按已知位置定位，避免上屏第一帧闪在右上角
     if (this.anchored && this.body) this.follow(this.body);
+  }
+
+  /**
+   * 通用小卡片：右上角，一段文字 + 若干操作按钮。
+   * 好友搜索结果、申请回执这类「主动操作的回执」用它 —— 视觉权重
+   * 高于贴宠物的气泡，又不该跟着宠物乱跑。60 秒无操作自动收起。
+   */
+  showCard(opts: {
+    tag: string;
+    text: string;
+    actions: Array<{ label: string; primary?: boolean; onClick: () => void }>;
+  }): void {
+    this.anchored = false;
+    this.setAnchored(false);
+    this.el.className = "pet-banner pet-banner-reminder";
+    this.el.onclick = null;
+    this.el.replaceChildren();
+
+    const head = document.createElement("div");
+    head.className = "pet-banner-head";
+    const tag = document.createElement("span");
+    tag.className = "pet-banner-tag";
+    tag.textContent = opts.tag;
+    const x = document.createElement("button");
+    x.className = "pet-banner-close";
+    x.textContent = "×";
+    x.addEventListener("pointerdown", (e) => {
+      e.stopPropagation();
+      this.dismiss();
+    });
+    head.append(tag, x);
+    this.el.appendChild(head);
+
+    const body = document.createElement("div");
+    body.className = "pet-banner-text";
+    body.textContent = opts.text;
+    this.el.appendChild(body);
+
+    const actions = document.createElement("div");
+    actions.className = "pet-banner-actions";
+    for (const a of opts.actions) {
+      const btn = document.createElement("button");
+      btn.className = a.primary ? "pet-banner-btn primary" : "pet-banner-btn";
+      btn.textContent = a.label;
+      btn.addEventListener("pointerdown", (e) => {
+        e.stopPropagation();
+        a.onClick();
+        this.dismiss();
+      });
+      actions.appendChild(btn);
+    }
+    this.el.appendChild(actions);
+
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = setTimeout(() => this.dismiss(), 60 * 1000);
+
+    this.el.style.display = "block";
+    this.open = true;
   }
 
   /**
