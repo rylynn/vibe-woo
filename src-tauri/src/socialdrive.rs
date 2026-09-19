@@ -131,6 +131,48 @@ pub fn decide_visit(
     roll < threshold
 }
 
+/// 碰一碰冷却（秒）：与服务端 BUMP_COOLDOWN_MS 同值，客户端先拦省一次请求。
+/// 碰一碰入口在后续任务接入，先占住常量。
+#[allow(dead_code)]
+pub const BUMP_COOLDOWN_SECS: u64 = 60;
+
+/// 碰一碰本地限流（纯函数）：距冷却截止还需等多少秒（0 = 可碰）。
+/// 存「截止时刻」而不是「上次时刻」—— 服务端限流返回的剩余秒数
+/// 可以直接换算成截止时刻写回来，两端倒计时天然对齐。
+/// 碰一碰入口在后续任务接入，先占住函数。
+#[allow(dead_code)]
+pub fn bump_cooldown_left(
+    blocked_until: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> u64 {
+    blocked_until
+        .map(|until| until.saturating_duration_since(now).as_secs())
+        .unwrap_or(0)
+}
+
+/// 串门目标选择（纯函数）：权重加权随机。roll 为 0..1 均匀随机，
+/// 返回选中的候选下标；池空或总权重非正返回 None。
+/// 串门抽签在后续任务接入，先占住函数。
+#[allow(dead_code)]
+pub fn pick_visit_target(weights: &[f64], roll: f64) -> Option<usize> {
+    if weights.is_empty() {
+        return None;
+    }
+    let total: f64 = weights.iter().sum();
+    if !(total > 0.0) {
+        return None;
+    }
+    let hit = roll * total;
+    let mut acc = 0.0;
+    for (i, w) in weights.iter().enumerate() {
+        acc += w;
+        if hit < acc {
+            return Some(i);
+        }
+    }
+    Some(weights.len() - 1) // 浮点舍入兜底：roll 恰落在最后一段边界上
+}
+
 /// 主人是否正忙（宠物应留守陪伴，不出门）。
 ///
 /// 专注产出的任何节奏都算忙 —— 盯屏幕思考也一样；
@@ -514,5 +556,61 @@ mod tests {
         ] {
             assert!(!owner_busy(d), "{d:?} 不算忙，宠物可自由活动");
         }
+    }
+
+    #[test]
+    fn 碰一碰冷却窗口() {
+        let now = std::time::Instant::now();
+        assert_eq!(bump_cooldown_left(None, now), 0, "没记录 → 可碰");
+        assert_eq!(bump_cooldown_left(Some(now), now), 0, "已到点 → 可碰");
+        assert_eq!(
+            bump_cooldown_left(Some(now + Duration::from_secs(1)), now),
+            1
+        );
+        assert_eq!(
+            bump_cooldown_left(Some(now + Duration::from_secs(59)), now),
+            59
+        );
+        assert_eq!(
+            bump_cooldown_left(Some(now - Duration::from_secs(5)), now),
+            0,
+            "过期记录 → 可碰"
+        );
+    }
+
+    #[test]
+    fn 目标选择_空池与非正权重() {
+        assert_eq!(pick_visit_target(&[], 0.5), None);
+        assert_eq!(pick_visit_target(&[0.0, 0.0], 0.5), None);
+    }
+
+    #[test]
+    fn 目标选择_单候选必中() {
+        assert_eq!(pick_visit_target(&[7.0], 0.0), Some(0));
+        assert_eq!(pick_visit_target(&[7.0], 0.999), Some(0));
+    }
+
+    #[test]
+    fn 目标选择_按权重分段命中() {
+        // 权重 [90, 10]：roll < 0.9 命中 0，roll ≥ 0.9 命中 1
+        assert_eq!(pick_visit_target(&[90.0, 10.0], 0.0), Some(0));
+        assert_eq!(pick_visit_target(&[90.0, 10.0], 0.89), Some(0));
+        assert_eq!(pick_visit_target(&[90.0, 10.0], 0.90), Some(1));
+        assert_eq!(pick_visit_target(&[90.0, 10.0], 0.99), Some(1));
+        // roll = 1.0 落在边界外 → 兜底最后一个
+        assert_eq!(pick_visit_target(&[90.0, 10.0], 1.0), Some(1));
+    }
+
+    #[test]
+    fn 目标选择_高亲密度好友统计上更常被选() {
+        // 等距采样 1000 个 roll：权重 90 的命中率应 ≈ 90%
+        let mut hi = 0;
+        let n = 1000;
+        for k in 0..n {
+            if pick_visit_target(&[90.0, 10.0], (k as f64 + 0.5) / n as f64) == Some(0) {
+                hi += 1;
+            }
+        }
+        assert!(hi > 850, "高权重命中率应 ≈90%：实际 {hi}/{n}");
     }
 }
