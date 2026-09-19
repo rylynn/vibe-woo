@@ -387,12 +387,15 @@ pub async fn friend_reject(target: String) -> Result<(), String> {
     Ok(())
 }
 
-/// 碰一碰的结果：限流时带剩余秒数，前端据此对齐按钮倒计时。
+/// 碰一碰的结果：限流时带剩余秒数，业务失败带文案，前端据此画倒计时或卡片。
 #[derive(Debug, Serialize)]
 pub struct BumpOutcome {
     pub ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retry_after_secs: Option<u64>,
+    /// 业务失败文案（宠物不在家 / 已不是好友等），前端弹卡片用。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub msg: Option<String>,
 }
 
 /// 碰一碰：宠物去对方家快闪 45 秒。本地限流先拦，服务端二次校验。
@@ -405,11 +408,25 @@ pub async fn friend_bump(
     target_nick: String,
 ) -> Result<BumpOutcome, String> {
     match crate::socialdrive::try_begin_bump(&app, target_uid, target_nick).await {
-        Ok(()) => Ok(BumpOutcome { ok: true, retry_after_secs: None }),
-        // Err(0) = 业务失败：无倒计时；Err(>0) = 限流/网络失败的剩余秒数
-        Err(left) => Ok(BumpOutcome {
+        Ok(()) => Ok(BumpOutcome {
+            ok: true,
+            retry_after_secs: None,
+            msg: None,
+        }),
+        Err(crate::socialdrive::BumpDeny::Cooldown(left)) => Ok(BumpOutcome {
             ok: false,
             retry_after_secs: (left > 0).then_some(left),
+            msg: None,
+        }),
+        Err(crate::socialdrive::BumpDeny::Away) => Ok(BumpOutcome {
+            ok: false,
+            retry_after_secs: None,
+            msg: Some("宠物不在家，等 TA 回来再碰".into()),
+        }),
+        Err(crate::socialdrive::BumpDeny::Denied(s)) => Ok(BumpOutcome {
+            ok: false,
+            retry_after_secs: None,
+            msg: Some(s),
         }),
     }
 }

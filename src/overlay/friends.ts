@@ -68,6 +68,8 @@ export const PET_NAME_MAX = 30;
 const PET_NAME_RE = /^[\p{L}\p{N}_\-\s·]+$/u;
 /** 招呼冷却（服务端权威 60 秒，这里只做展示，不负责拦）。 */
 const GREET_COOLDOWN_MS = 60_000;
+/** 碰一碰冷却（秒）：与 Rust BUMP_COOLDOWN_SECS、服务端 BUMP_COOLDOWN_MS 三处同值。 */
+const BUMP_COOLDOWN_SECS = 60;
 
 export type PetNameCheck =
   | { ok: true; name: string }
@@ -644,19 +646,26 @@ export class FriendsPanel {
     const btn = this.bumpBtns.get(f.uid);
     if (btn) btn.disabled = true;
     try {
-      const r = await invoke<{ ok: boolean; retry_after_secs?: number }>("friend_bump", {
-        targetUid: f.uid,
-        targetNick: f.nick,
-      });
+      const r = await invoke<{ ok: boolean; retry_after_secs?: number; msg?: string }>(
+        "friend_bump",
+        { targetUid: f.uid, targetNick: f.nick },
+      );
       // 成功按满 60 秒防抖；限流用服务端剩余秒数对齐；
-      // ok=false 且无 retry_after_secs 是业务失败（如已非好友），不冷却
-      const left = r.ok ? 60 : (r.retry_after_secs ?? 0);
+      // ok=false 且无 retry_after_secs 是业务失败（宠物不在家/已非好友），不冷却
+      const left = r.ok ? BUMP_COOLDOWN_SECS : (r.retry_after_secs ?? 0);
       if (left > 0) {
         this.bumpUntil.set(f.uid, Date.now() + left * 1000);
       }
+      if (!r.ok && r.msg) {
+        this.banner.showCard({
+          tag: "碰一碰",
+          text: r.msg,
+          actions: [{ label: "知道了", onClick: () => {} }],
+        });
+      }
     } catch {
       // 网络失败也进冷却：别让用户连点打爆服务端
-      this.bumpUntil.set(f.uid, Date.now() + 60_000);
+      this.bumpUntil.set(f.uid, Date.now() + BUMP_COOLDOWN_SECS * 1000);
     }
     this.applyBumpCooldown(f.uid);
     this.startTick();

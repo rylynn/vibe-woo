@@ -66,7 +66,7 @@
 ### 命令层
 
 - `syncclient.rs` 新增 `friend_search` / `friend_request` / `friend_accept` / `friend_reject` / `friend_bump` 封装，走现有 `post_authed`。
-- `socialcmd.rs` 对应五个 Tauri 命令（`main.rs` 注册）；错误只回枚举类别（`not_found` / `already_friends` / `already_requested` / `rate_limited` / `not_friends` / 网络失败），不透传服务端响应体。
+- `socialcmd.rs` 对应五个 Tauri 命令（`main.rs` 注册）；错误直传服务端中文文案（文案是服务端代码内常量，不含内部细节；与搜索/申请命令同一策略），网络失败回本地兜底文案。
 
 ### 同步循环（socialdrive.rs）
 
@@ -116,7 +116,7 @@
 
 ## 错误处理
 
-- 服务端错误码全集：`not_found` / `already_friends` / `already_requested` / `rate_limited`（带 `retry_after`）/ `not_friends` / 鉴权失败。
+- 服务端错误以中文文案直传客户端（语义类别：找不到该用户 / 已是好友 / 已申请过 / 限频（带 `retry_after`）/ 非好友 / 鉴权失败），文案是服务端代码内常量，不含内部细节。
 - 客户端每个失败路径一句人话文案（Banner），网络失败统一「网络不太好，稍后再试」。
 - 迟到/重复事件：bump 动画同 uid 60s 去重；重复 accept 返回 `not_found` 幂等。
 - 读-改-写竞态沿用「最后写赢 + 长度上限」容忍策略，不引入新原语。

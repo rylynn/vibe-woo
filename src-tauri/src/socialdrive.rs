@@ -201,8 +201,20 @@ fn bump_deny(v: &serde_json::Value) -> u64 {
     v["retry_after"].as_u64().unwrap_or(0)
 }
 
+/// 碰一碰被拒的三类原因（命令层据此区分倒计时与文案）。
+pub enum BumpDeny {
+    /// 冷却中：剩余秒数（本地/服务端限流、网络失败兜底）。
+    Cooldown(u64),
+    /// 宠物不在家（串门或上一次碰一碰未归）：出门期间拒绝新的碰一碰，
+    /// 避免覆写 VISITING 把进行中的串门孤儿化（对方访客名单残留幽灵）。
+    Away,
+    /// 其他业务失败（非好友等），携带服务端文案。
+    Denied(String),
+}
+
 /// 串门目标选择（纯函数）：权重加权随机。roll 为 0..1 均匀随机，
 /// 返回选中的候选下标；池空或总权重非正返回 None。
+/// 调用方保证权重非负（好友侧恒为 aff + 10 下限）。
 pub fn pick_visit_target(weights: &[f64], roll: f64) -> Option<usize> {
     if weights.is_empty() {
         return None;
@@ -318,22 +330,32 @@ pub fn go_bump(app: &AppHandle, target_uid: String, target_nick: String) {
     }
 }
 
-/// 碰一碰入口（friend_bump 命令调用）：本地限流先拦（省一次网络往返），
-/// 服务端确认后设置 45 秒出门状态。Err(>0) = 被冷却拦下（剩余秒数）；
-/// Err(0) = 其他业务失败（非好友等），不记冷却。
+/// 碰一碰入口（friend_bump 命令调用）：出门期间直接拒绝（宠物真的不在家）；
+/// 本地限流先拦（省一次网络往返），服务端确认后设置 45 秒出门状态。
+///
+/// Err 语义：
+///   - [`BumpDeny::Cooldown`]：被冷却拦下（本地限流 / 服务端限流 / 网络失败兜底），
+///     携带剩余秒数，前端据此画倒计时；
+///   - [`BumpDeny::Away`]：宠物不在家，不记冷却；
+///   - [`BumpDeny::Denied`]：其他业务失败（非好友等），不记冷却，携带服务端文案。
 pub async fn try_begin_bump(
     app: &AppHandle,
     target_uid: String,
     target_nick: String,
-) -> Result<(), u64> {
+) -> Result<(), BumpDeny> {
+    // 出门期间拒绝新的碰一碰：覆写 VISITING 会把进行中的串门孤儿化
+    //（旧串门的 /home 永不上报，对方访客名单残留幽灵最长一个心跳周期）
+    if is_away() {
+        return Err(BumpDeny::Away);
+    }
     let now = std::time::Instant::now();
     {
         let Ok(map) = bump_last().lock() else {
-            return Err(BUMP_COOLDOWN_SECS);
+            return Err(BumpDeny::Cooldown(BUMP_COOLDOWN_SECS));
         };
         let left = bump_cooldown_left(map.get(&target_uid).copied(), now);
         if left > 0 {
-            return Err(left);
+            return Err(BumpDeny::Cooldown(left));
         }
     }
 
@@ -359,22 +381,25 @@ pub async fn try_begin_bump(
                         std::time::Instant::now() + Duration::from_secs(left),
                     );
                 }
-                Err(left)
+                Err(BumpDeny::Cooldown(left))
             } else {
-                // 其他业务错误（非好友等）：不记冷却，Err(0) 交命令层区别展示
-                Err(0)
+                // 其他业务错误（非好友等）：不记冷却，文案交命令层区别展示
+                Err(BumpDeny::Denied(
+                    v["error"].as_str().unwrap_or("没碰成").to_string(),
+                ))
             }
         }
-        Err(_) => {
+        Err(e) => {
             // 网络失败也按满冷却落本地闸门（防连点打爆服务端），
             // 并让前端画出对齐的倒计时
+            eprintln!("[social] 碰一碰失败（本地按满冷却拦截）：{e}");
             if let Ok(mut map) = bump_last().lock() {
                 map.insert(
                     target_uid.clone(),
                     std::time::Instant::now() + Duration::from_secs(BUMP_COOLDOWN_SECS),
                 );
             }
-            Err(BUMP_COOLDOWN_SECS)
+            Err(BumpDeny::Cooldown(BUMP_COOLDOWN_SECS))
         }
     }
 }
@@ -394,6 +419,8 @@ pub fn spawn(app: &AppHandle) {
         let mut interval = Duration::from_secs(5); // 首拍快速拿数据
         // 心跳连续失败时的退避基数，成功一次即复位
         let mut backoff_secs: u64 = 60;
+        // pet://friends 的发射边沿：记录上一拍是否非空，非空→空的跳变要补发一次
+        let mut friends_notice_nonempty = false;
 
         loop {
             std::thread::sleep(interval);
@@ -476,7 +503,10 @@ pub fn spawn(app: &AppHandle) {
                             v["requests"].clone(),
                         )
                         .unwrap_or_default();
-                        if !friends.is_empty() || !requests.is_empty() {
+                        let nonempty = !friends.is_empty() || !requests.is_empty();
+                        // 空态不重复发（面板开着时每拍整树重绘会吃掉输入焦点），
+                        // 但非空→空的跳变要补发一次：菜单红点/列表只能靠这个事件摘除
+                        if nonempty || friends_notice_nonempty {
                             let _ = app.emit(
                                 EVENT_FRIENDS,
                                 FriendsNotice {
@@ -485,6 +515,7 @@ pub fn spawn(app: &AppHandle) {
                                 },
                             );
                         }
+                        friends_notice_nonempty = nonempty;
 
                         // —— 串门决策（persona 自动触发，非人工）——
                         if !friends.is_empty() && !is_away() {
