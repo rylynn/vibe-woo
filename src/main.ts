@@ -209,6 +209,8 @@ function fit(): void {
   // 改 canvas 尺寸会清空整张位图：访客若因「指纹未变」不重画就会凭空消失，
   // 而命中框还在上报 —— 屏幕上出现看不见却拦鼠标的区域
   guests.invalidate();
+  // resize 同样清空整张位图：快闪层也要作废指纹重画，否则短暂隐形
+  flash.invalidate();
 }
 fit();
 window.addEventListener("resize", fit);
@@ -688,7 +690,7 @@ function onFrame(now: number): void {
     const host = pet.body;
     const affected = [
       ...guests.list.map((g) => g.lastAffected),
-      flash.active?.lastAffected ?? null,
+      ...flash.activePets.map((g) => g.lastAffected),
     ];
     for (const d of affected) {
       if (d && overlaps(d, host)) {
