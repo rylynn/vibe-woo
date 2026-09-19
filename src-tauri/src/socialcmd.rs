@@ -1,4 +1,4 @@
-//! 社交命令层：注册 / 登录 / 宠物改名 / 加删好友 / 召回。
+//! 社交命令层：注册 / 登录 / 宠物改名 / 好友搜索·申请·碰一碰 / 召回。
 //!
 //! 安全要点：
 //!   - 全部输入先过本地校验（account.rs），不合格不发起网络请求
@@ -335,12 +335,83 @@ pub async fn set_pet_name(app: AppHandle, name: String) -> Result<String, String
     Ok(name)
 }
 
-/// 加好友：uid 或昵称。
+/// 搜索结果卡片（服务端只回三字段，不带在线状态/亲密度）。
+#[derive(Debug, Clone, Serialize)]
+pub struct SearchHit {
+    pub uid: String,
+    pub nick: String,
+    pub pet_name: String,
+}
+
+/// 搜索用户：精确 uid 或完整昵称。命中返回公开信息卡。
 #[tauri::command]
-pub async fn add_friend(target: String) -> Result<String, String> {
+pub async fn friend_search(target: String) -> Result<SearchHit, String> {
     let target = account::valid_target(&target)?;
-    let v = crate::syncclient::post_authed("/friends/add", &serde_json::json!({ "target": target })).await?;
-    Ok(v["note"].as_str().unwrap_or("已添加").to_string())
+    let v = crate::syncclient::post_authed(
+        "/friends/search",
+        &serde_json::json!({ "target": target }),
+    )
+    .await?;
+    Ok(SearchHit {
+        uid: v["uid"].as_str().unwrap_or("").to_string(),
+        nick: v["nick"].as_str().unwrap_or("").to_string(),
+        pet_name: v["pet_name"].as_str().unwrap_or("").to_string(),
+    })
+}
+
+/// 发好友申请：对方接受后才建立关系。
+#[tauri::command]
+pub async fn friend_request(target: String) -> Result<(), String> {
+    let target = account::valid_target(&target)?;
+    crate::syncclient::post_authed(
+        "/friends/request",
+        &serde_json::json!({ "target": target }),
+    )
+    .await?;
+    Ok(())
+}
+
+/// 接受好友申请（target 为对方 uid）。
+#[tauri::command]
+pub async fn friend_accept(target: String) -> Result<(), String> {
+    crate::syncclient::post_authed("/friends/accept", &serde_json::json!({ "target": target }))
+        .await?;
+    Ok(())
+}
+
+/// 拒绝好友申请（target 为对方 uid）。
+#[tauri::command]
+pub async fn friend_reject(target: String) -> Result<(), String> {
+    crate::syncclient::post_authed("/friends/reject", &serde_json::json!({ "target": target }))
+        .await?;
+    Ok(())
+}
+
+/// 碰一碰的结果：限流时带剩余秒数，前端据此对齐按钮倒计时。
+#[derive(Debug, Serialize)]
+pub struct BumpOutcome {
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_after_secs: Option<u64>,
+}
+
+/// 碰一碰：宠物去对方家快闪 45 秒。本地限流先拦，服务端二次校验。
+/// 被冷却拦下不算错误 —— 返回 BumpOutcome 让前端画倒计时；
+/// ok=false 且无 retry_after_secs 是业务失败（如已非好友），不画倒计时。
+#[tauri::command]
+pub async fn friend_bump(
+    app: AppHandle,
+    target_uid: String,
+    target_nick: String,
+) -> Result<BumpOutcome, String> {
+    match crate::socialdrive::try_begin_bump(&app, target_uid, target_nick).await {
+        Ok(()) => Ok(BumpOutcome { ok: true, retry_after_secs: None }),
+        // Err(0) = 业务失败：无倒计时；Err(>0) = 限流/网络失败的剩余秒数
+        Err(left) => Ok(BumpOutcome {
+            ok: false,
+            retry_after_secs: (left > 0).then_some(left),
+        }),
+    }
 }
 
 /// 删好友：任何一方删除即双向解除。

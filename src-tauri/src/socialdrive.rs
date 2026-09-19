@@ -321,8 +321,6 @@ pub fn go_bump(app: &AppHandle, target_uid: String, target_nick: String) {
 /// 碰一碰入口（friend_bump 命令调用）：本地限流先拦（省一次网络往返），
 /// 服务端确认后设置 45 秒出门状态。Err(>0) = 被冷却拦下（剩余秒数）；
 /// Err(0) = 其他业务失败（非好友等），不记冷却。
-/// friend_bump 命令在后续任务接入，届时删掉这条 allow。
-#[allow(dead_code)]
 pub async fn try_begin_bump(
     app: &AppHandle,
     target_uid: String,
@@ -367,7 +365,17 @@ pub async fn try_begin_bump(
                 Err(0)
             }
         }
-        Err(_) => Err(BUMP_COOLDOWN_SECS), // 网络失败按满冷却处理，防连点打爆服务端
+        Err(_) => {
+            // 网络失败也按满冷却落本地闸门（防连点打爆服务端），
+            // 并让前端画出对齐的倒计时
+            if let Ok(mut map) = bump_last().lock() {
+                map.insert(
+                    target_uid.clone(),
+                    std::time::Instant::now() + Duration::from_secs(BUMP_COOLDOWN_SECS),
+                );
+            }
+            Err(BUMP_COOLDOWN_SECS)
+        }
     }
 }
 
