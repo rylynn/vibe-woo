@@ -279,6 +279,14 @@ fn reset_tcc_entry(app: &AppHandle, service: &str) {
 fn run_ocr_flow(app: &AppHandle) -> ReadOutcome {
     use std::time::Duration;
 
+    // 0. 无「屏幕录制」授权直接失败：截图注定失败，不该让用户白框一趟。
+    //    快速走 not_trusted，前端立刻给授权引导（而不是先弹框选层再报错）。
+    if !capture::screen_capture_permission() {
+        return ReadOutcome::Error {
+            code: ReadError::NotTrusted,
+        };
+    }
+
     // 1. 框选（阻塞，最多 60s；取消/超时 → Cancelled）
     let region = match selection_panel::capture_region(app, Duration::from_secs(60)) {
         Ok(r) => r,

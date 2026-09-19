@@ -18,6 +18,7 @@ import {
   copy as copyText,
   startOcr,
   requestScreenPermission,
+  screenPermission,
   search as searchText,
   translate as translateText,
   SessionGuard,
@@ -51,6 +52,12 @@ export class TextToolsPanel {
   private heldResult: ResultPayload | null = null;
   /** 框选层出现确认超时句柄。 */
   private layerTimer: number | null = null;
+  /**
+   * 当前触发已收到框选层显示确认。shown 事件可能先于会话号（invoke 返回）
+   * 到达 —— 那时兜底计时器还没武装，只清计时器等于漏收，随后武装的
+   * 计时器会在拖拽途中误报「启动失败」。记标志，武装前先看它。
+   */
+  private layerShown = false;
   /** 框选层启动失败（与取词失败分开：提示语与出路不同）。 */
   private layerFailed = false;
   private cfg: ConfigView | null = null;
@@ -110,6 +117,7 @@ export class TextToolsPanel {
     this.translateError = null;
     this.searchFailed = false;
     this.layerFailed = false;
+    this.layerShown = false;
     this.permHint = false;
     this.sourceApp = null;
     this.guard.cancel();
@@ -127,7 +135,9 @@ export class TextToolsPanel {
       }
       this.open = true;
       this.el.style.display = "none";
-      this.armLayerWatchdog();
+      // shown 确认已在竞争期先到（见 layerShown）：不再武装兜底，
+      // 否则拖框途中必然误报「启动失败」
+      if (!this.layerShown) this.armLayerWatchdog();
     } catch (e) {
       if (seq !== this.startSeq) return;
       // 入口调用失败（如取词命令不存在）：直接给出可读错误
@@ -140,6 +150,9 @@ export class TextToolsPanel {
 
   /** 框选层出现确认（main.ts 转发 pet://text-tools-selection-shown）。 */
   onSelectionShown(): void {
+    // 计时器可能还没武装（会话号在途的竞争期）：先记标志再清计时器，
+    // 这样 adopt 之后 start() 看标志决定要不要武装，两种到达顺序都正确
+    this.layerShown = true;
     this.clearLayerTimer();
   }
 
@@ -199,6 +212,17 @@ export class TextToolsPanel {
       this.layerFailed = true;
       this.status = "error";
       this.show(false);
+      // 兜底之兜底：无授权时整个流程在框选前就该以 not_trusted 快速失败
+      // （Rust 已拦），若授权缺失还走到这里，「重试」注定再失败 ——
+      // 核对一次授权，缺失就换成授权引导（复用 not_trusted 渲染分支）
+      void screenPermission()
+        .then((ok) => {
+          if (ok || !this.layerFailed || this.status !== "error") return;
+          this.layerFailed = false;
+          this.readError = "not_trusted";
+          this.render();
+        })
+        .catch(() => {});
     }, SELECTION_SHOWN_WATCHDOG_MS);
   }
 

@@ -55,6 +55,8 @@ beforeEach(() => {
     if (cmd === "text_tools_start_ocr") {
       return nextSession++;
     }
+    // 默认视为已授权（屏幕录制查询）；未授权场景单独覆写
+    if (cmd === "text_tools_screen_permission") return true;
     if (cmd === "text_tools_translate") return { kind: "ok", text: "译文" };
     return undefined;
   });
@@ -327,6 +329,49 @@ describe("取词浮窗", () => {
       await vi.advanceTimersByTimeAsync(1_500);
       expect(document.querySelector(".pet-tt-error")).toBeNull();
       expect(panel.isOpen).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("shown 确认先于会话号到达也不误报启动失败（IPC 顺序竞争）", async () => {
+    vi.useFakeTimers();
+    try {
+      const panel = new TextToolsPanel();
+      // 不 await：invoke 仍在途（会话号没回来），shown 事件先到了 ——
+      // 若只清计时器（此刻还没武装），随后武装的计时器会在拖框途中
+      // 误报「框选层启动失败」盖在框选层上（2026-09-19 实测复现）
+      const pending = panel.start();
+      panel.onSelectionShown();
+      await pending;
+
+      await vi.advanceTimersByTimeAsync(1_500);
+      expect(document.querySelector(".pet-tt-error")).toBeNull();
+      expect(panel.isOpen).toBe(true); // 仍处于框选等待，静候结果
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("框选层启动失败且未授权时换成授权引导（重试注定再失败）", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "text_tools_start_ocr") return nextSession++;
+      if (cmd === "text_tools_screen_permission") return false;
+      return undefined;
+    });
+    vi.useFakeTimers();
+    try {
+      const panel = new TextToolsPanel();
+      await startSession(panel);
+      // shown 事件一直不来 → 兜底触发「启动失败」（同步推进：微任务先不冲，
+      // 保住中间态供断言）
+      vi.advanceTimersByTime(1_500);
+      expect(document.querySelector(".pet-tt-error")?.textContent).toContain("框选层启动失败");
+      // 授权查询的 promise 链走完后，换成「需要屏幕录制授权」+ 去授权入口
+      await vi.advanceTimersByTimeAsync(0);
+      const err = document.querySelector(".pet-tt-error")?.textContent ?? "";
+      expect(err).toContain("屏幕录制");
+      expect(buttonByText(document.body, "去系统设置授权")).toBeTruthy();
     } finally {
       vi.useRealTimers();
     }
