@@ -195,6 +195,12 @@ pub fn bump_cooldown_left(
         .unwrap_or(0)
 }
 
+/// 碰一碰被拒分类（纯函数）：带 retry_after 的限流返回剩余秒数（>0），
+/// 其他业务失败（非好友等）返回 0 —— 两类对本地冷却的处理不同。
+fn bump_deny(v: &serde_json::Value) -> u64 {
+    v["retry_after"].as_u64().unwrap_or(0)
+}
+
 /// 串门目标选择（纯函数）：权重加权随机。roll 为 0..1 均匀随机，
 /// 返回选中的候选下标；池空或总权重非正返回 None。
 pub fn pick_visit_target(weights: &[f64], roll: f64) -> Option<usize> {
@@ -239,6 +245,38 @@ fn set_visiting(app: &AppHandle, v: Option<Visiting>) {
     let _ = app.emit(EVENT_AWAY, notice);
 }
 
+/// 当前出门记录是否仍是「这一次」（同一目标 + 同一到期时刻）。
+///
+/// 回家上报的网络往返窗口里，用户可能已发起新一次出门 —— 旧一次的
+/// 到期处理不能把新状态误清成「在家」。碰一碰对同一好友有 60 秒冷却
+/// （> 45 秒出门时长），同目标的两次出门不会重叠，(uid, until) 足以唯一定位。
+fn visiting_is(expect: &Visiting) -> bool {
+    VISITING
+        .lock()
+        .map(|g| {
+            g.as_ref()
+                .map(|cur| cur.target_uid == expect.target_uid && cur.until == expect.until)
+                .unwrap_or(false)
+        })
+        .unwrap_or(false)
+}
+
+/// 到期回家的共同路径（串门循环兜底与碰一碰定时器共用）：
+/// 先核身份再上报，上报完再核一次才清空 —— 两头校验把误清新出门
+/// 状态的窗口压到锁粒度以内。
+async fn expire_visiting(app: &AppHandle, expect: Visiting) {
+    if !visiting_is(&expect) {
+        return;
+    }
+    let body = serde_json::json!({ "target": expect.target_uid });
+    if let Err(e) = crate::syncclient::post_authed("/home", &body).await {
+        eprintln!("[social] 回家上报失败：{e}");
+    }
+    if visiting_is(&expect) {
+        set_visiting(app, None);
+    }
+}
+
 /// 立即回家（用户点召回图标）。上报服务端 + 本地状态即时恢复，
 /// 不等下一轮心跳。
 pub fn come_home(app: &AppHandle, target: Option<String>) {
@@ -261,19 +299,28 @@ pub fn come_home(app: &AppHandle, target: Option<String>) {
 
 /// 碰一碰出门：45 秒快闪后自动回家。由 friend_bump 命令在服务端确认后调用。
 pub fn go_bump(app: &AppHandle, target_uid: String, target_nick: String) {
-    set_visiting(
-        app,
-        Some(Visiting {
-            target_uid,
-            target_nick,
-            kind: VisitKind::Bump,
-            until: std::time::Instant::now() + Duration::from_secs(BUMP_DURATION_SECS),
-        }),
-    );
+    let v = Visiting {
+        target_uid,
+        target_nick,
+        kind: VisitKind::Bump,
+        until: std::time::Instant::now() + Duration::from_secs(BUMP_DURATION_SECS),
+    };
+    set_visiting(app, Some(v.clone()));
+    // 到点回家挂独立定时器，不等心跳循环 —— 循环默认 180 秒一拍，
+    // 会把「45 秒快闪」拖成最长 225 秒。当前在异步上下文（friend_bump
+    // 命令）才挂得上；挂不上时仍有循环尾部的兜底检查。
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        let app = app.clone();
+        handle.spawn(async move {
+            tokio::time::sleep(Duration::from_secs(BUMP_DURATION_SECS)).await;
+            expire_visiting(&app, v).await;
+        });
+    }
 }
 
 /// 碰一碰入口（friend_bump 命令调用）：本地限流先拦（省一次网络往返），
-/// 服务端确认后设置 45 秒出门状态。Err(剩余秒数) = 被冷却拦下。
+/// 服务端确认后设置 45 秒出门状态。Err(>0) = 被冷却拦下（剩余秒数）；
+/// Err(0) = 其他业务失败（非好友等），不记冷却。
 /// friend_bump 命令在后续任务接入，届时删掉这条 allow。
 #[allow(dead_code)]
 pub async fn try_begin_bump(
@@ -298,22 +345,27 @@ pub async fn try_begin_bump(
             if let Ok(mut map) = bump_last().lock() {
                 map.insert(
                     target_uid.clone(),
-                    now + Duration::from_secs(BUMP_COOLDOWN_SECS),
+                    std::time::Instant::now() + Duration::from_secs(BUMP_COOLDOWN_SECS),
                 );
             }
             go_bump(app, target_uid, target_nick);
             Ok(())
         }
         Ok(v) => {
-            // 服务端限流（多设备/时钟差）：以服务端剩余秒数对齐本地倒计时
-            let left = v["retry_after"].as_u64().unwrap_or(BUMP_COOLDOWN_SECS);
-            if let Ok(mut map) = bump_last().lock() {
-                map.insert(
-                    target_uid.clone(),
-                    std::time::Instant::now() + Duration::from_secs(left),
-                );
+            let left = bump_deny(&v);
+            if left > 0 {
+                // 服务端限流（多设备/时钟差）：以服务端剩余秒数对齐本地倒计时
+                if let Ok(mut map) = bump_last().lock() {
+                    map.insert(
+                        target_uid.clone(),
+                        std::time::Instant::now() + Duration::from_secs(left),
+                    );
+                }
+                Err(left)
+            } else {
+                // 其他业务错误（非好友等）：不记冷却，Err(0) 交命令层区别展示
+                Err(0)
             }
-            Err(left)
         }
         Err(_) => Err(BUMP_COOLDOWN_SECS), // 网络失败按满冷却处理，防连点打爆服务端
     }
@@ -541,17 +593,11 @@ pub fn spawn(app: &AppHandle) {
                 set_visiting(&app, Some(v));
             }
 
-            // 出门到点自动回家（串门 8 分钟 / 碰一碰 45 秒共用）
+            // 出门到点自动回家（串门 8 分钟 / 碰一碰 45 秒共用）。
+            // 碰一碰平时由 go_bump 挂的独立定时器负责精确到点，这里兜底。
             if let Some(v) = VISITING.lock().ok().and_then(|g| g.clone()) {
                 if std::time::Instant::now() >= v.until {
-                    let target = Some(v.target_uid);
-                    rt.block_on(async {
-                        let body = serde_json::json!({ "target": target });
-                        if let Err(e) = crate::syncclient::post_authed("/home", &body).await {
-                            eprintln!("[social] 回家上报失败：{e}");
-                        }
-                    });
-                    set_visiting(&app, None);
+                    rt.block_on(expire_visiting(&app, v));
                 }
             }
         }
@@ -810,5 +856,32 @@ mod tests {
         let v = serde_json::to_value(&n).unwrap();
         assert_eq!(v["kind"], "bump");
         assert_eq!(v["duration_secs"], 45);
+    }
+
+    #[test]
+    fn 碰一碰限流与业务失败分类() {
+        let limited = serde_json::json!({ "error": "碰得太快啦，歇一会儿", "retry_after": 42 });
+        assert_eq!(bump_deny(&limited), 42);
+        let denied = serde_json::json!({ "error": "只能碰一碰好友" });
+        assert_eq!(bump_deny(&denied), 0);
+    }
+
+    #[test]
+    fn 出门身份校验_换代后不再误清() {
+        let v1 = Visiting {
+            target_uid: "12345678".into(),
+            target_nick: "甲".into(),
+            kind: VisitKind::Bump,
+            until: std::time::Instant::now(),
+        };
+        *VISITING.lock().unwrap() = Some(v1.clone());
+        assert!(visiting_is(&v1), "当前就是这一次 → 命中");
+        let v2 = Visiting {
+            target_uid: "87654321".into(),
+            ..v1.clone()
+        };
+        assert!(!visiting_is(&v2), "已换成新目标 → 旧的不再命中");
+        *VISITING.lock().unwrap() = None;
+        assert!(!visiting_is(&v1), "已回家 → 不命中");
     }
 }
