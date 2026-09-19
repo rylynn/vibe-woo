@@ -136,5 +136,15 @@ const c = await newUser("pet_carol2", "丙_h3i4j5", "丙崽");
 const gHidden = await call("POST", "/api/greet", { target: h.uid }, c.token);
 ok(gHidden.json.error === "对方现在不想被打扰", `打不到隐身的人：${gHidden.json.error}`);
 
+// ---------- 好友申请与碰一碰（新路由过适配层） ----------
+const qW = await call("POST", "/api/friends/request", { target: b.uid }, a.token);
+ok(qW.status === 200 && qW.json.ok, `friends/request 过适配层：${JSON.stringify(qW.json)}`);
+const accW = await call("POST", "/api/friends/accept", { target: a.uid }, b.token);
+ok(accW.status === 200 && accW.json.ok, `friends/accept：${JSON.stringify(accW.json)}`);
+const bpW = await call("POST", "/api/friends/bump", { target: b.uid }, a.token);
+ok(bpW.status === 200 && bpW.json.ok, `friends/bump：${JSON.stringify(bpW.json)}`);
+const bpW2 = await call("POST", "/api/friends/bump", { target: b.uid }, a.token);
+ok("error" in bpW2.json && bpW2.json.retry_after > 0, `限流字段完整透传：${JSON.stringify(bpW2.json)}`);
+
 console.log(failed === 0 ? "\n全部通过" : `\n${failed} 项失败`);
 process.exit(failed === 0 ? 0 : 1);
