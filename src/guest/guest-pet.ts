@@ -149,6 +149,15 @@ export class GuestPet {
     this.behavior.goto(target, boundsWidth);
   }
 
+  /**
+   * 定向走位（碰一碰快闪用）：走到指定 x 坐标。
+   * 与 leave() 互斥 —— 离场途中不再改目标。
+   */
+  walkTo(x: number, boundsWidth: number): void {
+    if (this.leaving) return;
+    this.behavior.goto(x, boundsWidth);
+  }
+
   get isLeaving(): boolean {
     return this.leaving;
   }

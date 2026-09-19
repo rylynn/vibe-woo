@@ -25,6 +25,8 @@ import {
 import { GuestRegistry } from "./guest";
 import { GUEST_INTERVAL_MS } from "./guest/guest-pet";
 import { GuestDialog } from "./guest/guest-dialog";
+import { formatAwayText } from "./overlay/away-text";
+import { FlashGuests } from "./guest/flash";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -65,9 +67,9 @@ function applyConfig(c: ConfigView): void {
   pet.setScope(c.roam_scope);
   if (c.avatar) pet.setAvatar(avatarFromView(c.avatar));
   // 访客比主宠物小一圈：一眼能分清谁是自己家的
-  const changed = guests.setSide(
-    Math.max(32, Math.round((pet.body.w * 0.7) / 8) * 8),
-  );
+  const side = Math.max(32, Math.round((pet.body.w * 0.7) / 8) * 8);
+  const changed = guests.setSide(side);
+  flash.setSide(side);
   const now = performance.now();
   for (const g of changed.arrived) guestDialog.onArrive(g, now);
   for (const g of changed.left) guestDialog.onLeave(g.seed.uid);
@@ -139,6 +141,7 @@ const friendsPanel = new FriendsPanel(banner);
 // —— 访客：别人家的宠物来做客 ——
 // 画在主宠物同一张画布上；主宠物清脏矩形时会擦到访客，所以访客后画。
 const guests = new GuestRegistry(ctx2d, canvas, 48);
+const flash = new FlashGuests();
 const guestDialog = new GuestDialog((text) => {
   // 主宠物的回应走主气泡；不在家就不说话。
   // 主气泡正占着（宠物自己说话 / 提醒 / 插件卡片）就让路 ——
@@ -480,6 +483,31 @@ void onSocialEvent((e) => {
     bubble.show(`被 ${e.event.from_nick} 摸了 ${e.event.pats ?? 1} 下`, {
       autoDismissMs: 6000,
     });
+  } else if (e.event.type === "freq" && e.event.from_nick) {
+    const fromUid = e.event.from_uid ?? "";
+    bubble.show(`${e.event.from_nick} 请求加你好友`, {
+      confirmLabel: "接受",
+      onConfirm: () => {
+        void invoke("friend_accept", { target: fromUid }).catch(() => {});
+      },
+      altLabel: "拒绝",
+      onAlt: () => {
+        void invoke("friend_reject", { target: fromUid }).catch(() => {});
+      },
+      autoDismissMs: 20_000,
+    });
+  } else if (e.event.type === "accept" && e.event.from_nick) {
+    bubble.show(`${e.event.from_nick} 通过了你的好友申请`, { autoDismissMs: 8000 });
+  } else if (e.event.type === "bump" && e.event.from_nick) {
+    const seed = {
+      uid: e.event.from_uid ?? "",
+      nick: e.event.from_nick,
+      pet_name: e.event.pet_name ?? "",
+    };
+    if (flash.arrive(seed, performance.now(), canvas.width, pet.body.x, canvas.height * 0.72)) {
+      wakeFrame();
+    }
+    bubble.show(`${e.event.from_nick} 的宠物跑来碰了碰你`, { autoDismissMs: 8000 });
   }
 });
 
@@ -497,18 +525,40 @@ awayIcon.addEventListener("pointerdown", (e) => {
 });
 document.body.appendChild(awayIcon);
 
+let awayKind: "visit" | "bump" | undefined;
+let awayNick: string | undefined;
+let awayEndsAt = 0; // performance.now() 时间戳
+let awayTicker: ReturnType<typeof setInterval> | null = null;
+
+function stopAwayTicker(): void {
+  if (awayTicker) clearInterval(awayTicker);
+  awayTicker = null;
+}
+
 void onAwayChange((n) => {
   pet.setHidden(n.away);
   // setHidden 会整屏 clearRect，访客必须作废指纹重画，否则会消失
   guests.invalidate();
-  // 宠物走了：贴它身上的通知没了依托，收掉（右上角提醒卡片不受影响）
-  if (n.away) banner.releaseFromPet();
-  awayIcon.style.display = n.away ? "flex" : "none";
-  if (n.away && n.at_nick) {
-    awayIcon.textContent = `🐾 在 ${n.at_nick} 家`;
-    awayIcon.title = "点击召回宠物";
+  if (n.away) {
+    // 宠物走了：贴它身上的通知没了依托，收掉（右上角提醒卡片不受影响）
+    banner.releaseFromPet();
+    flash.clear(ctx2d);
+    awayKind = n.kind;
+    awayNick = n.at_nick;
+    awayEndsAt = performance.now() + (n.duration_secs ?? 0) * 1000;
+    stopAwayTicker();
+    awayTicker = setInterval(() => {
+      const remain = Math.max(0, (awayEndsAt - performance.now()) / 1000);
+      awayIcon.textContent = formatAwayText(awayKind, awayNick, remain);
+      if (remain <= 0) stopAwayTicker();
+    }, 1000);
   } else {
-    awayIcon.textContent = "🐾 不在家";
+    stopAwayTicker();
+  }
+  awayIcon.style.display = n.away ? "flex" : "none";
+  awayIcon.title = "点击召回宠物";
+  if (n.away) {
+    awayIcon.textContent = formatAwayText(awayKind, awayNick, n.duration_secs ?? 0);
   }
 });
 
@@ -628,13 +678,19 @@ function onFrame(now: number): void {
   // 访客必须画在主宠物之后：主宠物清自己的脏矩形时，
   // 会连带擦掉落在它范围内的访客像素。
   const guestDrew = guests.tick(now);
+  // 用 ctx2d.canvas 而非 canvas：onFrame 是提升的函数声明，
+  // canvas 的非空收窄进不来（箭头函数回调里则不受影响）
+  const flashDrew = flash.tick(now, ctx2d, ctx2d.canvas);
   guestDialog.tick(now, guests.list);
   // 访客擦到主宠物身上时，主宠物可能因为「视觉指纹未变」而跳帧，
   // 身上就留个洞 —— 只在真的重叠时才让它重画，别白白提帧。
-  if (guestDrew) {
+  if (guestDrew || flashDrew) {
     const host = pet.body;
-    for (const g of guests.list) {
-      const d = g.lastAffected;
+    const affected = [
+      ...guests.list.map((g) => g.lastAffected),
+      flash.active?.lastAffected ?? null,
+    ];
+    for (const d of affected) {
       if (d && overlaps(d, host)) {
         pet.invalidate();
         break;
@@ -658,7 +714,8 @@ function onFrame(now: number): void {
   // idle/sleep 档先睡够再拍。留 4ms 余量避免长期欠帧。
   // 访客在动时才抬帧 —— 否则主宠物 8fps 会把访客走成慢动作；
   // 访客只是站着发呆时维持主宠物自己的档位，别为它多烧 CPU。
-  const interval = guests.wantsFastFrame
+  const busy = guests.wantsFastFrame || flash.isBusy;
+  const interval = busy
     ? Math.min(pet.debugIntervalMs, GUEST_INTERVAL_MS)
     : pet.debugIntervalMs;
   const delay = interval - (performance.now() - now) - 4;
