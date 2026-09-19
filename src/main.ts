@@ -134,7 +134,7 @@ const menu = new ContextMenu([
 const bubble = new Bubble();
 const banner = new Banner();
 const remindersPanel = new RemindersPanel(() => {});
-const friendsPanel = new FriendsPanel();
+const friendsPanel = new FriendsPanel(banner);
 
 // —— 访客：别人家的宠物来做客 ——
 // 画在主宠物同一张画布上；主宠物清脏矩形时会擦到访客，所以访客后画。
@@ -435,7 +435,11 @@ startBoxReporter(() => {
 });
 
 // 好友状态与串门事件
-void onFriendsUpdate((list) => friendsPanel.setFriends(list));
+void onFriendsUpdate((list, requests) => {
+  friendsPanel.setFriends(list, requests);
+  // 有待处理申请时菜单入口带红点；处理完（下一拍心跳下发空列表）自动摘掉
+  menu.setLabel(3, requests.length > 0 ? "好友 ●" : "好友");
+});
 
 // 家里的访客：每拍心跳都发（空列表表示人走光了）
 void onVisitorsChange((list) => {

@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { Box } from "../interact/hit-test";
+import type { Banner } from "./bubble";
 import { panelChrome } from "./chrome";
 
 interface SocialCfg {
@@ -28,6 +29,20 @@ interface OnlineRow {
   nick: string;
   pet_name: string;
   state: string;
+}
+
+/** 待处理的好友申请（心跳随好友列表一起下发）。 */
+export interface FriendRequestRow {
+  uid: string;
+  nick: string;
+  pet_name: string;
+}
+
+/** 搜索结果卡（Rust SearchHit，只有三字段）。 */
+interface SearchHit {
+  uid: string;
+  nick: string;
+  pet_name: string;
 }
 
 const STATE_LABEL: Record<string, string> = {
@@ -105,9 +120,14 @@ export class FriendsPanel {
   private readonly coolUntil = new Map<string, number>();
   /** uid → 打招呼按钮（倒计时就地更新，不整块重绘以免抢走输入焦点）。 */
   private readonly greetBtns = new Map<string, HTMLButtonElement>();
+  private requests: FriendRequestRow[] = [];
+  /** uid → 碰一碰冷却结束时间戳（展示层防抖；权威限流在 Rust）。 */
+  private readonly bumpUntil = new Map<string, number>();
+  /** uid → 碰一碰按钮（倒计时就地更新）。 */
+  private readonly bumpBtns = new Map<string, HTMLButtonElement>();
   private tick: ReturnType<typeof setInterval> | null = null;
 
-  constructor() {
+  constructor(private readonly banner: Banner) {
     this.el = document.createElement("div");
     this.el.className = "pet-settings";
     this.el.style.display = "none";
@@ -274,6 +294,10 @@ export class FriendsPanel {
     this.renderPetName(cfg);
     this.el.appendChild(this.divider("今日在线"));
     this.renderOnline();
+    if (this.requests.length > 0) {
+      this.el.appendChild(this.divider("好友申请"));
+      this.renderRequests();
+    }
     this.el.appendChild(this.divider("好友"));
     this.renderAddFriend();
     this.renderFriendList();
@@ -440,6 +464,7 @@ export class FriendsPanel {
         return;
       }
       for (const uid of this.greetBtns.keys()) this.applyCooldown(uid);
+      for (const uid of this.bumpBtns.keys()) this.applyBumpCooldown(uid);
     }, 1000);
   }
 
@@ -451,38 +476,102 @@ export class FriendsPanel {
   // ---------- 第三段：好友 ----------
 
   private renderAddFriend(): void {
-    const addRow = this.row("加好友");
-    const addInput = this.input("uid 或昵称");
+    const addRow = this.row("找朋友");
+    const addInput = this.input("uid 或完整昵称");
     const addBtn = document.createElement("button");
     addBtn.className = "pet-bubble-confirm";
-    addBtn.textContent = "添加";
+    addBtn.textContent = "搜索";
     addBtn.style.flex = "0 0 auto";
-    const addStatus = document.createElement("span");
-    addStatus.style.cssText =
-      "color:#8b93a7;font-size:11px;margin-left:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap";
-    addStatus.title = "";
     addBtn.addEventListener("pointerdown", async (e) => {
       e.stopPropagation();
       const t = addInput.value.trim();
       if (!t) return;
-      addStatus.textContent = "";
+      addBtn.disabled = true;
       try {
-        const note = await invoke<string>("add_friend", { target: t });
-        addStatus.style.color = "#7cf5c4";
-        addStatus.textContent = note;
-        addInput.value = "";
-        await this.refresh();
+        const hit = await invoke<SearchHit>("friend_search", { target: t });
+        this.banner.showCard({
+          tag: "搜索结果",
+          text: `${hit.nick} 的 ${hit.pet_name}（uid ${hit.uid}）`,
+          actions: [
+            { label: "发申请", primary: true, onClick: () => void this.sendRequest(hit) },
+          ],
+        });
       } catch (err) {
-        addStatus.style.color = "#ffab9d";
-        addStatus.textContent = String(err);
-        addStatus.title = String(err);
+        this.banner.showCard({
+          tag: "搜索结果",
+          text: String(err),
+          actions: [{ label: "知道了", onClick: () => {} }],
+        });
       }
+      addBtn.disabled = false;
     });
-    addRow.append(addInput, addBtn, addStatus);
+    addRow.append(addInput, addBtn);
     this.el.appendChild(addRow);
+    this.el.appendChild(this.hint("发申请后，对方接受才成为好友"));
+  }
+
+  private async sendRequest(hit: SearchHit): Promise<void> {
+    try {
+      await invoke("friend_request", { target: hit.uid });
+      this.banner.showCard({
+        tag: "好友申请",
+        text: `已向 ${hit.nick} 发送申请，等 TA 接受`,
+        actions: [{ label: "知道了", onClick: () => {} }],
+      });
+    } catch (err) {
+      this.banner.showCard({
+        tag: "好友申请",
+        text: String(err),
+        actions: [{ label: "知道了", onClick: () => {} }],
+      });
+    }
+  }
+
+  private renderRequests(): void {
+    for (const r of this.requests) {
+      const row = document.createElement("div");
+      row.className = "pet-friend-row";
+
+      const main = document.createElement("span");
+      main.className = "pet-friend-nick";
+      main.textContent = `${r.nick} 的 ${r.pet_name}`;
+      main.title = `uid: ${r.uid}`;
+
+      const accept = document.createElement("button");
+      accept.className = "pet-greet-btn";
+      accept.textContent = "接受";
+      accept.addEventListener("pointerdown", async (e) => {
+        e.stopPropagation();
+        try {
+          await invoke("friend_accept", { target: r.uid });
+          this.requests = this.requests.filter((x) => x.uid !== r.uid);
+          this.render();
+        } catch (err) {
+          accept.title = String(err);
+        }
+      });
+
+      const reject = document.createElement("button");
+      reject.className = "pet-reminder-del";
+      reject.textContent = "拒绝";
+      reject.addEventListener("pointerdown", async (e) => {
+        e.stopPropagation();
+        try {
+          await invoke("friend_reject", { target: r.uid });
+          this.requests = this.requests.filter((x) => x.uid !== r.uid);
+          this.render();
+        } catch (err) {
+          reject.title = String(err);
+        }
+      });
+
+      row.append(main, accept, reject);
+      this.el.appendChild(row);
+    }
   }
 
   private renderFriendList(): void {
+    this.bumpBtns.clear();
     if (this.friends.length === 0) {
       const empty = this.hint("还没有好友 —— 把你的 uid 发给朋友吧");
       empty.style.paddingLeft = "14px";
@@ -516,6 +605,17 @@ export class FriendsPanel {
     aff.className = "pet-friend-aff";
     aff.textContent = `♥ ${Math.round(f.affinity)}`;
 
+    const bump = document.createElement("button");
+    bump.className = "pet-greet-btn";
+    bump.textContent = "碰";
+    bump.title = "碰一碰：跑过去打个招呼就回（每分钟一次）";
+    bump.addEventListener("pointerdown", (e) => {
+      e.stopPropagation();
+      void this.doBump(f);
+    });
+    this.bumpBtns.set(f.uid, bump);
+    this.applyBumpCooldown(f.uid);
+
     const del = document.createElement("button");
     del.className = "pet-reminder-del";
     del.textContent = "删";
@@ -531,8 +631,45 @@ export class FriendsPanel {
       }
     });
 
-    row.append(dot, main, state, aff, del);
+    row.append(dot, main, state, aff, bump, del);
     return row;
+  }
+
+  private async doBump(f: FriendRow): Promise<void> {
+    const btn = this.bumpBtns.get(f.uid);
+    if (btn) btn.disabled = true;
+    try {
+      const r = await invoke<{ ok: boolean; retry_after_secs?: number }>("friend_bump", {
+        targetUid: f.uid,
+        targetNick: f.nick,
+      });
+      // 成功按满 60 秒防抖；限流用服务端剩余秒数对齐；
+      // ok=false 且无 retry_after_secs 是业务失败（如已非好友），不冷却
+      const left = r.ok ? 60 : (r.retry_after_secs ?? 0);
+      if (left > 0) {
+        this.bumpUntil.set(f.uid, Date.now() + left * 1000);
+      }
+    } catch {
+      // 网络失败也进冷却：别让用户连点打爆服务端
+      this.bumpUntil.set(f.uid, Date.now() + 60_000);
+    }
+    this.applyBumpCooldown(f.uid);
+    this.startTick();
+  }
+
+  private applyBumpCooldown(uid: string): void {
+    const btn = this.bumpBtns.get(uid);
+    if (!btn) return;
+    const left = Math.ceil(((this.bumpUntil.get(uid) ?? 0) - Date.now()) / 1000);
+    if (left > 0) {
+      btn.disabled = true;
+      btn.classList.add("is-cooling");
+      btn.textContent = `${left}s`;
+    } else {
+      btn.disabled = false;
+      btn.classList.remove("is-cooling");
+      btn.textContent = "碰";
+    }
   }
 
   private renderFoot(): void {
@@ -552,21 +689,25 @@ export class FriendsPanel {
     this.el.appendChild(foot);
   }
 
-  /** 更新好友列表（事件驱动）。 */
-  setFriends(list: FriendRow[]): void {
+  /** 更新好友列表与待处理申请（事件驱动）。 */
+  setFriends(list: FriendRow[], requests: FriendRequestRow[]): void {
     this.friends = list;
+    this.requests = requests;
     if (this.open && this.cfg?.social_uid) {
       this.render();
     }
   }
 }
 
-/** 订阅好友列表刷新。 */
+/** 订阅好友列表刷新（含待处理申请）。 */
 export async function onFriendsUpdate(
-  cb: (list: FriendRow[]) => void,
+  cb: (list: FriendRow[], requests: FriendRequestRow[]) => void,
 ): Promise<() => void> {
   try {
-    return await listen<FriendRow[]>("pet://friends", (e) => cb(e.payload));
+    return await listen<{ friends: FriendRow[]; requests?: FriendRequestRow[] }>(
+      "pet://friends",
+      (e) => cb(e.payload.friends, e.payload.requests ?? []),
+    );
   } catch {
     return () => {};
   }
