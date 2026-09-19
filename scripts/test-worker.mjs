@@ -144,7 +144,7 @@ ok(accW.status === 200 && accW.json.ok, `friends/accept：${JSON.stringify(accW.
 const bpW = await call("POST", "/api/friends/bump", { target: b.uid }, a.token);
 ok(bpW.status === 200 && bpW.json.ok, `friends/bump：${JSON.stringify(bpW.json)}`);
 const bpW2 = await call("POST", "/api/friends/bump", { target: b.uid }, a.token);
-ok("error" in bpW2.json && bpW2.json.retry_after > 0, `限流字段完整透传：${JSON.stringify(bpW2.json)}`);
+ok(bpW2.status === 400 && "error" in bpW2.json && bpW2.json.retry_after > 0, `限流字段完整透传：${JSON.stringify(bpW2.json)}`);
 
 console.log(failed === 0 ? "\n全部通过" : `\n${failed} 项失败`);
 process.exit(failed === 0 ? 0 : 1);
