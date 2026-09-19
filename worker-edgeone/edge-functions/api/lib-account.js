@@ -18,6 +18,7 @@
  *   sess_admin_<token> 管理员会话：{ at }（24h 过期，时间戳判断）
  *   invite_<code>      邀请码 → { by, used_by }（一次性）
  *   friends_<uid>      [{ uid, at }]（最多 100，双向各自存储）
+ *   freq_<uid>        好友申请收件箱 [{from, at}]（≤20，7 天读时过期）
  *   hb_<uid>           心跳：{ state, affinity, last_seen }
  *   visitors_<uid>     当前在家访客 [{ uid, nick, pet_name, at }]（≤3）
  *   events_<uid>       事件队列（读即清空，上限 20 条；无 TTL，靠长度限制）
@@ -60,6 +61,9 @@ const GREET_LINE_MAX = 40;
  * 格式须满足 validInvite（去掉易混淆的 0/O/1/I）。
  */
 const PUBLIC_INVITE = "PET888";
+/** 好友申请收件箱上限与过期。 */
+const MAX_REQUESTS = 20;
+const REQUEST_EXPIRE_MS = 7 * 24 * 3600 * 1000;
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -466,26 +470,6 @@ async function friendList(store, uid) {
   return JSON.parse((await store.get(`friends_${uid}`)) || "[]");
 }
 
-async function addFriend(store, uid, bodyReq) {
-  const target = await resolveTarget(store, bodyReq.target);
-  if (!target) return { error: "找不到该用户（检查 uid 或昵称）" };
-  if (target === uid) return { error: "不能加自己" };
-
-  const mine = await friendList(store, uid);
-  const theirs = await friendList(store, target);
-  if (mine.some((f) => f.uid === target)) return { ok: true, note: "已经是好友" };
-  if (mine.length >= MAX_FRIENDS || theirs.length >= MAX_FRIENDS) {
-    return { error: `好友数已达上限（${MAX_FRIENDS}）` };
-  }
-
-  const at = Date.now();
-  mine.push({ uid: target, at });
-  theirs.push({ uid, at });
-  await store.put(`friends_${uid}`, JSON.stringify(mine));
-  await store.put(`friends_${target}`, JSON.stringify(theirs));
-  return { ok: true };
-}
-
 async function removeFriend(store, uid, bodyReq) {
   const target = await resolveTarget(store, bodyReq.target);
   if (!target) return { error: "找不到该用户" };
@@ -495,6 +479,111 @@ async function removeFriend(store, uid, bodyReq) {
   await store.put(`friends_${uid}`, JSON.stringify(mine));
   await store.put(`friends_${target}`, JSON.stringify(theirs));
   return { ok: true };
+}
+
+// ---------- 好友申请（加好友必须对方接受，服务端只有这一种语义） ----------
+
+/** 申请收件箱：过滤 7 天过期条目（读时过期，无需清理任务）。 */
+async function requestInbox(store, uid) {
+  const list = JSON.parse((await store.get(`freq_${uid}`)) || "[]");
+  const now = Date.now();
+  return list.filter((r) => now - r.at < REQUEST_EXPIRE_MS);
+}
+
+/** 搜索：精确 uid / 昵称 → 只回三字段公开信息卡（不带在线状态与亲密度）。 */
+async function searchUser(store, uid, bodyReq) {
+  const target = await resolveTarget(store, bodyReq.target);
+  if (!target) return { error: "找不到该用户（检查 uid 或昵称）" };
+  if (target === uid) return { error: "这是你自己呀" };
+  const u = JSON.parse(await store.get(`u_${target}`));
+  return { uid: u.uid, nick: u.nick, pet_name: u.pet_name };
+}
+
+/** 发好友申请：写对方收件箱 + 推 freq 事件。同一发起方同时只能有一条 pending。 */
+async function requestFriend(store, uid, bodyReq) {
+  const target = await resolveTarget(store, bodyReq.target);
+  if (!target) return { error: "找不到该用户（检查 uid 或昵称）" };
+  if (target === uid) return { error: "不能加自己" };
+
+  const mine = await friendList(store, uid);
+  if (mine.some((f) => f.uid === target)) return { error: "你们已经是好友了" };
+  const inbox = await requestInbox(store, target);
+  if (inbox.some((r) => r.from === uid)) return { error: "已经申请过啦，等对方处理" };
+  const theirs = await friendList(store, target);
+  if (mine.length >= MAX_FRIENDS || theirs.length >= MAX_FRIENDS) {
+    return { error: `好友数已达上限（${MAX_FRIENDS}）` };
+  }
+
+  inbox.push({ from: uid, at: Date.now() });
+  while (inbox.length > MAX_REQUESTS) inbox.shift();
+  await store.put(`freq_${target}`, JSON.stringify(inbox));
+
+  const meUser = JSON.parse(await store.get(`u_${uid}`));
+  await pushEvent(store, target, {
+    type: "freq",
+    from_uid: uid,
+    from_nick: cpSlice(meUser.nick, 24),
+    pet_name: cpSlice(meUser.pet_name, 16),
+  });
+  return { ok: true, pending: true };
+}
+
+/** 接受申请：双写好友关系（初始亲密度 5）+ 推 accept 事件。条目不存在则幂等拒绝。 */
+async function acceptFriend(store, uid, bodyReq) {
+  const target = clean(bodyReq.target);
+  if (!validUid(target)) return { error: "申请不存在或已处理" };
+  const inbox = await requestInbox(store, uid);
+  if (!inbox.some((r) => r.from === target)) return { error: "申请不存在或已处理" };
+
+  const mine = await friendList(store, uid);
+  const theirs = await friendList(store, target);
+  if (mine.some((f) => f.uid === target)) {
+    // 已经是好友（比如双方互发申请后各自接受过）：只清收件箱，幂等成功
+    await store.put(`freq_${uid}`, JSON.stringify(inbox.filter((r) => r.from !== target)));
+    return { ok: true, note: "已经是好友" };
+  }
+  if (mine.length >= MAX_FRIENDS || theirs.length >= MAX_FRIENDS) {
+    return { error: `好友数已达上限（${MAX_FRIENDS}）` };
+  }
+
+  const at = Date.now();
+  mine.push({ uid: target, at, aff: 5 });
+  theirs.push({ uid, at, aff: 5 });
+  await store.put(`friends_${uid}`, JSON.stringify(mine));
+  await store.put(`friends_${target}`, JSON.stringify(theirs));
+  await store.put(`freq_${uid}`, JSON.stringify(inbox.filter((r) => r.from !== target)));
+
+  const meUser = JSON.parse(await store.get(`u_${uid}`));
+  await pushEvent(store, target, {
+    type: "accept",
+    from_uid: uid,
+    from_nick: cpSlice(meUser.nick, 24),
+    pet_name: cpSlice(meUser.pet_name, 16),
+  });
+  return { ok: true };
+}
+
+/** 拒绝申请：仅移除条目，不通知对方（不做拒绝冷却，YAGNI）。 */
+async function rejectFriend(store, uid, bodyReq) {
+  const target = clean(bodyReq.target);
+  if (!validUid(target)) return { error: "申请不存在或已处理" };
+  const inbox = await requestInbox(store, uid);
+  const next = inbox.filter((r) => r.from !== target);
+  if (next.length === inbox.length) return { error: "申请不存在或已处理" };
+  await store.put(`freq_${uid}`, JSON.stringify(next));
+  return { ok: true };
+}
+
+/** 申请列表视图（/friends 与心跳下发用）。 */
+async function requestViews(store, uid) {
+  const out = [];
+  for (const r of await requestInbox(store, uid)) {
+    const raw = await store.get(`u_${r.from}`);
+    if (!raw) continue;
+    const u = JSON.parse(raw);
+    out.push({ uid: u.uid, nick: u.nick, pet_name: u.pet_name });
+  }
+  return out;
 }
 
 async function listFriends(store, uid) {
@@ -661,6 +750,7 @@ async function heartbeat(store, uid, bodyReq) {
     ok: true,
     next_secs: DEFAULT_HEARTBEAT_SECS,
     friends,
+    requests: await requestViews(store, uid),
     events: events.events,
     visitors,
     greeted_today: greetedToday,
@@ -1113,13 +1203,31 @@ export async function dispatch(store, method, segs, query, body, env, meta = {})
   if (method === "POST" && path === "profile/pet-name") {
     return await setPetName(store, auth.uid, body);
   }
+  if (method === "POST" && path === "friends/search") {
+    return await searchUser(store, auth.uid, body);
+  }
+  if (method === "POST" && path === "friends/request") {
+    return await requestFriend(store, auth.uid, body);
+  }
+  if (method === "POST" && path === "friends/accept") {
+    return await acceptFriend(store, auth.uid, body);
+  }
+  if (method === "POST" && path === "friends/reject") {
+    return await rejectFriend(store, auth.uid, body);
+  }
   if (method === "POST" && path === "friends/add") {
-    return await addFriend(store, auth.uid, body);
+    // 老客户端入口：语义升级为「发申请」，服务端只保留一种加好友方式
+    return await requestFriend(store, auth.uid, body);
   }
   if (method === "POST" && path === "friends/remove") {
     return await removeFriend(store, auth.uid, body);
   }
-  if (method === "GET" && path === "friends") return await listFriends(store, auth.uid);
+  if (method === "GET" && path === "friends") {
+    return {
+      friends: await listFriends(store, auth.uid),
+      requests: await requestViews(store, auth.uid),
+    };
+  }
   if (method === "POST" && path === "heartbeat") {
     return await heartbeat(store, auth.uid, body);
   }

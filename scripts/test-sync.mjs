@@ -7,7 +7,8 @@
  * 覆盖：公共邀请码注册、个人邀请码一次性、宠物名长度与注入/XSS 拦截、
  *       心跳**不**写心情（隐私红线）、今日在线推荐（确定性 + 过滤规则）、
  *       打招呼冷却、greet 事件只中转话术文本、串门候选放宽、
- *       隐身用户不进推荐池也打不到招呼、访客进出、greeted_today 下发。
+ *       隐身用户不进推荐池也打不到招呼、访客进出、greeted_today 下发、
+ *       好友申请流（搜索/申请/接受/拒绝 + 收件箱过期）。
  */
 import { webcrypto } from "node:crypto";
 
@@ -169,7 +170,9 @@ const i = await newUser("pet_7f8g9h", "宠物_7f8g9h", "小八");
 const gHidden = await call("POST", "greet", { target: h.uid }, i.token);
 ok(gHidden.error === "对方现在不想被打扰", `打不到隐身的人：${gHidden.error}`);
 // 串门要先成为好友 —— 打招呼这条路对隐身的人是封的
-await call("POST", "friends/add", { target: h.uid }, a.token);
+// 老的直加路径已升级为申请语义 —— 与隐身者 H 成为好友需走申请+接受
+await call("POST", "friends/request", { target: h.uid }, a.token);
+await call("POST", "friends/accept", { target: a.uid }, h.token);
 const vHidden = await call("POST", "visit", { target: h.uid }, a.token);
 ok(vHidden.error === "对方现在不想被打扰", `去不了隐身的人家：${vHidden.error}`);
 
@@ -200,6 +203,49 @@ const vb2 = await call(
   { state: "idle", affinity: 0, pet_name: "小二" }, b.token,
 );
 ok(vb2.visitors.length === 0, "回家后对方家访客清空");
+
+// ---------- 好友申请流 ----------
+const sHit = await call("POST", "friends/search", { target: b.uid }, a.token);
+ok(sHit.uid === b.uid && sHit.pet_name === "小二", `搜索命中：${JSON.stringify(sHit)}`);
+ok(!("state" in sHit) && !("affinity" in sHit) && !("online" in sHit), "搜索卡片不带在线状态/亲密度");
+const sNick = await call("POST", "friends/search", { target: "宠物_d4e5f6" }, a.token);
+ok(sNick.uid === b.uid, "昵称精确搜索命中");
+const sMiss = await call("POST", "friends/search", { target: "99999999" }, a.token);
+ok(!!sMiss.error, `搜索未命中报错：${sMiss.error}`);
+
+const j = await newUser("pet_j1k2l3", "宠物_j1k2l3", "小九");
+const qSelf = await call("POST", "friends/request", { target: j.uid }, j.token);
+ok(!!qSelf.error, `不能申请加自己：${qSelf.error}`);
+const q1 = await call("POST", "friends/request", { target: b.uid }, j.token);
+ok(!!q1.ok && q1.pending === true, `发申请：${JSON.stringify(q1)}`);
+const qDup = await call("POST", "friends/request", { target: b.uid }, j.token);
+ok(!!qDup.error, `重复申请被拒：${qDup.error}`);
+const qAlready = await call("POST", "friends/request", { target: h.uid }, a.token);
+ok(!!qAlready.error, `已是好友再申请被拒：${qAlready.error}`);
+
+const beatB1 = await call("POST", "heartbeat", { state: "idle", affinity: 0, pet_name: "小二" }, b.token);
+ok(Array.isArray(beatB1.requests) && beatB1.requests.some((r) => r.uid === j.uid), `心跳带下申请：${JSON.stringify(beatB1.requests)}`);
+ok((beatB1.events || []).some((e) => e.event.type === "freq"), "收到 freq 事件");
+
+const rej = await call("POST", "friends/reject", { target: j.uid }, b.token);
+ok(!!rej.ok, "拒绝申请");
+const qAgain = await call("POST", "friends/request", { target: b.uid }, j.token);
+ok(!!qAgain.ok, "被拒后可再次申请");
+
+const accOther = await call("POST", "friends/accept", { target: j.uid }, a.token);
+ok(!!accOther.error, "不是自己的申请不能接受");
+const acc = await call("POST", "friends/accept", { target: j.uid }, b.token);
+ok(!!acc.ok, "接受申请");
+const acc2 = await call("POST", "friends/accept", { target: j.uid }, b.token);
+ok(!!acc2.error, "重复接受幂等拒绝");
+const frJ = await call("GET", "friends", {}, j.token);
+ok(Array.isArray(frJ.friends) && frJ.friends.some((f) => f.uid === b.uid), `接受后双向可见：${JSON.stringify(frJ.friends?.map((f) => f.uid))}`);
+const beatJ1 = await call("POST", "heartbeat", { state: "idle", affinity: 0, pet_name: "小九" }, j.token);
+ok((beatJ1.events || []).some((e) => e.event.type === "accept"), "申请方收到 accept 事件");
+
+// 老接口语义升级：/friends/add 走申请
+const qOld = await call("POST", "friends/add", { target: a.uid }, j.token);
+ok(!!qOld.pending, `老 /friends/add 返回 pending：${JSON.stringify(qOld)}`);
 
 console.log(failed === 0 ? "\n全部通过" : `\n${failed} 项失败`);
 process.exit(failed === 0 ? 0 : 1);
