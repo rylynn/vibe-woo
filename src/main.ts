@@ -478,7 +478,9 @@ void onFriendsUpdate((list, requests) => {
 // 家里的访客：每拍心跳都发（空列表表示人走光了）
 void onVisitorsChange((list) => {
   const now = performance.now();
-  const { arrived, left } = guests.sync(list, now);
+  // 出门期间服务端仍会无条件下发名单，置空防止送客被下一拍打回；回家后下一拍心跳访客自然重新进门
+  const effective = pet.isHidden ? [] : list;
+  const { arrived, left } = guests.sync(effective, now);
   for (const g of arrived) guestDialog.onArrive(g, now);
   for (const g of left) guestDialog.onLeave(g.seed.uid);
   wakeFrame();
