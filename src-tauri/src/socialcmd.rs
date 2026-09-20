@@ -206,8 +206,10 @@ pub struct OnlineUser {
 
 #[tauri::command]
 pub async fn online_random() -> Result<Vec<OnlineUser>, String> {
+    // 读接口，失败重试一次：名单是服务端按日期确定性取样的，多取一次结果一样，
+    // 但省掉了「服务重启那几秒里点了一下，面板就飘红」的体验。
     let v =
-        crate::syncclient::post_authed("/online/random", &serde_json::json!({})).await?;
+        crate::syncclient::post_authed_retry("/online/random", &serde_json::json!({}), 2).await?;
     serde_json::from_value(v["users"].clone()).map_err(|_| "响应解析失败".to_string())
 }
 

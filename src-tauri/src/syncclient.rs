@@ -82,14 +82,48 @@ fn client() -> Result<&'static reqwest::Client, String> {
         .map_err(|e| e.clone())
 }
 
+/// 面板上展示的那句话。
+///
+/// reqwest 的原始错误长这样：
+/// `error sending request for url (http://119.45.169.217:8787/api/online/random)`
+/// —— 一整条 URL 加半截英文，直接弹到面板上用户既看不懂也没必要看
+/// （服务地址内置，用户又改不了）。这里统一换成一句人话。
+pub const NET_ERR: &str = "连不上同步服务，稍后再试";
+
+/// 把连接层错误换成 `NET_ERR`，**原始错误只进 stderr**。
+///
+/// 排查要看的地址和原因都还在日志里，只是不再糊到用户脸上。
+fn net_err(path: &str, e: impl std::fmt::Display) -> String {
+    eprintln!("[sync] 请求 {path} 失败：{e}");
+    NET_ERR.to_string()
+}
+
+/// 请求失败的两种下场：网络抖动值得再试一次，业务错误重试没有意义。
+enum Fail {
+    /// 连不上 / 读不到响应 —— 可能只是抖了一下。
+    Net(String),
+    /// 业务或解析错误（未登录、限流、限频）—— 重试一遍只会多花一次往返。
+    Final(String),
+}
+
+impl Fail {
+    fn into_string(self) -> String {
+        match self {
+            Fail::Net(s) | Fail::Final(s) => s,
+        }
+    }
+}
+
 /// 把响应解成 JSON，并把服务端的 {error} 统一转成 Err（直接展示给用户）。
-async fn parse(resp: reqwest::Response) -> Result<serde_json::Value, String> {
+async fn parse(path: &str, resp: reqwest::Response) -> Result<serde_json::Value, Fail> {
     let status = resp.status();
-    let text = resp.text().await.map_err(|e| format!("读取失败：{e}"))?;
+    let text = resp.text().await.map_err(|e| Fail::Net(net_err(path, e)))?;
     let v: serde_json::Value =
-        serde_json::from_str(&text).map_err(|_| "响应解析失败".to_string())?;
+        serde_json::from_str(&text).map_err(|_| Fail::Final("响应解析失败".to_string()))?;
     if !status.is_success() || v["error"].is_string() {
-        return Err(v["error"].as_str().unwrap_or("请求失败").to_string());
+        return Err(Fail::Final(
+            v["error"].as_str().unwrap_or("请求失败").to_string(),
+        ));
     }
     Ok(v)
 }
@@ -99,19 +133,64 @@ pub async fn post_authed<T: Serialize>(
     path: &str,
     body: &T,
 ) -> Result<serde_json::Value, String> {
+    post_authed_once(path, body)
+        .await
+        .map_err(Fail::into_string)
+}
+
+/// 单次带鉴权 POST。
+///
+/// 返回 `Fail` 而不是 String，是为了让调用方能分辨
+/// 「抖了一下，值得再试」与「重试也没用」—— 后者重试只是多花一次往返。
+async fn post_authed_once<T: Serialize>(path: &str, body: &T) -> Result<serde_json::Value, Fail> {
     let cfg = configcmd::current();
     if cfg.social.token.is_empty() {
-        return Err("请先登录".into());
+        return Err(Fail::Final("请先登录".into()));
     }
     let url = format!("{}{path}", base_url());
-    let resp = client()?
+    let resp = client()
+        .map_err(Fail::Final)?
         .post(&url)
         .header("Authorization", format!("Bearer {}", cfg.social.token))
         .json(body)
         .send()
         .await
-        .map_err(|e| format!("网络错误：{e}"))?;
-    parse(resp).await
+        .map_err(|e| Fail::Net(net_err(path, e)))?;
+    parse(path, resp).await
+}
+
+/// 两次尝试之间隔多久。
+///
+/// 立刻重试往往撞在同一次抖动上（服务刚被 systemd 拉起、连接池刚断）；
+/// 也不能太久 —— 面板会一直转圈，用户不知道是在等还是已经没了。
+const RETRY_GAP: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// 带鉴权 POST，**只在网络层失败时**重试，最多 `attempts` 次。
+///
+/// 只给**幂等的读接口**用：今日在线名单是服务端按日期确定性取样的，
+/// 多取一次结果一样。写接口别传 >1 —— 打招呼重试会变成两次招呼，
+/// 限流错误也会被重试放大成「点了半天没反应」。
+pub async fn post_authed_retry<T: Serialize>(
+    path: &str,
+    body: &T,
+    attempts: usize,
+) -> Result<serde_json::Value, String> {
+    let total = attempts.max(1);
+    let mut last = String::new();
+    for i in 0..total {
+        match post_authed_once(path, body).await {
+            Ok(v) => return Ok(v),
+            // 业务错误立刻返回：重试不会让它变成成功，只会让用户多等一轮
+            Err(Fail::Final(e)) => return Err(e),
+            Err(Fail::Net(e)) => {
+                last = e;
+                if i + 1 < total {
+                    tokio::time::sleep(RETRY_GAP).await;
+                }
+            }
+        }
+    }
+    Err(last)
 }
 
 /// 带鉴权 POST，但保留服务端完整响应（含 error 之外的伴随字段，
@@ -132,9 +211,9 @@ pub async fn post_authed_full<T: Serialize>(
         .json(body)
         .send()
         .await
-        .map_err(|e| format!("网络错误：{e}"))?;
+        .map_err(|e| net_err(path, e))?;
     let status = resp.status();
-    let text = resp.text().await.map_err(|e| format!("读取失败：{e}"))?;
+    let text = resp.text().await.map_err(|e| net_err(path, e))?;
     let v: serde_json::Value =
         serde_json::from_str(&text).map_err(|_| "响应解析失败".to_string())?;
     if !status.is_success() && v["error"].is_null() {
@@ -154,8 +233,8 @@ pub async fn post_public<T: Serialize>(
         .json(body)
         .send()
         .await
-        .map_err(|e| format!("网络错误：{e}"))?;
-    parse(resp).await
+        .map_err(|e| net_err(path, e))?;
+    parse(path, resp).await.map_err(Fail::into_string)
 }
 
 #[cfg(test)]
@@ -224,6 +303,17 @@ mod tests {
         assert!(!host_is_ip("http://1.2.3:8787"));
         assert!(!host_is_ip("http://1.2.3.4.5:8787"));
         assert!(host_is_ip("http://1.2.3.4:8787"));
+    }
+
+    #[test]
+    fn 网络错误文案不泄漏服务地址() {
+        // 用户在面板上看到过 `error sending request for url (http://...)`：
+        // 服务地址是内置的、用户也改不了，糊在错误里只会让人以为自己填错了。
+        let raw = "error sending request for url (http://119.45.169.217:8787/api/online/random)";
+        let shown = net_err("/online/random", raw);
+        assert_eq!(shown, NET_ERR);
+        assert!(!shown.contains("http"), "面板文案不该出现 URL：{shown}");
+        assert!(!shown.contains("119.45."), "面板文案不该出现 IP：{shown}");
     }
 
     #[test]
