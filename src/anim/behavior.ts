@@ -226,6 +226,14 @@ export class Behavior {
     this.state.motion = "idle";
   }
 
+  /** 停在原地（对话面对面用）：结束 goto 但不瞬移到目标。 */
+  stopGoto(): void {
+    if (this.targetX === null) return;
+    this.targetX = null;
+    this.state.motion = "idle";
+    this.nextMoveIn = this.pickIdleGap();
+  }
+
   /** 是否正在执行 goto 召唤。 */
   get isSummoned(): boolean {
     return this.targetX !== null;

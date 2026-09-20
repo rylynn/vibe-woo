@@ -75,13 +75,18 @@ export class GuestDialog {
   /** 主人待回复的一句话。 */
   private pending: { uid: string; at: number } | null = null;
 
-  constructor(private readonly hostSay: (text: string) => void) {}
+  constructor(
+    private readonly hostSay: (text: string) => void,
+    /** 访客开口时的编排钩子（停步面对面）。 */
+    private readonly onSpeak?: (g: GuestPet) => void,
+  ) {}
 
   /** 新访客进门：说开场白，并开始计下一句。 */
   onArrive(g: GuestPet, nowMs: number): void {
     const b = this.bubbleFor(g.seed.uid);
     b.show(pick(GUEST_HELLO), { autoDismissMs: LINE_MS });
     b.follow(g.body);
+    this.onSpeak?.(g);
     this.rounds.set(g.seed.uid, 1);
     this.nextAt.set(g.seed.uid, nowMs + GAP_MIN_MS + Math.random() * GAP_JITTER_MS);
   }
@@ -134,6 +139,7 @@ export class GuestDialog {
       const b = this.bubbleFor(uid);
       b.show(pick(GUEST_CHAT), { autoDismissMs: LINE_MS });
       b.follow(g.body);
+      this.onSpeak?.(g);
       this.rounds.set(uid, round + 1);
       this.nextAt.set(uid, nowMs + GAP_MIN_MS + Math.random() * GAP_JITTER_MS);
       this.pending = { uid, at: nowMs + REPLY_DELAY_MS };

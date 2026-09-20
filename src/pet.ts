@@ -259,6 +259,24 @@ export class Pet {
     this.behavior.finishGoto();
   }
 
+  /** 面向某方向（对话面对面用）。 */
+  face(dir: -1 | 1): void {
+    this.behavior.face(dir);
+  }
+
+  /**
+   * 停在原地（对话面对面用）。
+   *
+   * goto 负责掐掉进行中的漫游/小动作，finishGoto 立刻把目标就地结算
+   * 清空 —— 若留着非空目标，紧随其后的 face() 会被「走动中」守卫忽略，
+   * 面对面就只剩访客单方面转向了。
+   */
+  stopWander(): void {
+    const maxX = Math.max(0, this.canvas.width - this.side);
+    this.behavior.goto(this.body.x, maxX);
+    this.behavior.finishGoto();
+  }
+
   /** 是否正在被召唤前往速记窗。 */
   get summoned(): boolean {
     return this.behavior.isSummoned;

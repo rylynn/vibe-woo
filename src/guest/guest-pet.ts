@@ -227,6 +227,16 @@ export class GuestPet {
   }
 
   /**
+   * 对话拍：停步并面向主宠物。
+   * 追赶途中被叫停也没关系 —— 下一拍跟随逻辑会自己恢复。
+   */
+  standAndFace(hostCenterX: number): void {
+    if (this.leaving) return;
+    this.behavior.stopGoto();
+    this.behavior.face(this.behavior.current.x <= hostCenterX ? 1 : -1);
+  }
+
+  /**
    * 摸摸（本地先行反馈）：命中即计数 + 桃心 + 开心表情，
    * 上报由调用方 fire-and-forget。第 PAT_MAX_LOCAL+1 下起拒绝。
    * @returns null = 成功；string = 拒绝文案（直接给气泡）

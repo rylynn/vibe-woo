@@ -745,6 +745,8 @@ export async function onSocialEvent(
       type: string;
       from_uid?: string;
       from_nick?: string;
+      /** visit_rejected 专用：被拒时目标是自己的好友，没有 from_* 语义。 */
+      nick?: string;
       pet_name?: string;
       line?: string;
       pats?: number;
@@ -757,6 +759,7 @@ export async function onSocialEvent(
         type: string;
         from_uid?: string;
         from_nick?: string;
+        nick?: string;
         pet_name?: string;
         line?: string;
         pats?: number;

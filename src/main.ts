@@ -144,13 +144,25 @@ const guests = new GuestRegistry(ctx2d, canvas, 48, () =>
   pet.isHidden ? null : pet.body,
 );
 const flash = new FlashGuests();
-const guestDialog = new GuestDialog((text) => {
-  // 主宠物的回应走主气泡；不在家就不说话。
-  // 主气泡正占着（宠物自己说话 / 提醒 / 插件卡片）就让路 ——
-  // 访客闲聊是最低优先级，不该把提醒挤掉。
-  if (pet.isHidden || bubble.isOpen) return;
-  bubble.show(text, { autoDismissMs: 5000 });
-});
+const guestDialog = new GuestDialog(
+  (text) => {
+    // 主宠物的回应走主气泡；不在家就不说话。
+    // 主气泡正占着（宠物自己说话 / 提醒 / 插件卡片）就让路 ——
+    // 访客闲聊是最低优先级，不该把提醒挤掉。
+    if (pet.isHidden || bubble.isOpen) return;
+    bubble.show(text, { autoDismissMs: 5000 });
+  },
+  (g) => {
+    // 对话拍：双方停步、面对面
+    if (pet.isHidden) return;
+    const host = pet.body;
+    const hostCx = host.x + host.w / 2;
+    const guestCx = g.body.x + g.body.w / 2;
+    g.standAndFace(hostCx);
+    pet.stopWander();
+    pet.face(guestCx >= hostCx ? 1 : -1);
+  },
+);
 
 // 插件卡片的受控操作：openUrl 走 opener 插件（透明无框窗里 window.open
 // 会被系统拦截，导致资讯「阅读原文」点不动），markTerm 走 SRS 反馈命令
@@ -502,6 +514,13 @@ void onSocialEvent((e) => {
     bubble.show(`被 ${e.event.from_nick} 摸了 ${e.event.pats ?? 1} 下`, {
       autoDismissMs: 6000,
     });
+  } else if (e.event.type === "leave" && e.event.from_nick) {
+    // 访客回家：轻通知贴宠物头顶（不在家自动退右上角）
+    notifyNearPet(`${e.event.from_nick} 的宠物回家了`, 6000);
+  } else if (e.event.type === "visit_rejected" && e.event.nick) {
+    if (!pet.isHidden) {
+      bubble.show(`想去找 ${e.event.nick} 玩，但扑空了`, { autoDismissMs: 6000 });
+    }
   } else if (e.event.type === "freq" && e.event.from_nick) {
     const fromUid = e.event.from_uid ?? "";
     bubble.show(`${e.event.from_nick} 请求加你好友`, {
@@ -554,14 +573,26 @@ function stopAwayTicker(): void {
   awayTicker = null;
 }
 
-void onAwayChange((n) => {
+/** 把出门/回家状态落到 UI（出门演出结束后调用；回家/碰一碰直接调）。 */
+function applyAway(n: {
+  away: boolean;
+  at_nick?: string;
+  kind?: "visit" | "bump";
+  duration_secs?: number;
+}): void {
   pet.setHidden(n.away);
   // setHidden 会整屏 clearRect，访客必须作废指纹重画，否则会消失
   guests.invalidate();
   if (n.away) {
-    // 宠物走了：贴身通知退回右上角、内容保留（右上角提醒卡片不受影响）
+    // 宠物走了：贴它身上的通知退回右上角（内容保留）
     banner.releaseFromPet();
     flash.clear(ctx2d);
+    // 主人不在家，客人也该走了：全体走出屏幕，对话编排清空
+    // （用 ctx2d.canvas 而非 canvas：本函数是提升的函数声明，
+    // canvas 的非空收窄进不来，与 onFrame 同款约束）
+    const now = performance.now();
+    for (const g of guests.list) g.leave(now, ctx2d.canvas.width);
+    guestDialog.clear();
     awayKind = n.kind;
     awayNick = n.at_nick;
     awayEndsAt = performance.now() + (n.duration_secs ?? 0) * 1000;
@@ -579,6 +610,34 @@ void onAwayChange((n) => {
   if (n.away) {
     awayIcon.textContent = formatAwayText(awayKind, awayNick, n.duration_secs ?? 0);
   }
+}
+
+let awayAnimTimer: number | null = null;
+
+void onAwayChange((n) => {
+  // 上一场演出还没落地又来了新事件：立即按新状态结算，别叠着来
+  if (awayAnimTimer !== null) {
+    clearTimeout(awayAnimTimer);
+    awayAnimTimer = null;
+  }
+  if (n.away && n.kind === "visit" && !pet.isHidden) {
+    // 出门演出：先走向最近的屏幕边缘（约 1.3 秒后中途隐藏 ——
+    // 半屏距离 130px/s 走不完，与访客离场同款手感），到位后再真正隐藏；
+    // 召回/到期回家维持瞬现，不加回家动画
+    const b = pet.body;
+    const edge = b.x + b.w / 2 < canvas.width / 2 ? 0 : canvas.width - b.w;
+    pet.summonTo(edge + b.w / 2);
+    notifyNearPet(
+      `去 ${n.at_nick ?? "好友"} 家串门啦，${Math.round((n.duration_secs ?? 480) / 60)} 分钟后回来`,
+    );
+    wakeFrame();
+    awayAnimTimer = window.setTimeout(() => {
+      awayAnimTimer = null;
+      applyAway(n);
+    }, 1300);
+    return;
+  }
+  applyAway(n);
 });
 
 // 宠物说话：气泡展示，8 秒后自动消失（无人互动也别一直挂着）。
