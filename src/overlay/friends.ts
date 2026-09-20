@@ -29,6 +29,8 @@ interface OnlineRow {
   nick: string;
   pet_name: string;
   state: string;
+  /** 好友行（服务端合并的在线总览）：画徽标、不画打招呼按钮 */
+  is_friend?: boolean;
 }
 
 /** 待处理的好友申请（心跳随好友列表一起下发）。 */
@@ -403,6 +405,15 @@ export class FriendsPanel {
     state.className = "pet-friend-state";
     state.style.color = STATE_COLOR[u.state] ?? "#5a6478";
     state.textContent = STATE_LABEL[u.state] ?? u.state;
+
+    // 好友行：徽标代替按钮 —— 好友操作集中在下方列表，这里不重复入口
+    if (u.is_friend) {
+      const badge = document.createElement("span");
+      badge.className = "pet-friend-badge";
+      badge.textContent = "好友";
+      row.append(dot, main, state, badge);
+      return row;
+    }
 
     const btn = document.createElement("button");
     btn.className = "pet-greet-btn";
