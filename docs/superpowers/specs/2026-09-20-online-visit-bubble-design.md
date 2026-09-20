@@ -33,14 +33,14 @@
 
 ### 摸摸（新 endpoint `POST /visit/interact`）
 
-- `requireAuth` 鉴权；`{target}` 必须是**当前在我家 `visitors_<me>` 名单里**且未过期的访客，否则 `not_visitor`（防匿名遍历：只能摸自己家的客人）。
-- 计数落在访客条目上：`visitors_<me>` 条目 `{uid, nick, pet_name, at}` → 增加 `pats` 计数；`pats >= 3` 返回 `enough`。
-- 每次成功：`pats += 1`、双方关系亲密度 +1（`addAffinity`）、向宠物主人推事件 `interacted`（payload 白名单 `{from, nick, pet_name, count}`，`count` 为本次串门累计值；512B/条约束内）。
+- `requireAuth` 鉴权；`{target}` 必须是**当前在我家 `visitors_<me>` 名单里**且未过期的访客，否则「TA 不在你家做客」（防匿名遍历：只能摸自己家的客人）。错误文案即错误码，直接中文返回（`lib-account.js` 全库惯例，无英文错误码）。
+- 计数落在访客条目上：`visitors_<me>` 条目 `{uid, nick, pet_name, at}` → 增加 `pats` 计数；`pats >= 3` 返回「摸够啦」。
+- 每次成功：`pats += 1`、双方关系亲密度 +1（`addAffinity`）、向访客主人推事件 `interaction`（沿用前端/Rust 已有的半截事件名，不另起新名；payload 白名单 `{type, from_uid, from_nick, pet_name, pats}`，`pats` 为本次串门累计值；512B/条约束内）。
 - 串门条目 15 分钟过期（`VISIT_EXPIRE_MS`）后自然不可再摸，无需清理任务。
 
 ### 事件
 
-- 新事件类型 `interacted`（推给出门方）；`leave` 事件服务端已有，**服务端零改动**，只补客户端消费。
+- 事件类型 `interaction`（推给出门方）；`leave` 事件服务端虽有，但 `goHome` 推的事件 `from_nick`/`pet_name` 是空串，主人端显示不了「谁回家了」——本次补上真实昵称（其余零改动），客户端补消费分支。
 
 ## Rust 侧设计
 
@@ -52,7 +52,7 @@
 ### 同步循环（socialdrive.rs）
 
 - `/visit` 被拒（对方离线/满员/隐身）时不再只写日志：转发 `pet://social` 载荷 `{type: "visit_rejected", nick, pet_name}`，前端一句话提示。
-- `interacted` 事件 → `pet://social` 载荷 `{type: "interacted", count, nick}`（补全现有半截死代码分支）。
+- `interaction` 事件 → `pet://social` 载荷 `{type: "interaction", from_nick, pats}`（补全现有半截死代码分支，透传服务端累计次数）。
 - `leave` 事件转发已存在，不动。
 
 ## 前端设计
@@ -78,7 +78,7 @@
 
 - 收到 `pet://home-away {away:true, kind:"visit"}`：先播**离场动画**（主宠物走向最近屏幕边缘，约 1.2s，复用 summonTo 行走），到位后再隐藏；同时头顶 Banner「去 XX 家串门啦，8 分钟后回来」。召回/到期回家维持现状瞬现，不加回家动画。
 - 收到 `pet://social {type:"visit_rejected"}`：宠物气泡一句「想去找 XX 玩，但扑空了」（短气泡，不打断）。
-- 收到 `pet://social {type:"interacted"}`：宠物气泡「在朋友家被摸了 N 下，好开心」（N 取事件 count；同一次串门多条事件按 count 单调去重，只显示最新）。
+- 收到 `pet://social {type:"interaction"}`：沿用前端现有分支文案「被 XX 摸了 N 下」（N 取事件 `pats`；文案已在死代码分支里写好，不另造句）。
 
 ### 气泡收拢（src/overlay/bubble.ts）
 
@@ -92,12 +92,12 @@
 - `share.rs` 白名单上报**零改动**；心跳上报结构不变。
 - 在线总览只暴露心跳本就公开的字段（`uid/nick/pet_name/state`）+ `is_friend`（只对请求者自己的好友集有意义）；过滤隐身者的语义与现状一致。
 - `/visit/interact` 全程鉴权，且只能作用于**自己家**当前访客名单内的对象，无遍历面。
-- 事件 payload 白名单构造（`{from, nick, pet_name, count}`），512B 硬上限；Rust 日志只记阶段与错误类别。
+- 事件 payload 白名单构造（`{type, from_uid, from_nick, pet_name, pats}`），512B 硬上限；Rust 日志只记阶段与错误类别。
 - 摸摸为纯本地绘制 + 鉴权上报，无新增感知数据；桃心粒子用棋盘点阵，不产生半透明像素。
 
 ## 错误处理
 
-- `/visit/interact` 错误类别：`not_visitor`（TA 不在你家/已离开）、`enough`（摸够啦）、鉴权失败；文案为服务端常量，直传客户端。
+- `/visit/interact` 错误：中文文案直传（「TA 不在你家做客」「摸够啦」「不能摸自己」），与服务端既有惯例一致；网络失败本地兜底不重试。
 - 本地反馈先行、上报 fire-and-forget：单次网络失败最多丢一次亲密度累加，不重试（宁静优先），日志记类别。
 - 旧服务端 + 新客户端窗口期：`is_friend` 缺省 false，好友可能带打招呼按钮短暂出现（部署即消，接受）。
 - 新服务端 + 旧客户端：字段被忽略，行为同现状，无破坏。
