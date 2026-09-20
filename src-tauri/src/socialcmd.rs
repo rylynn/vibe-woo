@@ -195,13 +195,16 @@ pub async fn auto_register(app: AppHandle) -> Result<AuthResult, String> {
 
 // ---------- 今日在线 & 打招呼 ----------
 
-/// 今日在线的一条推荐（服务端按日期确定性取样，同一天名单稳定）。
+/// 今日在线的一条总览行（好友在前按亲密度、陌生人按日期确定性取样）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OnlineUser {
     pub uid: String,
     pub nick: String,
     pub pet_name: String,
     pub state: String,
+    /// 是否好友。旧服务端不回该字段时缺省 false（部署窗口期按陌生人渲染）
+    #[serde(default)]
+    pub is_friend: bool,
 }
 
 #[tauri::command]
@@ -449,6 +452,19 @@ pub async fn return_home(app: AppHandle, target: Option<String>) -> Result<(), S
     Ok(())
 }
 
+/// 摸摸家里的访客。前端本地先行反馈，此命令 fire-and-forget 上报；
+/// 服务端计数权威（单次串门限 3 下），业务错误以中文文案带回。
+#[tauri::command]
+pub async fn visitor_interact(target_uid: String) -> Result<(), String> {
+    let target = account::valid_target(&target_uid)?;
+    crate::syncclient::post_authed(
+        "/visit/interact",
+        &serde_json::json!({ "target": target }),
+    )
+    .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -506,5 +522,16 @@ mod tests {
             (0..500).map(|_| random_nick(&mut r)).collect();
         assert_eq!(accounts.len(), 500, "500 次生成出现了账号重复");
         assert_eq!(nicks.len(), 500, "500 次生成出现了昵称重复");
+    }
+
+    #[test]
+    fn 在线行缺_is_字段按陌生人解析() {
+        // 旧服务端不回 is_friend（部署窗口期），serde(default) 必须兜住，
+        // 否则整包解析失败、在线面板直接空
+        let v = serde_json::json!([
+            { "uid": "12345678", "nick": "a", "pet_name": "b", "state": "idle" }
+        ]);
+        let got: Vec<OnlineUser> = serde_json::from_value(v).expect("应能解析");
+        assert!(!got[0].is_friend);
     }
 }

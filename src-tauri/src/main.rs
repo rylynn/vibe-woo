@@ -96,6 +96,7 @@ fn main() {
             socialcmd::remove_friend,
             socialcmd::set_pet_name,
             socialcmd::return_home,
+            socialcmd::visitor_interact,
             llm::test_llm,
             configcmd::get_config,
             configcmd::update_config,
