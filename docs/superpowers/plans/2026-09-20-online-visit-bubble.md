@@ -80,7 +80,6 @@ ok(
   fr.map((u) => u.uid).join(",") === [ovS.uid, ovT.uid, ovP.uid].join(","),
   `好友按 aff 降序（70/30/10）：${fr.map((u) => u.uid).join(",")}`,
 );
-ok(fr.every((u) => u.nick === `宠物_${u.nick.includes("ovs") ? "ovs444" : ""}` || true), "好友行带昵称（软断言）");
 ok(!ov.users.some((u) => u.uid === ovQ.uid), "离线好友不在总览");
 ok(!ov.users.some((u) => u.uid === ovR.uid), "隐身好友不在总览");
 ok(!ov.users.some((u) => u.uid === ovHost.uid), "总览不含自己");
@@ -1761,12 +1760,13 @@ Expected: 全绿。服务端部署后再跑 `pnpm test:remote <地址>`（会留
 - `src-tauri/tauri.conf.json` 的 `"version"`
 - `src-tauri/Cargo.toml` 的 `version`
 - `package.json` 的 `"version"`
+- `src-tauri/Cargo.lock`（改完 Cargo.toml 跑一次 `cargo check` 自动更新，须一并提交 —— 版本号也记录在 lock 里，漏提交会让下次构建产生脏 diff）
 
 - [ ] **Step 4: 提交**
 
 ```bash
 git add -f docs/plans/2026-09-20-online-visit-bubble-verification.md
-git add src-tauri/tauri.conf.json src-tauri/Cargo.toml package.json
+git add src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock package.json
 git commit -m "chore(release): 串门近距离互动/在线总览/气泡收拢收尾，验证清单与版本 <V>
 
 版本: <V>"
