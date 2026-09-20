@@ -57,6 +57,8 @@ const GREET_COOLDOWN_MS = 60 * 1000;
 /** 今日在线推荐：每次返回的人数区间（按日期确定性取样，同一天名单稳定）。 */
 const ONLINE_PICK_MIN = 3;
 const ONLINE_PICK_MAX = 5;
+/** 在线总览里好友段的封顶（好友在前，按亲密度降序）。 */
+const ONLINE_FRIEND_MAX = 3;
 /** 招呼话术长度上限（按码点）。事件有 512 字节硬上限，必须卡住。 */
 const GREET_LINE_MAX = 40;
 /**
@@ -942,17 +944,40 @@ async function greet(store, uid, bodyReq) {
 // ---------- 今日在线推荐 ----------
 
 /**
- * 今天随机派发的在线用户：从全站在线者里按「用户 + 日期」确定性取样。
- * 同一天反复打开面板拿到的是同一批人（避免刷一次换一批），
- * 过滤掉自己、已是好友的、以及心跳判定已离线的。算法不优化，够用即可。
+ * 今日在线总览：在线好友（亲密度降序、封顶 ONLINE_FRIEND_MAX）+ 陌生人取样。
+ * 好友行带 is_friend: true —— 客户端据此画徽标、隐藏打招呼按钮。
+ * 陌生人管线不变：同一天同一批（按 uid+日期确定性取样），
+ * 继续排除自己、好友、离线者、隐身者。
  */
 async function onlineRandom(store, uid) {
   const now = Date.now();
   const date = todayKey(now);
-  const mine = new Set((await friendList(store, uid)).map((f) => f.uid));
+  const friends = await friendList(store, uid);
+  const mine = new Set(friends.map((f) => f.uid));
 
-  // 先洗牌再逐个读：凑够人数就停。反过来的写法（全量读完再洗牌）
-  // 在用户量大时会做几百次无谓的 KV 读。
+  // 好友段：逐个读心跳，在线且未隐身的按 aff 降序封顶
+  const friendRows = [];
+  for (const f of friends) {
+    const hb = JSON.parse((await store.get(`hb_${f.uid}`)) || "null");
+    if (!hb || now - hb.last_seen >= OFFLINE_AFTER_MS) continue;
+    if (hb.hidden) continue; // 隐身的好友也不进总览
+    const raw = await store.get(`u_${f.uid}`);
+    if (!raw) continue;
+    const u = JSON.parse(raw);
+    friendRows.push({
+      uid: f.uid,
+      nick: u.nick,
+      pet_name: u.pet_name,
+      state: hb.state,
+      aff: typeof f.aff === "number" ? f.aff : 0,
+    });
+  }
+  friendRows.sort((a, b) => b.aff - a.aff);
+  const friendUsers = friendRows.slice(0, ONLINE_FRIEND_MAX).map(
+    ({ uid: id, nick, pet_name, state }) => ({ uid: id, nick, pet_name, state, is_friend: true }),
+  );
+
+  // 陌生人段：先洗牌再逐个读，凑够人数就停（与原实现一致）
   const idx = await userIndex(store);
   seededShuffle(idx, `${uid}:${date}`);
   const rnd = mulberry32(hashSeed(`${uid}:${date}:count`));
@@ -965,18 +990,13 @@ async function onlineRandom(store, uid) {
     if (id === uid || mine.has(id)) continue;
     const hb = JSON.parse((await store.get(`hb_${id}`)) || "null");
     if (!hb || now - hb.last_seen >= OFFLINE_AFTER_MS) continue;
-    if (hb.hidden) continue; // 隐身的人不进推荐池
+    if (hb.hidden) continue;
     const raw = await store.get(`u_${id}`);
     if (!raw) continue;
     const u = JSON.parse(raw);
-    users.push({
-      uid: id,
-      nick: u.nick,
-      pet_name: u.pet_name,
-      state: hb.state,
-    });
+    users.push({ uid: id, nick: u.nick, pet_name: u.pet_name, state: hb.state, is_friend: false });
   }
-  return { ok: true, date, users };
+  return { ok: true, date, users: [...friendUsers, ...users] };
 }
 
 // ---------- 串门 ----------

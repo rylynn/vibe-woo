@@ -385,5 +385,52 @@ await store.put("upd_manifest", "not json");
 const lBad = await call("GET", "update/latest", {}, "", LATEST_URL);
 ok(lBad._status === 404, `损坏 manifest 返回 404：${lBad._status}`);
 
+// ---------- 今日在线：含好友的总览（is_friend） ----------
+
+// 全新用户段：前面 a/b/j 等已有复杂好友关系，复用会把断言搅浑
+const ovHost = await newUser("pet_ovhost", "宠物_ovhost", "总览崽");
+const ovP = await newUser("pet_ovp111", "宠物_ovp111", "总览P");
+const ovQ = await newUser("pet_ovq222", "宠物_ovq222", "总览Q");
+const ovR = await newUser("pet_ovr333", "宠物_ovr333", "总览R");
+const ovS = await newUser("pet_ovs444", "宠物_ovs444", "总览S");
+const ovT = await newUser("pet_ovt555", "宠物_ovt555", "总览T");
+// 好友关系手工写（申请流前面已覆盖；这里要精确控制 aff 排序）。
+// 先只写 ovHost 一侧 —— addAffinity 的双向断言在 Task 2 再补对侧。
+await store.put(`friends_${ovHost.uid}`, JSON.stringify([
+  { uid: ovP.uid, at: Date.now(), aff: 10 },
+  { uid: ovQ.uid, at: Date.now(), aff: 90 },
+  { uid: ovR.uid, at: Date.now(), aff: 50 },
+  { uid: ovS.uid, at: Date.now(), aff: 70 },
+  { uid: ovT.uid, at: Date.now(), aff: 30 },
+]));
+// Q 下线（心跳拨到 9 分钟前，超过 8 分钟阈值）、R 隐身 —— 都不该出现在总览里
+const hbOvQ = JSON.parse(await store.get(`hb_${ovQ.uid}`));
+hbOvQ.last_seen = Date.now() - 9 * 60 * 1000;
+await store.put(`hb_${ovQ.uid}`, JSON.stringify(hbOvQ));
+const hbOvR = JSON.parse(await store.get(`hb_${ovR.uid}`));
+hbOvR.hidden = true;
+await store.put(`hb_${ovR.uid}`, JSON.stringify(hbOvR));
+
+const ov = await call("POST", "online/random", {}, ovHost.token);
+ok(Array.isArray(ov.users), "在线总览返回数组");
+const fr = ov.users.filter((u) => u.is_friend === true);
+ok(fr.length === 3, `在线好友封顶 3（P/S/T 在线，Q 离线 R 隐身不算）：${fr.length}`);
+ok(
+  fr.map((u) => u.uid).join(",") === [ovS.uid, ovT.uid, ovP.uid].join(","),
+  `好友按 aff 降序（70/30/10）：${fr.map((u) => u.uid).join(",")}`,
+);
+ok(!ov.users.some((u) => u.uid === ovQ.uid), "离线好友不在总览");
+ok(!ov.users.some((u) => u.uid === ovR.uid), "隐身好友不在总览");
+ok(!ov.users.some((u) => u.uid === ovHost.uid), "总览不含自己");
+const strangers = ov.users.filter((u) => u.is_friend !== true);
+ok(
+  !strangers.some((u) => [ovP.uid, ovS.uid, ovT.uid, ovQ.uid, ovR.uid].includes(u.uid)),
+  "好友不重复出现在陌生人段",
+);
+ok(
+  ov.users.slice(0, fr.length).every((u) => u.is_friend === true),
+  "好友排在陌生人之前",
+);
+
 console.log(failed === 0 ? "\n全部通过" : `\n${failed} 项失败`);
 process.exit(failed === 0 ? 0 : 1);
