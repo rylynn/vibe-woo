@@ -432,5 +432,65 @@ ok(
   "好友排在陌生人之前",
 );
 
+// ---------- 摸摸（visit/interact）与 leave 事件昵称 ----------
+
+// addAffinity 双向累加：Task 1 只写了 ovHost 一侧，这里补 ovP 对侧
+await store.put(`friends_${ovP.uid}`, JSON.stringify([{ uid: ovHost.uid, at: Date.now(), aff: 10 }]));
+
+// ovP 去 ovHost 家做客（两人已是好友，visit 直接放行；visit 自带 addAffinity +2）
+const ovVisit = await call("POST", "visit", { target: ovHost.uid }, ovP.token);
+ok(!!ovVisit.ok, `好友来访放行：${JSON.stringify(ovVisit)}`);
+
+// 摸的不是自家客人 → 拒（防匿名遍历：只能摸自己家的访客）
+const patStranger = await call("POST", "visit/interact", { target: ovS.uid }, ovHost.token);
+ok(patStranger.error === "TA 不在你家做客", `不在家的不能摸：${patStranger.error}`);
+const patSelf = await call("POST", "visit/interact", { target: ovHost.uid }, ovHost.token);
+ok(!!patSelf.error, `不能摸自己：${patSelf.error}`);
+
+// 三下成功、计数递增、双方亲密度 +1/下
+for (let i = 1; i <= 3; i++) {
+  const r = await call("POST", "visit/interact", { target: ovP.uid }, ovHost.token);
+  ok(r.ok === true && r.pats === i, `第 ${i} 下：${JSON.stringify(r)}`);
+}
+const frOvHost = await call("GET", "friends", {}, ovHost.token);
+ok(
+  frOvHost.friends.find((f) => f.uid === ovP.uid).affinity === 15,
+  `10 + 串门2 + 摸3 = 15：${frOvHost.friends.find((f) => f.uid === ovP.uid).affinity}`,
+);
+// 第四下被拒
+const pat4 = await call("POST", "visit/interact", { target: ovP.uid }, ovHost.token);
+ok(pat4.error === "摸够啦", `第四下被拒：${pat4.error}`);
+
+// 出门方（ovP）心跳拉到递增的 interaction 事件
+const ovPBeat = await call("POST", "heartbeat", { state: "idle", affinity: 0, pet_name: "总览P" }, ovP.token);
+const patsList = (ovPBeat.events || [])
+  .filter((x) => x.event.type === "interaction")
+  .map((x) => x.event.pats);
+ok(
+  JSON.stringify(patsList) === "[1,2,3]",
+  `出门方收到递增摸摸事件：${JSON.stringify(patsList)}`,
+);
+ok(
+  (ovPBeat.events || []).every((x) => JSON.stringify(x).length <= 512),
+  "事件体积在 512 字节上限内",
+);
+
+// 访客条目过期后（拨 at 到 16 分钟前）不能再摸
+const visRow = JSON.parse(await store.get(`visitors_${ovHost.uid}`));
+visRow[0].at = Date.now() - 16 * 60 * 1000;
+await store.put(`visitors_${ovHost.uid}`, JSON.stringify(visRow));
+const patExpired = await call("POST", "visit/interact", { target: ovP.uid }, ovHost.token);
+ok(patExpired.error === "TA 不在你家做客", `过期条目不能摸：${patExpired.error}`);
+
+// goHome 推的 leave 事件必须带昵称（原来 from_nick 是空串）
+await call("POST", "visit", { target: ovHost.uid }, ovP.token); // 重新进门
+await call("POST", "home", { target: ovHost.uid }, ovP.token);
+const ovHostBeat = await call("POST", "heartbeat", { state: "idle", affinity: 0, pet_name: "总览崽" }, ovHost.token);
+const leaveEvt = (ovHostBeat.events || []).find((x) => x.event.type === "leave");
+ok(
+  leaveEvt && leaveEvt.event.from_nick === "宠物_ovp111",
+  `leave 事件带昵称：${JSON.stringify(leaveEvt?.event)}`,
+);
+
 console.log(failed === 0 ? "\n全部通过" : `\n${failed} 项失败`);
 process.exit(failed === 0 ? 0 : 1);

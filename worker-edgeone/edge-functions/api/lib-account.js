@@ -40,6 +40,8 @@ const DEFAULT_HEARTBEAT_SECS = 180;
 const MAX_FRIENDS = 100;
 const MAX_VISITORS = 3;
 const VISIT_EXPIRE_MS = 15 * 60 * 1000;
+/** 摸摸上限：单次串门每位访客最多摸 3 下（服务端计数权威）。 */
+const PAT_MAX = 3;
 const RATE_LIMIT_MS = 10 * 1000;
 const ADMIN_SESSION_MS = 24 * 3600 * 1000;
 /** 用户会话寿命：最后一次使用后 90 天。滚动续期，不是固定到期日。 */
@@ -1053,6 +1055,36 @@ async function visit(store, uid, bodyReq) {
   return { ok: true };
 }
 
+/**
+ * 摸摸家里的访客。只能作用于「自己家 visitors 名单里且未过期」的对象 ——
+ * 名单之外一律拒，杜绝匿名遍历。计数落在访客条目上（pats），
+ * 每次成功：pats+1、双方亲密度 +1、向访客主人推 interaction 事件。
+ */
+async function visitInteract(store, uid, bodyReq) {
+  const target = clean(bodyReq.target);
+  if (!validUid(target)) return { error: "找不到这位访客" };
+  if (target === uid) return { error: "不能摸自己" };
+
+  const visitors = await activeVisitors(store, uid);
+  const v = visitors.find((x) => x.uid === target);
+  if (!v) return { error: "TA 不在你家做客" };
+  if ((v.pats ?? 0) >= PAT_MAX) return { error: "摸够啦" };
+
+  v.pats = (v.pats ?? 0) + 1;
+  await store.put(`visitors_${uid}`, JSON.stringify(visitors));
+  await addAffinity(store, uid, target, 1);
+
+  const meUser = JSON.parse(await store.get(`u_${uid}`));
+  await pushEvent(store, target, {
+    type: "interaction",
+    from_uid: uid,
+    from_nick: cpSlice(meUser.nick, 24),
+    pet_name: cpSlice(meUser.pet_name, 16),
+    pats: v.pats,
+  });
+  return { ok: true, pats: v.pats };
+}
+
 async function goHome(store, uid, bodyReq) {
   const target = bodyReq && bodyReq.target ? clean(bodyReq.target) : null;
   if (validUid(target)) {
@@ -1061,11 +1093,14 @@ async function goHome(store, uid, bodyReq) {
     const next = list.filter((v) => v.uid !== uid);
     if (next.length !== list.length) {
       await store.put(key, JSON.stringify(next));
+      // from_nick 必须带上：主人端要显示「XX 的宠物回家了」，
+      // 空串会被前端当无名事件丢弃（旧版本的 bug）
+      const meUser = JSON.parse(await store.get(`u_${uid}`));
       await pushEvent(store, target, {
         type: "leave",
         from_uid: uid,
-        from_nick: "",
-        pet_name: "",
+        from_nick: cpSlice(meUser.nick, 24),
+        pet_name: cpSlice(meUser.pet_name, 16),
       });
     }
   }
@@ -1511,6 +1546,9 @@ export async function dispatch(store, method, segs, query, body, env, meta = {})
     return await heartbeat(store, auth.uid, body);
   }
   if (method === "POST" && path === "visit") return await visit(store, auth.uid, body);
+  if (method === "POST" && path === "visit/interact") {
+    return await visitInteract(store, auth.uid, body);
+  }
   if (method === "POST" && path === "home") return await goHome(store, auth.uid, body);
   if (method === "POST" && path === "greet") return await greet(store, auth.uid, body);
   if (method === "POST" && path === "online/random") {

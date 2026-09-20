@@ -211,5 +211,27 @@ const regAgain = await call("POST", "/api/register", {
 });
 ok(!!regAgain.json.uid, `JSON 端点不受二进制分支影响：${regAgain.json.uid ?? JSON.stringify(regAgain.json)}`);
 
+// ---------- 摸摸与回家事件（visit/interact + leave 带 nick 过适配层） ----------
+const wPat1 = await call("POST", "/api/visit/interact", { target: a.uid }, b.token);
+ok(wPat1.status === 200 && wPat1.json.pats === 1, `摸一下过适配层：${JSON.stringify(wPat1.json)}`);
+await call("POST", "/api/visit/interact", { target: a.uid }, b.token);
+const wPat3 = await call("POST", "/api/visit/interact", { target: a.uid }, b.token);
+ok(wPat3.json.pats === 3, `第三下 pats=3：${wPat3.json.pats}`);
+const wPat4 = await call("POST", "/api/visit/interact", { target: a.uid }, b.token);
+ok(wPat4.status === 400 && wPat4.json.error === "摸够啦", `第四下被拒：${JSON.stringify(wPat4.json)}`);
+const wPatNope = await call("POST", "/api/visit/interact", { target: c.uid }, b.token);
+ok(wPatNope.status === 400, `不在家的不能摸：${wPatNope.json.error}`);
+
+const wHbA = await call("POST", "/api/heartbeat", { state: "idle", affinity: 0, pet_name: "甲崽" }, a.token);
+const wPats = (wHbA.json.events ?? [])
+  .filter((e) => e.event?.type === "interaction")
+  .map((e) => e.event.pats);
+ok(JSON.stringify(wPats) === "[1,2,3]", `出门方收到递增摸摸事件：${JSON.stringify(wPats)}`);
+
+await call("POST", "/api/home", { target: b.uid }, a.token);
+const wHbB = await call("POST", "/api/heartbeat", { state: "idle", affinity: 0, pet_name: "乙崽" }, b.token);
+const wLeave = (wHbB.json.events ?? []).find((e) => e.event?.type === "leave");
+ok(wLeave && wLeave.event.from_nick === "甲_a1b2c3", `leave 事件带昵称：${JSON.stringify(wLeave?.event)}`);
+
 console.log(failed === 0 ? "\n全部通过" : `\n${failed} 项失败`);
 process.exit(failed === 0 ? 0 : 1);
