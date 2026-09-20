@@ -42,6 +42,18 @@ const HOST_REPLY: readonly string[] = [
   "（用头顶了顶你）",
 ];
 
+/** 被摸的反应。 */
+const PAT_REACTIONS: readonly string[] = [
+  "（眯起眼睛）舒服～",
+  "（往你手边蹭了蹭）",
+  "（尾巴摇成了小风扇）",
+];
+
+/** 摸一下的反馈话术（导出供主循环用）。 */
+export function patReaction(): string {
+  return pick(PAT_REACTIONS);
+}
+
 function pick(pool: readonly string[]): string {
   return pool[Math.floor(Math.random() * pool.length)];
 }
@@ -85,6 +97,13 @@ export class GuestDialog {
       b.destroy();
       this.bubbles.delete(uid);
     }
+  }
+
+  /** 摸摸等即时反应：一句短气泡贴着访客头顶。 */
+  react(g: GuestPet, text: string): void {
+    const b = this.bubbleFor(g.seed.uid);
+    b.show(text, { autoDismissMs: 3000 });
+    b.follow(g.body);
   }
 
   /** 每帧推进：气泡跟随、到点说话、主人回应。 */

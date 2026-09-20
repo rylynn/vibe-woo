@@ -24,7 +24,7 @@ import {
 } from "./overlay/friends";
 import { GuestRegistry } from "./guest";
 import { GUEST_INTERVAL_MS } from "./guest/guest-pet";
-import { GuestDialog } from "./guest/guest-dialog";
+import { GuestDialog, patReaction } from "./guest/guest-dialog";
 import { formatAwayText } from "./overlay/away-text";
 import { FlashGuests } from "./guest/flash";
 import { listen } from "@tauri-apps/api/event";
@@ -252,6 +252,21 @@ window.addEventListener("pointerdown", (e) => {
   // 点气泡/通知条内部不拖宠物 —— 气泡按钮、通知条点击关闭由其自身处理
   if (bubble.isOpen && bubble.contains(e.clientX, e.clientY)) return;
   if (banner.isOpen && banner.contains(e.clientX, e.clientY)) return;
+  // 摸摸访客：命中即本地反馈 + fire-and-forget 上报；不进拖动/单击面板逻辑
+  const guest = guests.hit(e.clientX, e.clientY);
+  if (guest) {
+    const now = performance.now();
+    const denied = guest.pat(now);
+    guestDialog.react(guest, denied ?? patReaction());
+    if (!denied) {
+      void invoke("visitor_interact", { targetUid: guest.seed.uid }).catch((err) => {
+        // 宁静优先：失败只记一笔，不重试不打扰（最多丢一次亲密度累加）
+        console.warn("[guest] 摸摸上报失败", String(err).slice(0, 60));
+      });
+    }
+    wakeFrame();
+    return;
+  }
   const hit = pet.pointerDown(e.clientX, e.clientY);
   // 命中宠物时记下起点，pointerup 时按位移区分单击（开面板）与拖动
   if (hit) petPress = { x: e.clientX, y: e.clientY };
@@ -412,10 +427,10 @@ startBoxReporter(() => {
   if (bannerBox) boxes.push(bannerBox);
   // 访客气泡：逐个 push，不能合并成并集矩形 —— 并集会盖住大片空白，
   // 误拦截下面编辑器/终端的点击。
-  //
-  // 访客**身体**刻意不上报：它不可点、也不该拦鼠标，让点击照常穿透到
-  // 下面的应用。宠物挡住视线却点得到下面，本来就是桌宠该有的样子。
   for (const b of guestDialog.boxes) boxes.push(b);
+  // 访客身体可点（摸摸）：矩形必须上报，否则点击被穿透吃掉。
+  // 刻意不参与 lock —— 摸一下即走，不需要持续接管鼠标。
+  for (const b of guests.bodies) boxes.push(b);
   return {
     boxes,
     lock:

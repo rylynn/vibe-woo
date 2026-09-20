@@ -120,6 +120,37 @@ describe("访客注册表", () => {
   });
 });
 
+describe("摸摸（本地先行计数）", () => {
+  it("三下成功，第四下拒绝并给文案", () => {
+    const g = new GuestPet(seed, { x: 100, y: 600, side: 64, nowMs: 0, index: 0, host: () => null });
+    expect(g.pat(1000)).toBeNull();
+    expect(g.pat(1100)).toBeNull();
+    expect(g.pat(1200)).toBeNull();
+    expect(g.pat(1300)).toBe("摸够啦");
+  });
+
+  it("离场中的访客不可摸", () => {
+    const g = new GuestPet(seed, { x: 100, y: 600, side: 64, nowMs: 0, index: 0, host: () => null });
+    g.leave(0, 1440);
+    expect(g.pat(100)).toBe("TA 正在回家");
+  });
+
+  it("命中判定从后往前找，离场中不算，空白处为 null", () => {
+    const reg = new GuestRegistry(fakeCtx(), fakeCanvas(), 64, () => null);
+    reg.sync(
+      [
+        { uid: "10000001", nick: "a", pet_name: "a" },
+        { uid: "10000002", nick: "b", pet_name: "b" },
+      ],
+      0,
+    );
+    // host 为 null → 走旧槽位比例出生（0.28 / 0.5）
+    const g1 = reg.list[0];
+    expect(reg.hit(g1.body.x + 1, g1.body.y + 1)?.seed.uid).toBe(g1.seed.uid);
+    expect(reg.hit(-10, -10)).toBeNull();
+  });
+});
+
 describe("伙伴式跟随判定（followStep）", () => {
   it("主人不在家 → 不跟", () => {
     expect(followStep(100, null, -77, 64, 1440)).toBeNull();

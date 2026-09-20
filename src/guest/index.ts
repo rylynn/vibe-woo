@@ -127,6 +127,18 @@ export class GuestRegistry {
     return this.list.map((g) => g.body);
   }
 
+  /** 摸摸命中判定：点访客身体即触发；离场中的不可摸。从后往前找（后画的在上层）。 */
+  hit(px: number, py: number): GuestPet | null {
+    const list = this.list;
+    for (let i = list.length - 1; i >= 0; i--) {
+      const g = list[i];
+      if (g.isLeaving) continue;
+      const b = g.body;
+      if (px >= b.x && px < b.x + b.w && py >= b.y && py < b.y + b.h) return g;
+    }
+    return null;
+  }
+
   /** 有没有访客正在走/跳/离场 —— 只有这时才需要抬帧率。 */
   get wantsFastFrame(): boolean {
     return this.list.some((g) => g.isBusy);

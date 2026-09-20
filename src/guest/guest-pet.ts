@@ -33,6 +33,24 @@ export const FOLLOW_THRESHOLD_RATIO = 1.5;
 /** 多访客的跟随间距（有符号，单位 = 身位倍数）：左 / 右 / 远左，错开防重叠。 */
 const FOLLOW_OFFSETS = [-1.2, 1.2, -2.2];
 
+/** 单次到访的摸摸上限（与服务端 PAT_MAX 一致；本地先拦，省一次网络往返）。 */
+export const PAT_MAX_LOCAL = 3;
+/** 摸摸桃心的上升时长。 */
+const PAT_FX_MS = 700;
+/** 桃心颜色（与好友亲密度同色系）。 */
+const PAT_COLOR = "#ff8fa3";
+/**
+ * 桃心 5×5 棋盘点阵（[列, 行]，每格 cell 像素）。
+ * 刻意点阵纯色 —— CLAUDE.md 红线：绝不产生半透明像素。
+ */
+const HEART_CELLS: readonly [number, number][] = [
+  [1, 0], [3, 0],
+  [0, 1], [2, 1], [4, 1],
+  [0, 2], [4, 2],
+  [1, 3], [3, 3],
+  [2, 4],
+];
+
 /**
  * 伙伴式跟随的下一步目标（纯函数，供单测）。
  *
@@ -118,6 +136,13 @@ export class GuestPet {
   /** 正在追主宠物（用于到达检测 → 重锚）。 */
   private chasing = false;
 
+  private pats = 0;
+  private patAt = 0; // 桃心特效起始时刻；0 = 无特效
+  private patEyeUntil = 0; // poked 表情的截止时刻
+  private patRiseQ = -1; // 桃心上升量（量化进绘制指纹）
+  private lastFxBox: Box | null = null; // 上一帧桃心区域（到期后擦除用）
+  private pendingHeart: { hx: number; hy: number; cell: number } | null = null;
+
   constructor(
     seed: GuestSeed,
     opts: {
@@ -199,6 +224,21 @@ export class GuestPet {
   walkTo(x: number, boundsWidth: number): void {
     if (this.leaving) return;
     this.behavior.goto(x, boundsWidth);
+  }
+
+  /**
+   * 摸摸（本地先行反馈）：命中即计数 + 桃心 + 开心表情，
+   * 上报由调用方 fire-and-forget。第 PAT_MAX_LOCAL+1 下起拒绝。
+   * @returns null = 成功；string = 拒绝文案（直接给气泡）
+   */
+  pat(nowMs: number): string | null {
+    if (this.leaving) return "TA 正在回家";
+    if (this.pats >= PAT_MAX_LOCAL) return "摸够啦";
+    this.pats++;
+    this.patAt = nowMs;
+    this.patRiseQ = -1;
+    this.patEyeUntil = nowMs + 1600;
+    return null;
   }
 
   get isLeaving(): boolean {
@@ -291,29 +331,66 @@ export class GuestPet {
       stuck: false,
       flow: false,
       tired: false,
-      poked: false,
+      poked: nowMs < this.patEyeUntil,
       mood: null,
       gazeTarget:
         st.motion === "lookaround" ? { x: st.facing * 0.85, y: 0 } : null,
     });
 
+    // 摸摸桃心：上升 24px 后消失；棋盘点阵纯色，绝不半透明
+    let fxBox: Box | null = null;
+    if (this.patAt !== 0) {
+      const t = nowMs - this.patAt;
+      const cell = Math.max(2, Math.round(this.side / 32));
+      const heartSide = cell * 5;
+      if (t < PAT_FX_MS) {
+        const rise = Math.min(24, Math.round((t / PAT_FX_MS) * 24));
+        const hx = px + Math.round((w - heartSide) / 2);
+        const hy = py - heartSide - 6 - rise;
+        this.patRiseQ = rise;
+        fxBox = { x: hx - 1, y: py - heartSide - 32, w: heartSide + 2, h: heartSide + 32 };
+        this.pendingHeart = { hx, hy, cell };
+      } else {
+        this.patAt = 0; // 到点：本帧不画，但脏矩形要盖住上一帧的桃心
+        this.patRiseQ = -1;
+        fxBox = this.lastFxBox;
+        this.pendingHeart = null;
+      }
+      this.lastFxBox = fxBox;
+    }
+
     const key = `${px},${py},${w},${h},${bob},${this.eye.shape},${Math.round(
       this.eye.lid * 20,
-    )},${Math.round(this.eye.gazeX * 20)},${Math.round(this.eye.gazeY * 20)}`;
+    )},${Math.round(this.eye.gazeX * 20)},${Math.round(this.eye.gazeY * 20)},${this.patAt},${this.patRiseQ}`;
     if (key === this.lastDrawKey) return false;
     this.lastDrawKey = key;
 
     this.clear(ctx);
     drawAvatarFigure(ctx, { bodyX: px, bodyY: py, w, h }, this.avatar, this.eye);
+    if (this.pendingHeart) {
+      const { hx, hy, cell } = this.pendingHeart;
+      ctx.fillStyle = PAT_COLOR;
+      for (const [cx, cy] of HEART_CELLS) {
+        ctx.fillRect(hx + cx * cell, hy + cy * cell, cell, cell);
+      }
+    }
 
-    // 容差要盖住走动位移，否则移动时留残影
+    // 容差要盖住走动位移，否则移动时留残影；桃心区域一并纳入
     const pad = Math.max(10, Math.max(w, h) * 0.25);
-    this.dirty = {
+    const base: Box = {
       x: px - pad,
       y: py - pad,
       w: w + pad * 2,
       h: h + pad * 2,
     };
+    this.dirty = fxBox
+      ? {
+          x: Math.min(base.x, fxBox.x),
+          y: Math.min(base.y, fxBox.y),
+          w: Math.max(base.x + base.w, fxBox.x + fxBox.w) - Math.min(base.x, fxBox.x),
+          h: Math.max(base.y + base.h, fxBox.y + fxBox.h) - Math.min(base.y, fxBox.y),
+        }
+      : base;
     return true;
   }
 
