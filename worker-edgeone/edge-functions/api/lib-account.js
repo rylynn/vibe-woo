@@ -23,13 +23,16 @@
  *   hb_<uid>           心跳：{ state, affinity, last_seen }
  *   visitors_<uid>     当前在家访客 [{ uid, nick, pet_name, at }]（≤3）
  *   events_<uid>       事件队列（读即清空，上限 20 条；无 TTL，靠长度限制）
- *   rl_<iphash>        限频标记 { at }（10 秒，时间戳判断）
+ *   rl_<iphash>        限频标记 { at }（10 秒，时间戳判断；注册/登录/admin 共用）
+ *   rlu_<iphash>       更新镜像下载限频（独立桶：不与登录互踩）
  *   gr_<uid>           招呼限频标记 { at }（60 秒，时间戳判断）
  *   greeted_<uid>_<yyyymmdd> 当日互打招呼的 uid 数组（键随日期自然过期，无需清理）
  *   users_idx          全部 uid 的 JSON 数组（注册追加 + 心跳懒补录）
  *   usage_<uid>        个人按日用量 { days: { "YYYY-MM-DD": {...} }, last: {...} }（保留 30 天）
  *   stats_<yyyymmdd>   全站当日用量 { reminders, notes, pomodoros, online_mins, active: [uid] }（索引保留 90 天）
  *   stats_idx          已有 stats_<date> 的日期数组（保留 90 天）
+ *   upd_manifest       更新镜像：latest.json 原文（只保留最新一版，发布即覆盖）
+ *   upd_pkg_<x_y_z>    更新镜像：某版本的更新包字节（1.5.0 → upd_pkg_1_5_0；换版即删旧）
  */
 
 const OFFLINE_AFTER_MS = 8 * 60 * 1000; // 心跳 3 分钟 + 容错
@@ -67,6 +70,11 @@ const MAX_REQUESTS = 20;
 const REQUEST_EXPIRE_MS = 7 * 24 * 3600 * 1000;
 /** 碰一碰冷却：同一发起方对同一好友，60 秒内一次（服务端权威）。 */
 const BUMP_COOLDOWN_MS = 60 * 1000;
+/** 更新镜像：manifest（latest.json）体积上限。内容极小，16KB 是防滥发的护栏。 */
+const UPDATE_MANIFEST_MAX_BYTES = 16 * 1024;
+/** 更新镜像：更新包字节上下限。下限防空包误传；上限守住 KV 单值 25MB（CF / EdgeOne Pages 一致）。 */
+const UPDATE_PKG_MIN_BYTES = 1024;
+const UPDATE_PKG_MAX_BYTES = 24 * 1024 * 1024;
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -229,10 +237,15 @@ function timingSafeEqual(a, b) {
 
 // ---------- 限频（无 TTL：存时间戳，10 秒内视为存在） ----------
 
-async function rateLimited(store, ip) {
+/**
+ * @param prefix 桶前缀：注册/登录/admin 共用 rl_；更新镜像下载用 rlu_。
+ * 分桶是刻意的 —— 否则「登录后 10 秒内检查更新」会被自己的登录限频误伤
+ * （发版脚本「登录→推包→回读」就在这个窗口里）。
+ */
+async function rateLimited(store, ip, prefix = "rl") {
   const raw = String(ip || "unknown");
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(raw));
-  const key = `rl_${hex(digest).slice(0, 16)}`;
+  const key = `${prefix}_${hex(digest).slice(0, 16)}`;
   const hit = await store.get(key);
   const now = Date.now();
   if (hit) {
@@ -1200,17 +1213,183 @@ async function adminInvite(store, count) {
   return { ok: true, codes };
 }
 
+// ---------- 更新镜像（GitHub Releases 的搬运，不是真源） ----------
+
+/**
+ * 背景：很多网络访问不了 GitHub，客户端 updater 的 endpoints 是
+ * 「镜像优先、GitHub 兜底」。这里只做两件事：
+ *   1. 发版脚本经 admin 接口把 latest.json + 更新包字节推进来（先包后单）；
+ *   2. 匿名 GET 出清单（重写下载地址指向本服务）与包字节。
+ * 信任链不变：包的真实性由客户端内置 minisign 公钥验签，镜像只搬运字节。
+ */
+
+/** 严格三段数字版本（不带 v 前缀，与 release.sh 的 TAG 规约一致）。 */
+function validSemver(v) {
+  return typeof v === "string" && /^\d+\.\d+\.\d+$/.test(v);
+}
+
+/** 版本 → 包键名：1.5.0 → upd_pkg_1_5_0（EdgeOne KV 键只允许字母数字下划线）。 */
+function pkgKey(v) {
+  return `upd_pkg_${v.replace(/\./g, "_")}`;
+}
+
+/** 数字三元组比较（"1.10.0" > "1.9.0"；字符串比较会得出错误结论）。 */
+function cmpSemver(a, b) {
+  const pa = a.split(".").map(Number);
+  const pb = b.split(".").map(Number);
+  for (let i = 0; i < 3; i++) {
+    if (pa[i] !== pb[i]) return pa[i] < pb[i] ? -1 : 1;
+  }
+  return 0;
+}
+
+/**
+ * 把 manifest 里各平台的下载地址重写为本服务的 /update/pkg。
+ * 请求 URL（…/update/latest）去掉末段接 /pkg；拿不到请求 URL
+ * （旧适配器/异常环境）就保留原地址 —— 仍指向 GitHub 真源，不会坏。
+ */
+function rewriteManifest(m, reqUrl) {
+  let base = null;
+  try {
+    const u = new URL(reqUrl);
+    base = `${u.origin}${u.pathname.replace(/\/[^/]*$/, "")}/pkg`;
+  } catch {
+    base = null;
+  }
+  const platforms = {};
+  for (const [k, p] of Object.entries(m.platforms || {})) {
+    platforms[k] = { ...p, url: base ? `${base}?v=${m.version}` : p.url };
+  }
+  return { ...m, platforms };
+}
+
+/** 匿名：最新清单。无/损坏 → 404（绝不能 204：updater 把 204 当「无更新」短路，会跳过 GitHub 兜底）。 */
+async function updateLatest(store, meta) {
+  const raw = await store.get("upd_manifest");
+  if (!raw) return { error: "not found", _status: 404 };
+  let m;
+  try {
+    m = JSON.parse(raw);
+  } catch {
+    return { error: "not found", _status: 404 };
+  }
+  return {
+    __raw: JSON.stringify(rewriteManifest(m, meta.url)),
+    __rawHeaders: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+  };
+}
+
+/**
+ * 匿名：包字节。?v= 缺省取当前 manifest 版本（与清单天然一致）。
+ * 限频复用 rl_（10s/IP）：这是唯一值得防的 13MB 级滥用面。
+ */
+async function updatePkg(store, query, meta) {
+  if (await rateLimited(store, meta.ip, "rlu")) {
+    return { error: "请求太频繁，请 10 秒后再试" };
+  }
+  let v = query.get("v");
+  if (!v || !validSemver(v)) {
+    v = "";
+    const raw = await store.get("upd_manifest");
+    if (raw) {
+      try {
+        v = JSON.parse(raw).version;
+      } catch {
+        v = "";
+      }
+    }
+  }
+  if (!validSemver(v)) return { error: "not found", _status: 404 };
+  const bytes = await store.get(pkgKey(v), { binary: true });
+  if (!bytes) return { error: "not found", _status: 404 };
+  return {
+    __raw: bytes,
+    __rawHeaders: { "Content-Type": "application/octet-stream", "Cache-Control": "public, max-age=3600" },
+  };
+}
+
+/** admin：上传某版本的包字节（octet-stream，适配器装进 body.__bytes）。 */
+async function adminUpdatePkg(store, query, bodyReq) {
+  const v = String(query.get("v") || "");
+  if (!validSemver(v)) return { error: "?v= 需为 X.Y.Z 三段数字", _status: 400 };
+  const bytes = bodyReq && bodyReq.__bytes;
+  if (!(bytes instanceof Uint8Array) || bytes.length < UPDATE_PKG_MIN_BYTES) {
+    return { error: "缺少更新包字节（需 application/octet-stream 请求体）", _status: 400 };
+  }
+  if (bytes.length > UPDATE_PKG_MAX_BYTES) {
+    return { error: `更新包超过 ${UPDATE_PKG_MAX_BYTES / 1024 / 1024}MB 上限`, _status: 400 };
+  }
+  await store.put(pkgKey(v), bytes);
+  return { ok: true, size: bytes.length };
+}
+
+/**
+ * admin：发布清单。三道闸：
+ *   1. 形状（semver、platforms 非空、每项有 http(s) url + signature、体积）；
+ *   2. 先包后单 —— 该版本的包必须已存在（下载阶段 updater 不会回退 endpoint，
+ *      清单里承诺的版本必须当下就能下载到）；
+ *   3. 版本只进不退（低于现版拒绝，?force=1 放行用于修复错发）。
+ */
+async function adminUpdateManifest(store, query, bodyReq) {
+  const v = String((bodyReq && bodyReq.version) || "");
+  if (!validSemver(v)) return { error: "manifest.version 需为 X.Y.Z 三段数字", _status: 400 };
+  const size = JSON.stringify(bodyReq || {}).length;
+  if (size > UPDATE_MANIFEST_MAX_BYTES) {
+    return { error: `manifest 超过 ${UPDATE_MANIFEST_MAX_BYTES / 1024}KB`, _status: 400 };
+  }
+  const platforms = bodyReq.platforms;
+  if (
+    !platforms ||
+    typeof platforms !== "object" ||
+    Array.isArray(platforms) ||
+    Object.keys(platforms).length === 0
+  ) {
+    return { error: "manifest.platforms 不能为空", _status: 400 };
+  }
+  for (const [k, p] of Object.entries(platforms)) {
+    if (!p || typeof p !== "object") return { error: `platforms.${k} 结构非法`, _status: 400 };
+    if (typeof p.url !== "string" || !/^https?:\/\//.test(p.url)) {
+      return { error: `platforms.${k}.url 需为 http(s) 地址`, _status: 400 };
+    }
+    if (typeof p.signature !== "string" || !p.signature.trim()) {
+      return { error: `platforms.${k}.signature 不能为空`, _status: 400 };
+    }
+  }
+  if (!(await store.get(pkgKey(v), { binary: true }))) {
+    return { error: `先上传 ${v} 的更新包（admin/update/pkg），再发 manifest`, _status: 400 };
+  }
+  let prev = null;
+  const prevRaw = await store.get("upd_manifest");
+  if (prevRaw) {
+    try {
+      prev = JSON.parse(prevRaw).version || null;
+    } catch {
+      prev = null; // 现值损坏视同没有，允许覆盖自愈
+    }
+  }
+  if (prev && prev !== v && cmpSemver(v, prev) < 0 && query.get("force") !== "1") {
+    return { error: `版本只进不退（现 ${prev}，欲发 ${v}；确需回退加 ?force=1）`, _status: 400 };
+  }
+  await store.put("upd_manifest", JSON.stringify(bodyReq));
+  // 旧版本的包顺手清掉（best-effort：清不掉只是占空间，不影响正确性）
+  if (prev && prev !== v) {
+    await store.delete(pkgKey(prev));
+  }
+  return { ok: true, version: v };
+}
+
 // ---------- 分发 ----------
 
 /**
  * 分发一次请求。
- * @param store 实现了 get/put/delete 的存储（KV / 文件 / 内存）
+ * @param store 实现了 get/put/delete 的存储（KV / 文件 / 内存）；
+ *   put 可传 string | Uint8Array，get 可带 { binary: true } 读字节
  * @param method GET/POST
  * @param segs 路径段数组（已剥掉 /api 前缀）：["register"]、["friends","add"]、["admin","overview"]…
  * @param query URLSearchParams
- * @param body 已解析的请求体
+ * @param body 已解析的请求体（octet-stream 请求由适配器装成 { __bytes }）
  * @param env 环境变量（边缘函数 env 对象 / Node process.env），读取 ADMIN_USER/ADMIN_PASS
- * @param meta { ip, auth }：客户端 IP（限频）与 Authorization 头
+ * @param meta { ip, auth, url }：客户端 IP（限频）、Authorization 头、完整请求 URL（镜像清单重写下载地址用）
  */
 export async function dispatch(store, method, segs, query, body, env, meta = {}) {
   const path = segs.join("/");
@@ -1237,6 +1416,16 @@ export async function dispatch(store, method, segs, query, body, env, meta = {})
     if (segs[1] === "user") {
       return method === "GET" ? await adminUserDetail(store, query) : { error: "GET only" };
     }
+    if (segs[1] === "update") {
+      const sub = segs.slice(2).join("/");
+      if (sub === "pkg") {
+        return method === "POST" ? await adminUpdatePkg(store, query, body) : { error: "POST only" };
+      }
+      if (sub === "manifest") {
+        return method === "POST" ? await adminUpdateManifest(store, query, body) : { error: "POST only" };
+      }
+      return { error: "not found", _status: 404 };
+    }
     return { error: "not found", _status: 404 };
   }
 
@@ -1256,6 +1445,10 @@ export async function dispatch(store, method, segs, query, body, env, meta = {})
     }
     return await login(store, body);
   }
+
+  // ---- 更新镜像（匿名 GET，刻意放在登录门槛之前：更新检查不依赖账号） ----
+  if (method === "GET" && path === "update/latest") return await updateLatest(store, meta);
+  if (method === "GET" && path === "update/pkg") return await updatePkg(store, query, meta);
 
   // ---- 需要登录的接口：Bearer token 鉴权 ----
   const auth = await requireAuth(store, meta);

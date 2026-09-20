@@ -23,6 +23,10 @@
  *   GET  /api/friends         Bearer token
  *   POST /api/admin/login     { user, pass }（ADMIN_USER/ADMIN_PASS 校验）→ { token }
  *   GET  /api/admin/overview|users|user?uid=   Bearer admin token
+ *   GET  /api/update/latest   匿名 —— 更新镜像清单（无发布 404，客户端回退 GitHub）
+ *   GET  /api/update/pkg?v=   匿名 —— 更新镜像包字节
+ *   POST /api/admin/update/pkg?v=X.Y.Z        Bearer admin token，octet-stream 包字节
+ *   POST /api/admin/update/manifest           Bearer admin token，latest.json 原文
  *
  * 存储：优先使用绑定的 KV 命名空间（SYNC_KV）；
  * 未绑定时降级为进程内存 —— 仅能验证单请求，完整流程测试请用 local-dev.js。
@@ -43,8 +47,34 @@ const memoryStore = {
   },
 };
 
+/**
+ * EdgeOne KV → store 契约。字符串路径原样透传；二进制（更新镜像的包字节）
+ * 按 CF KV 的 { type: "arrayBuffer" } 惯例尝试 —— EdgeOne Pages KV 对二进制
+ * 值的支持待核实（见 docs/plans/2026-09-20-update-mirror-verification.md）：
+ * 若平台不支持，发布时 put 抛错 → 500 → 镜像保持空库，客户端回退 GitHub，
+ * 属设计内降级，不影响账号/好友等既有功能。
+ */
+function kvStore() {
+  const kv = SYNC_KV;
+  return {
+    get: async (key, opts) =>
+      opts && opts.binary
+        ? kv.get(key, { type: "arrayBuffer" }).then((b) => (b ? new Uint8Array(b) : null))
+        : kv.get(key),
+    put: async (key, value) => {
+      const v = value instanceof Uint8Array
+        ? value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength)
+        : value;
+      await kv.put(key, v);
+    },
+    delete: async (key) => {
+      await kv.delete(key);
+    },
+  };
+}
+
 function store() {
-  return typeof SYNC_KV === "undefined" ? memoryStore : SYNC_KV;
+  return typeof SYNC_KV === "undefined" ? memoryStore : kvStore();
 }
 
 function storageKind() {
@@ -89,10 +119,15 @@ export async function onRequest({ request, params }) {
 
   let body = {};
   if (request.method === "POST") {
-    try {
-      body = await request.json();
-    } catch {
-      body = {};
+    if ((request.headers.get("Content-Type") || "").includes("application/octet-stream")) {
+      // 更新镜像的包字节：不能过 JSON，原样转交 dispatch
+      body = { __bytes: new Uint8Array(await request.arrayBuffer()) };
+    } else {
+      try {
+        body = await request.json();
+      } catch {
+        body = {};
+      }
     }
   }
 
@@ -101,6 +136,7 @@ export async function onRequest({ request, params }) {
     result = await dispatch(store(), request.method, segs, url.searchParams, body, envVars(), {
       ip: clientIp(request),
       auth: request.headers.get("Authorization") || "",
+      url: request.url,
     });
   } catch (e) {
     // 异常始终记服务端日志；仅在显式开启调试时才回传给客户端。
@@ -120,6 +156,12 @@ export async function onRequest({ request, params }) {
   // _status 是状态码元信息：先取状态码，再从响应体剔除
   const status = statusFor(result);
   if (result && result._status !== undefined) delete result._status;
+
+  // __raw：更新镜像的清单/包字节 —— 绕过 JSON.stringify，按 __rawHeaders 出响应
+  if (result && result.__raw !== undefined) {
+    const rawHeaders = { ...CORS, ...(result.__rawHeaders || {}) };
+    return new Response(result.__raw, { status, headers: rawHeaders });
+  }
 
   return new Response(JSON.stringify(result), { status, headers });
 }

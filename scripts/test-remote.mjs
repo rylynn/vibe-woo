@@ -6,9 +6,10 @@
  *   node scripts/test-remote.mjs https://xxx.workers.dev/api
  *   node scripts/test-remote.mjs http://localhost:8787
  *
- * 走真实 HTTP：状态、注册、心跳、今日推荐、打招呼与冷却、串门与访客。
+ * 走真实 HTTP：状态、更新镜像只读断言、注册、心跳、今日推荐、打招呼与
+ * 冷却、串门与访客。
  * 会**真实写入数据并留下两个测试账号**，所以只用于刚部署好的空库验收，
- * 不要对着生产库跑。
+ * 不要对着生产库跑。镜像断言假定镜像尚未推送（首次发版推镜像前跑）。
  *
  * 不传地址时报错退出 —— 避免误打到内置域名。
  */
@@ -48,6 +49,18 @@ console.log(`验收目标：${BASE}\n`);
 
 const st = await call("GET", "/api/status");
 ok(st.status === 200 && st.json.ok === true, `/api/status：${st.status} ${JSON.stringify(st.json)}`);
+
+// ---- 更新镜像（只读断言：绝不推送制品，假 manifest 会顶掉镜像里的真版本） ----
+// 前提是镜像还是空的 —— 首次推镜像（release.sh 第 11 步）之前跑本脚本。
+const ul = await call("GET", "/api/update/latest");
+ok(ul.status === 404, `镜像空库 latest 应 404（绝不能 204 —— 客户端会把 204 当无更新短路，跳过 GitHub 兜底）：${ul.status}`);
+const up = await call("GET", "/api/update/pkg");
+ok(up.status === 404, `镜像空库 pkg 应 404：${up.status}`);
+const upush = await call("POST", "/api/admin/update/manifest", { version: "0.0.0", platforms: {} });
+ok(
+  upush.status === 401 || upush.status === 403,
+  `无 token 推送应被拒（401 未带凭据 / 403 服务端未配 ADMIN_*）：${upush.status}`,
+);
 
 const a = await call("POST", "/api/register", {
   account: "pet_rcheck1", password: "Abcdef12", nick: "验收_a1b2c3", invite_code: "PET888",

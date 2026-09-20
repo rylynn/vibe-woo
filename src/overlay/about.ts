@@ -204,7 +204,7 @@ export class AboutPanel {
     const hint = document.createElement("div");
     hint.className = "pet-settings-hint";
     hint.textContent =
-      "每天匿名检查一次 GitHub Releases，不发送任何本机数据，可随时关闭；下载好的更新会等你休息时再自动重启";
+      "每天匿名检查一次更新（优先国内镜像，失败自动换 GitHub Releases），不发送任何本机数据，可随时关闭；下载好的更新会等你休息时再自动重启";
     wrap.appendChild(hint);
 
     const action = document.createElement("div");

@@ -24,7 +24,7 @@ function memKV() {
   };
 }
 
-const env = { SYNC_KV: memKV() };
+const env = { SYNC_KV: memKV(), ADMIN_USER: "op", ADMIN_PASS: "s3cret-pass" };
 let failed = 0;
 // 每次请求换一个来源 IP：注册/登录有 10 秒同 IP 限频，
 // 固定 IP 会让第二条注册必然被拒（那是限频在生效，不是 bug）
@@ -51,6 +51,16 @@ async function call(method, path, body = {}, auth = "") {
     /* 非 JSON 响应按空对象处理 */
   }
   return { status: res.status, json };
+}
+
+/** octet-stream 裸字节上传（更新镜像的包），返回原始 Response 供字节级断言。 */
+async function callRaw(method, path, bytes, auth = "") {
+  const headers = {
+    "Content-Type": "application/octet-stream",
+    "CF-Connecting-IP": `198.51.100.${ipSeq++ % 250}`,
+  };
+  if (auth) headers.Authorization = `Bearer ${auth}`;
+  return worker.fetch(new Request(`https://sync.test${path}`, { method, headers, body: bytes }), env);
 }
 
 function ok(cond, msg) {
@@ -145,6 +155,61 @@ const bpW = await call("POST", "/api/friends/bump", { target: b.uid }, a.token);
 ok(bpW.status === 200 && bpW.json.ok, `friends/bump：${JSON.stringify(bpW.json)}`);
 const bpW2 = await call("POST", "/api/friends/bump", { target: b.uid }, a.token);
 ok(bpW2.status === 400 && "error" in bpW2.json && bpW2.json.retry_after > 0, `限流字段完整透传：${JSON.stringify(bpW2.json)}`);
+
+// ---------- 更新镜像（octet-stream 上传 + __raw 二进制响应过适配层） ----------
+
+const emptyLatest = await call("GET", "/api/update/latest");
+ok(emptyLatest.status === 404, `未发布 latest 404：${emptyLatest.status}`);
+
+const noAuthPush = await call("POST", "/api/admin/update/manifest", { version: "1.5.0" });
+ok(noAuthPush.status === 401, `无 token 发清单 401：${noAuthPush.status}`);
+
+const admLogin = await call("POST", "/api/admin/login", { user: "op", pass: "s3cret-pass" });
+ok(!!admLogin.json.token, `admin 登录过适配层：${JSON.stringify(admLogin.json).slice(0, 40)}`);
+
+// 推包：octet-stream 裸字节 → 适配器 __bytes 分支 → KV 存取 → 字节回读一致
+const mirrorPkg = new Uint8Array(2048);
+for (let i = 0; i < mirrorPkg.length; i++) mirrorPkg[i] = (i * 13) % 253;
+const pushRes = await callRaw("POST", "/api/admin/update/pkg?v=1.5.0", mirrorPkg, admLogin.json.token);
+ok(pushRes.status === 200, `推包过适配层：${pushRes.status}`);
+
+const manifestBody = {
+  version: "1.5.0",
+  pub_date: "2026-09-20T00:00:00Z",
+  platforms: {
+    "darwin-aarch64": { signature: "sig-arm", url: "https://github.com/rylynn/vibe-woo/releases/latest/download/vibe-pet.app.tar.gz" },
+    "darwin-x86_64": { signature: "sig-x64", url: "https://github.com/rylynn/vibe-woo/releases/latest/download/vibe-pet.app.tar.gz" },
+  },
+};
+const pushMan = await call("POST", "/api/admin/update/manifest", manifestBody, admLogin.json.token);
+ok(pushMan.status === 200 && pushMan.json.ok, `发清单过适配层：${JSON.stringify(pushMan.json)}`);
+
+// latest：JSON 响应，下载地址重写为适配层自己的 origin
+const latestRes = await worker.fetch(new Request("https://sync.test/api/update/latest"), env);
+const latestJson = JSON.parse(await latestRes.text());
+ok(latestRes.status === 200, `latest 200：${latestRes.status}`);
+ok(latestRes.headers.get("Content-Type") === "application/json", `latest Content-Type：${latestRes.headers.get("Content-Type")}`);
+ok(latestRes.headers.get("Cache-Control") === "no-store", `latest no-store：${latestRes.headers.get("Cache-Control")}`);
+ok(
+  Object.values(latestJson.platforms).every((p) => p.url === "https://sync.test/api/update/pkg?v=1.5.0"),
+  `下载地址重写为本服务 origin：${JSON.stringify(Object.values(latestJson.platforms).map((p) => p.url))}`,
+);
+
+// pkg：二进制响应，字节与上传逐一致（arrayBuffer 通道）
+const pkgRes = await worker.fetch(new Request("https://sync.test/api/update/pkg?v=1.5.0"), env);
+const pkgBytes = new Uint8Array(await pkgRes.arrayBuffer());
+ok(pkgRes.status === 200, `pkg 200：${pkgRes.status}`);
+ok(pkgRes.headers.get("Content-Type") === "application/octet-stream", `pkg Content-Type：${pkgRes.headers.get("Content-Type")}`);
+ok(
+  Buffer.compare(Buffer.from(pkgBytes), Buffer.from(mirrorPkg)) === 0,
+  `pkg 字节与上传逐字节一致：${pkgBytes.length}B`,
+);
+
+// 回归：octet-stream 分支不影响既有 JSON 端点
+const regAgain = await call("POST", "/api/register", {
+  account: "pet_raw01", password: "Abcdef12", nick: "丁_raw01", invite_code: "PET888",
+});
+ok(!!regAgain.json.uid, `JSON 端点不受二进制分支影响：${regAgain.json.uid ?? JSON.stringify(regAgain.json)}`);
 
 console.log(failed === 0 ? "\n全部通过" : `\n${failed} 项失败`);
 process.exit(failed === 0 ? 0 : 1);

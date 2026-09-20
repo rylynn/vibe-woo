@@ -1,11 +1,12 @@
 //! 自动更新：独立后台线程，24 小时一查，下载后等用户休息再装。
 //!
-//! 设计（docs/superpowers/specs/2026-09-03-auto-update-words-srs-panel-chrome-design.md F1）：
+//! 设计（docs/superpowers/specs/2026-09-03-auto-update-words-srs-panel-chrome-design.md F1，
+//! 2026-09-20 增补更新镜像）：
 //! - 独立线程而非插件系统第五插件：更新是系统能力不是桌宠行为；
-//! - 匿名 GET GitHub Releases，不上传任何用户数据，设置可关；
+//! - 匿名检查更新（同步服务镜像优先，GitHub 兜底），不上传任何用户数据，设置可关；
 //! - 安装时机只认一个判据：键盘节奏 Resting 且不在番茄工作期 ——
 //!   更新桌宠不值得打断工作；
-//! - 仓库私有期间匿名 GET 得 404，走静默失败路径；转公开后自动生效。
+//! - 两边都 404（仓库私有/镜像未发布）走静默失败路径，转公开后自动生效。
 
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -46,6 +47,47 @@ fn note_for(notes: &str, version: &str) -> Option<String> {
 /// 摘要是否超字数（release.sh 在 bash 侧做同一校验，这里供单测兜底）。
 pub fn note_too_long(note: &str) -> bool {
     note.chars().count() > NOTE_MAX_CHARS
+}
+
+/// GitHub 兜底端点的内置缺省（正常从 tauri.conf.json 的 endpoints[0] 读，单一真源）。
+const GITHUB_LATEST_JSON: &str =
+    "https://github.com/rylynn/vibe-woo/releases/latest/download/latest.json";
+
+/// manifest 检查请求的超时：镜像被黑洞（不拒绝也不回应）时，
+/// 30 秒内换下一个 endpoint。只约束清单 GET —— 2.11.0 里 check 构造的
+/// Update 硬编码 timeout: None，下载不受影响（13MB 慢链路也不能掐）。
+const MANIFEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// endpoints 构造（纯函数）：镜像优先（同步服务地址 + /update/latest），GitHub 兜底。
+///
+/// 很多网络到不了 GitHub，同步服务内置镜像把清单和包字节都搬过来；
+/// 镜像空库回 404（不能 204 —— updater 把 204 当「无更新」短路，
+/// 会跳过 GitHub 兜底），网络错误/解析失败则继续试下一个 endpoint。
+pub fn updater_endpoints(mirror_base: &str, github: &str) -> Vec<String> {
+    vec![
+        format!("{}/update/latest", mirror_base.trim_end_matches('/')),
+        github.to_string(),
+    ]
+}
+
+/// GitHub 兜底值：读 tauri.conf.json plugins.updater.endpoints[0]，取不到用内置常量。
+fn github_endpoint(app: &AppHandle) -> String {
+    github_from_config(
+        app.config()
+            .plugins
+            .0
+            .get("updater")
+            .and_then(|v| v.get("endpoints")),
+    )
+}
+
+/// 纯函数半区：从配置的 endpoints 值（可能缺失/形状不对）取第一个字符串。
+fn github_from_config(v: Option<&serde_json::Value>) -> String {
+    v.and_then(|v| v.as_array())
+        .and_then(|a| a.first())
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| GITHUB_LATEST_JSON.to_string())
 }
 
 /// 手动检查的状态回显事件名（about 面板监听）。
@@ -162,9 +204,31 @@ async fn run_check(app: &AppHandle, manual: bool) {
     if manual {
         emit_status(app, UpdateStatus::Checking);
     }
-    let updater = match app.updater() {
-        Ok(u) => u,
-        Err(e) => return report(app, manual, format!("初始化失败：{e}")),
+    // 镜像地址跟随同步服务配置（syncclient::base_url 只读 social.server，
+    // 不碰 token/登录态），继承「https 或 http+IP」校验；GitHub 是配置里的兜底值。
+    // 明文 http 端点要求 tauri.conf.json 开 dangerousInsecureTransportProtocol
+    // —— 更新包真实性由 minisign 验签保证，与传输无关。
+    let urls = updater_endpoints(&crate::syncclient::base_url(), &github_endpoint(app))
+        .iter()
+        .map(|s| s.parse::<url::Url>())
+        .collect::<Result<Vec<_>, _>>();
+    let updater = match urls {
+        Ok(urls) => {
+            let built = app
+                .updater_builder()
+                .endpoints(urls)
+                .map_err(|e| format!("端点不可用：{e}"))
+                .and_then(|b| {
+                    b.timeout(MANIFEST_TIMEOUT)
+                        .build()
+                        .map_err(|e| e.to_string())
+                });
+            match built {
+                Ok(u) => u,
+                Err(e) => return report(app, manual, format!("初始化失败：{e}")),
+            }
+        }
+        Err(e) => return report(app, manual, format!("端点地址非法：{e}")),
     };
     let update = match updater.check().await {
         Ok(Some(u)) => u,
@@ -175,8 +239,8 @@ async fn run_check(app: &AppHandle, manual: bool) {
             }
             return;
         }
-        // 仓库私有期间匿名 GET 得 404 落到这里 —— 设计内行为，静默即可
-        Err(e) => return report(app, manual, format!("检查失败：{e}")),
+        // 私有仓库/镜像空库的 404、两边都不可达 —— 全部落到这里，静默即可。
+        Err(e) => return report(app, manual, format!("检查失败：{e}（已依次尝试镜像与 GitHub）")),
     };
     let version = update.version.clone();
     // 所用 tauri-plugin-updater 2.11.0：download(on_chunk(usize, Option<u64>),
@@ -320,6 +384,51 @@ mod tests {
         // maybe_show_update_note 发的是 talkdrive 的 EVENT_TALK，
         // 前端 main.ts 已有监听（8 秒自动消失），不需要新前端代码。
         assert_eq!(crate::talkdrive::EVENT_TALK, "pet://talk");
+    }
+
+    #[test]
+    fn 镜像在前github兜底在后() {
+        let eps = updater_endpoints("http://119.45.169.217:8787/api", GITHUB_LATEST_JSON);
+        assert_eq!(
+            eps,
+            vec![
+                "http://119.45.169.217:8787/api/update/latest".to_string(),
+                GITHUB_LATEST_JSON.to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn base尾斜杠不会拼出双斜杠() {
+        // base_url() 正常会剥尾斜杠，这里防御性兜住手滑配置
+        for base in ["https://x.test/api", "https://x.test/api/"] {
+            let eps = updater_endpoints(base, "https://g.example/x.json");
+            assert_eq!(eps[0], "https://x.test/api/update/latest", "base={base}");
+            assert!(!eps[0].contains("//update"), "不该出现双斜杠：{}", eps[0]);
+        }
+    }
+
+    #[test]
+    fn endpoints全部是合法url() {
+        // updater_builder().endpoints() 会做 https 校验（http 需配置开关），
+        // 先在纯函数层保证拼出来的串 parse 得成 URL。
+        for u in updater_endpoints("http://1.2.3.4:8787/api", GITHUB_LATEST_JSON) {
+            assert!(u.parse::<url::Url>().is_ok(), "{u} 该是合法 URL");
+        }
+    }
+
+    #[test]
+    fn github兜底值缺省回退常量() {
+        assert_eq!(github_from_config(None), GITHUB_LATEST_JSON);
+        assert_eq!(
+            github_from_config(Some(&serde_json::json!({ "不是数组": true }))),
+            GITHUB_LATEST_JSON
+        );
+        assert_eq!(
+            github_from_config(Some(&serde_json::json!(["https://cfg.example/l.json"]))),
+            "https://cfg.example/l.json",
+            "配置里有值时以配置为准（单一真源）"
+        );
     }
 
     #[test]

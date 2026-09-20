@@ -24,14 +24,28 @@ function kvStore(env) {
   const kv = env.SYNC_KV;
   if (!kv) return null;
   return {
-    get: async (key) => kv.get(key),
+    // binary: 更新镜像的包字节（upd_pkg_*）；其余仍是字符串
+    get: async (key, opts) =>
+      opts && opts.binary
+        ? toUint8(await kv.get(key, { type: "arrayBuffer" }))
+        : kv.get(key),
     put: async (key, value) => {
-      await kv.put(key, value);
+      // CF KV put 只收 string | ArrayBuffer | ReadableStream，视图要拷贝成独立 buffer
+      // （slice 兜底 byteOffset ≠ 0 的视图，直接传 .buffer 会带上偏移前的脏字节）
+      const v = value instanceof Uint8Array
+        ? value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength)
+        : value;
+      await kv.put(key, v);
     },
     delete: async (key) => {
       await kv.delete(key);
     },
   };
+}
+
+/** ArrayBuffer | null → Uint8Array | null（store 契约统一以 Uint8Array 交字节）。 */
+function toUint8(buf) {
+  return buf ? new Uint8Array(buf) : null;
 }
 
 export default {
@@ -47,10 +61,15 @@ export default {
 
     let body = {};
     if (request.method === "POST") {
-      try {
-        body = await request.json();
-      } catch {
-        body = {};
+      if ((request.headers.get("Content-Type") || "").includes("application/octet-stream")) {
+        // 更新镜像的包字节：不能过 JSON，原样转交 dispatch
+        body = { __bytes: new Uint8Array(await request.arrayBuffer()) };
+      } else {
+        try {
+          body = await request.json();
+        } catch {
+          body = {};
+        }
       }
     }
 
@@ -79,6 +98,7 @@ export default {
             request.headers.get("X-Forwarded-For") ||
             "unknown",
           auth: request.headers.get("Authorization") || "",
+          url: request.url,
         },
       );
     } catch (e) {
@@ -96,6 +116,12 @@ export default {
     }
     const status = statusFor(result);
     if (result && result._status !== undefined) delete result._status;
+
+    // __raw：更新镜像的清单/包字节 —— 绕过 JSON.stringify，按 __rawHeaders 出响应
+    if (result && result.__raw !== undefined) {
+      const rawHeaders = { ...CORS, ...(result.__rawHeaders || {}) };
+      return new Response(result.__raw, { status, headers: rawHeaders });
+    }
 
     return new Response(JSON.stringify(result), { status, headers });
   },

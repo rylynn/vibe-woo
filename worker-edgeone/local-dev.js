@@ -23,13 +23,14 @@
  *   SYNC_HOST                 监听地址（默认 0.0.0.0，即允许外部访问）
  *
  * 自托管前要知道的三件事：
- *   - 单机单文件、没有副本 —— 数据文件要定期备份
+ *   - 单机单文件、没有副本 —— 数据文件要定期备份（更新镜像的包字节在
+ *     数据文件旁的 *.bin 旁路文件里，备份时一并带上）
  *   - 明文 HTTP，会话 token 在链路上可被窃听（域名备案后请改用 https）
  *   - 密码存的是 PBKDF2 哈希，但账号、昵称、宠物名是明文落盘的
  */
 
 import { createServer } from "node:http";
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { webcrypto } from "node:crypto";
@@ -67,16 +68,38 @@ class FileStore {
     writeFileSync(this.path, JSON.stringify(Object.fromEntries(this.data)));
   }
 
-  async get(key) {
+  /**
+   * 二进制旁路文件：更新镜像的包字节（~13MB）绝不进 JSON ——
+   * flush() 每次 put 都整体重写数据文件，13MB 进 JSON 意味着
+   * 每次心跳都重写 ~17MB 磁盘，自托管机会被 IO 拖垮。
+   */
+  binPath(key) {
+    return `${this.path}.${key}.bin`;
+  }
+
+  async get(key, opts) {
+    if (opts && opts.binary) {
+      return existsSync(this.binPath(key))
+        ? new Uint8Array(readFileSync(this.binPath(key)))
+        : null;
+    }
     return this.data.has(key) ? this.data.get(key) : null;
   }
 
   async put(key, value) {
+    if (value instanceof Uint8Array) {
+      writeFileSync(this.binPath(key), value);
+      return; // 不进 Map：JSON.stringify(Uint8Array) 会变成 {"0":31,…}，既臃肿又取不回
+    }
     this.data.set(key, value);
     this.flush();
   }
 
   async delete(key) {
+    if (existsSync(this.binPath(key))) {
+      rmSync(this.binPath(key));
+      return;
+    }
     this.data.delete(key);
     this.flush();
   }
@@ -105,10 +128,15 @@ createServer(async (req, res) => {
   if (req.method === "POST") {
     const chunks = [];
     for await (const c of req) chunks.push(c);
-    try {
-      body = JSON.parse(Buffer.concat(chunks).toString() || "{}");
-    } catch {
-      body = {};
+    if ((req.headers["content-type"] || "").includes("application/octet-stream")) {
+      // 更新镜像的包字节：不能过 JSON，原样转交 dispatch
+      body = { __bytes: new Uint8Array(Buffer.concat(chunks)) };
+    } else {
+      try {
+        body = JSON.parse(Buffer.concat(chunks).toString() || "{}");
+      } catch {
+        body = {};
+      }
     }
   }
 
@@ -120,6 +148,8 @@ createServer(async (req, res) => {
     result = await dispatch(store, req.method, segs, url.searchParams, body, process.env, {
       ip: req.socket.remoteAddress || "local",
       auth: req.headers.authorization || "",
+      // 反代场景下 Host 头才是对外地址；裸跑时兜底本机端口
+      url: `http://${req.headers.host || `localhost:${port}`}${req.url}`,
     });
   } catch (e) {
     console.error("[sync] dispatch failed:", e);
@@ -130,6 +160,25 @@ createServer(async (req, res) => {
   const detail = result && result.detail;
   if (detail !== undefined) delete result.detail;
   if (result && result._status !== undefined) delete result._status;
+
+  // __raw：更新镜像的清单/包字节 —— 绕过 JSON.stringify，按 __rawHeaders 出响应
+  if (result && result.__raw !== undefined) {
+    const buf = result.__raw instanceof Uint8Array ? Buffer.from(result.__raw) : Buffer.from(String(result.__raw));
+    const rawHeaders = {
+      ...CORS,
+      ...(result.__rawHeaders || {}),
+      "Content-Length": buf.length,
+      "X-Pet-Sync-Storage": "file",
+    };
+    if (detail !== undefined && debugErrors()) {
+      rawHeaders["X-Pet-Sync-Error"] = encodeURIComponent(String(detail)).slice(0, 180);
+    }
+    res.writeHead(status, rawHeaders);
+    res.end(buf);
+    console.log(`${req.method} ${url.pathname} → ${status} (${buf.length} bytes)`);
+    return;
+  }
+
   const out = JSON.stringify(result);
 
   const headers = {

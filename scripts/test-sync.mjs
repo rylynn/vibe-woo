@@ -33,15 +33,15 @@ const store = memStore();
 let ipSeq = 0; // 每次请求换 IP，避开 10 秒注册限频
 let failed = 0;
 
-async function call(method, path, body = {}, auth = "") {
+async function call(method, path, body = {}, auth = "", opts = {}) {
   return dispatch(
     store,
     method,
     path.split("/").filter(Boolean),
-    new URLSearchParams(),
+    new URLSearchParams(opts.query || ""),
     body,
-    {},
-    { ip: `ip-${ipSeq++}`, auth: auth ? `Bearer ${auth}` : "" },
+    opts.env || {},
+    { ip: `ip-${ipSeq++}`, auth: auth ? `Bearer ${auth}` : "", url: opts.url || "" },
   );
 }
 
@@ -282,6 +282,108 @@ ok(frB6.friends.find((f) => f.uid === j.uid).affinity === 10, "碰一碰 +2");
 await store.put(`friends_${c.uid}`, JSON.stringify([{ uid: a.uid, at: Date.now() }]));
 const frC = await call("GET", "friends", {}, c.token);
 ok(frC.friends[0].affinity === 0, "旧 friends 数据无 aff 字段默认 0");
+
+// ---------- 更新镜像（GitHub Releases 的分发镜像） ----------
+
+const bytesEq = (a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b)) === 0;
+const ADMIN_ENV = { ADMIN_USER: "op", ADMIN_PASS: "s3cret-pass" };
+const manifestOf = (v) => ({
+  version: v,
+  pub_date: "2026-09-20T00:00:00Z",
+  platforms: {
+    "darwin-aarch64": { signature: `sig-${v}-arm`, url: "https://github.com/rylynn/vibe-woo/releases/latest/download/vibe-pet.app.tar.gz" },
+    "darwin-x86_64": { signature: `sig-${v}-x64`, url: "https://github.com/rylynn/vibe-woo/releases/latest/download/vibe-pet.app.tar.gz" },
+  },
+});
+// 假更新包：超过 1KB 下限即可（真实包 13MB，字节数一致性逻辑与此无关）
+const fakePkg = new Uint8Array(2048);
+for (let i = 0; i < fakePkg.length; i++) fakePkg[i] = (i * 7) % 251;
+const LATEST_URL = { url: "http://x.test/api/update/latest" };
+
+// 未发布：latest 与 pkg 都必须 404（204 会被 updater 当「无更新」短路，跳过 GitHub 兜底）
+const u0 = await call("GET", "update/latest", {}, "", LATEST_URL);
+ok(u0._status === 404, `未发布 latest 返回 404：${u0._status}`);
+const p0 = await call("GET", "update/pkg", {}, "");
+ok(p0._status === 404, `未发布 pkg 返回 404：${p0._status}`);
+
+// admin 门：未配置 403；配置了但没 token 401
+const admOff = await call("POST", "admin/update/pkg", { __bytes: fakePkg }, "", { query: "v=1.5.0" });
+ok(admOff._status === 403, `admin 未配置时发布被拒 403：${admOff._status}`);
+const admNoAuth = await call("POST", "admin/update/pkg", { __bytes: fakePkg }, "", { query: "v=1.5.0", env: ADMIN_ENV });
+ok(admNoAuth._status === 401, `无 token 发布被拒 401：${admNoAuth._status}`);
+
+// admin 登录 → 推包 → 发清单
+const adm = await call("POST", "admin/login", { user: "op", pass: "s3cret-pass" }, "", { env: ADMIN_ENV });
+ok(!!adm.token, `admin 登录：${adm.error ?? "ok"}`);
+
+// 顺序纪律：包不存在时 manifest 必须被拒（下载阶段客户端不回退 endpoint）
+const mEarly = await call("POST", "admin/update/manifest", manifestOf("1.4.0"), adm.token, { env: ADMIN_ENV });
+ok(mEarly._status === 400 && mEarly.error.includes("先上传"), `先发 manifest 被拒：${mEarly.error}`);
+
+// 缺字节 / 非法版本号
+const pNoBytes = await call("POST", "admin/update/pkg", {}, adm.token, { query: "v=1.5.0", env: ADMIN_ENV });
+ok(pNoBytes._status === 400, `缺字节的包被拒：${pNoBytes.error}`);
+const pBadV = await call("POST", "admin/update/pkg", { __bytes: fakePkg }, adm.token, { query: "v=v1.5.0", env: ADMIN_ENV });
+ok(pBadV._status === 400, `非三段数字版本被拒：${pBadV.error}`);
+
+// 正序发布 1.5.0
+const p1 = await call("POST", "admin/update/pkg", { __bytes: fakePkg }, adm.token, { query: "v=1.5.0", env: ADMIN_ENV });
+ok(p1.ok === true && p1.size === fakePkg.length, `推包 1.5.0：${JSON.stringify(p1)}`);
+const m1 = await call("POST", "admin/update/manifest", manifestOf("1.5.0"), adm.token, { env: ADMIN_ENV });
+ok(m1.ok === true && m1.version === "1.5.0", `发清单 1.5.0：${JSON.stringify(m1)}`);
+
+// latest：双平台下载地址都重写为本服务 pkg，且 no-store
+const l1 = await call("GET", "update/latest", {}, "", LATEST_URL);
+const l1m = JSON.parse(l1.__raw);
+ok(l1m.version === "1.5.0", `latest 版本正确：${l1m.version}`);
+ok(
+  Object.values(l1m.platforms).every((p) => p.url === "http://x.test/api/update/pkg?v=1.5.0"),
+  `双平台 url 重写为本服务：${JSON.stringify(Object.values(l1m.platforms).map((p) => p.url))}`,
+);
+ok(l1.__rawHeaders["Cache-Control"] === "no-store", "latest 响应 no-store（URL 无版本参数，缓存必错）");
+ok(l1m.platforms["darwin-aarch64"].signature === "sig-1.5.0-arm", "signature 原样透传（验签靠它）");
+
+// pkg 回读：带 v 与缺省 v（取 manifest 版本）字节逐一致
+const pkg1 = await call("GET", "update/pkg", {}, "", { query: "v=1.5.0" });
+ok(bytesEq(pkg1.__raw, fakePkg), "pkg 字节与推送逐字节一致（?v= 指定）");
+const pkg2 = await call("GET", "update/pkg", {}, "");
+ok(bytesEq(pkg2.__raw, fakePkg), "pkg 字节一致（缺省 v 取当前 manifest 版本）");
+ok(pkg2.__rawHeaders["Cache-Control"] === "public, max-age=3600", "pkg 响应可缓存（?v= 天然版本化）");
+
+// 非法 manifest 形状
+for (const [label, bad] of [
+  ["缺 version", { platforms: manifestOf("1.5.0").platforms }],
+  ["非 semver", { ...manifestOf("x.y.z") }],
+  ["platforms 空", { ...manifestOf("1.5.0"), platforms: {} }],
+  ["缺 signature", { ...manifestOf("1.5.0"), platforms: { "darwin-aarch64": { url: "https://a/b.tar.gz" } } }],
+  ["url 非 http", { ...manifestOf("1.5.0"), platforms: { "darwin-aarch64": { url: "ftp://a/b", signature: "s" } } }],
+]) {
+  const r = await call("POST", "admin/update/manifest", bad, adm.token, { env: ADMIN_ENV });
+  ok(r._status === 400, `非法 manifest（${label}）被拒：${r.error}`);
+}
+
+// 版本只进不退：1.5.0 在库时发 1.4.0（先补包再发单，顺序纪律不破）
+await call("POST", "admin/update/pkg", { __bytes: fakePkg }, adm.token, { query: "v=1.4.0", env: ADMIN_ENV });
+const mRoll = await call("POST", "admin/update/manifest", manifestOf("1.4.0"), adm.token, { env: ADMIN_ENV });
+ok(mRoll._status === 400 && mRoll.error.includes("只进不退"), `版本回退被拒：${mRoll.error}`);
+
+// 数字比较：1.10.0 > 1.9.0（字符串比较会判反）
+await call("POST", "admin/update/pkg", { __bytes: fakePkg }, adm.token, { query: "v=1.10.0", env: ADMIN_ENV });
+const mUp = await call("POST", "admin/update/manifest", manifestOf("1.10.0"), adm.token, { env: ADMIN_ENV });
+ok(mUp.ok === true, `1.10.0 顺利升级（数字比较）：${JSON.stringify(mUp)}`);
+ok((await store.get("upd_pkg_1_5_0", { binary: true })) === null, "旧版本包键被清理");
+ok((await store.get("upd_pkg_1_10_0", { binary: true })) !== null, "新版本包键在库");
+
+// force=1 回退放行（修复错发用）
+await call("POST", "admin/update/pkg", { __bytes: fakePkg }, adm.token, { query: "v=1.9.0", env: ADMIN_ENV });
+const mForce = await call("POST", "admin/update/manifest", manifestOf("1.9.0"), adm.token, { env: ADMIN_ENV, query: "force=1" });
+ok(mForce.ok === true, `force=1 回退放行：${JSON.stringify(mForce)}`);
+ok((await store.get("upd_pkg_1_10_0", { binary: true })) === null, "回退后清理 1.10.0 包键");
+
+// 损坏 manifest → latest 404（客户端回退 GitHub 的设计内行为）
+await store.put("upd_manifest", "not json");
+const lBad = await call("GET", "update/latest", {}, "", LATEST_URL);
+ok(lBad._status === 404, `损坏 manifest 返回 404：${lBad._status}`);
 
 console.log(failed === 0 ? "\n全部通过" : `\n${failed} 项失败`);
 process.exit(failed === 0 ? 0 : 1);

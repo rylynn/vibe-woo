@@ -28,3 +28,8 @@
       日志）；手动检查仍可用
 - [ ] **摘要红线**：version-notes.json 故意写 51 字 → `release.sh --check`
       拒绝发版
+
+---
+
+2026-09-20 增补更新镜像（同步服务镜像优先、GitHub 兜底）后，本清单用例需在
+镜像路径复跑一遍，另见 `2026-09-20-update-mirror-verification.md`。

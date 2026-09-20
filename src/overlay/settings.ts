@@ -352,7 +352,7 @@ export class SettingsPanel {
         "服务地址",
         c.social_server,
         (v) => this.patch({ social_server: v.trim() }),
-        "留空则使用内置服务",
+        "留空则使用内置服务；更新检查的镜像同此地址",
       ),
     );
 

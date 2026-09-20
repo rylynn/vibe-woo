@@ -10,11 +10,13 @@
 #   5. 签名：ad-hoc 签名（避免下载后提示「已损坏」）；tauri 同时产出 minisign 更新签名（.sig）
 #   6. 打包：hdiutil 打成 .dmg；生成 latest.json（updater 清单，发版期生成物，不入库）
 #   7. 发布：gh release create vX.Y.Z 上传 .tar.gz / .sig / latest.json / .dmg
+#   8. 镜像：push-mirror.sh 把包与清单推到同步服务（国内可达；失败仅警告，可补推）
 #
 # 用法：
-#   bash scripts/release.sh                完整发版
-#   bash scripts/release.sh --check        只做校验，不构建不发布
-#   bash scripts/release.sh --skip-tests   跳过测试（不建议）
+#   bash scripts/release.sh                 完整发版
+#   bash scripts/release.sh --check         只做校验，不构建不发布
+#   bash scripts/release.sh --skip-tests    跳过测试（不建议）
+#   bash scripts/release.sh --skip-mirror   跳过镜像推送（GitHub Release 照发）
 #
 # 依赖：git、gh（已登录）、pnpm、cargo、python3。
 # 私钥绝不入库：放 ~/.vibe-pet/updater.key 或导出 TAURI_SIGNING_PRIVATE_KEY，
@@ -37,10 +39,12 @@ die()  { printf '%s✗%s %s\n' "$C_ERR" "$C_RESET" "$*" >&2; exit 1; }
 
 CHECK_ONLY=0
 SKIP_TESTS=0
+SKIP_MIRROR=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --check)      CHECK_ONLY=1; shift ;;
-    --skip-tests) SKIP_TESTS=1; shift ;;
+    --check)       CHECK_ONLY=1; shift ;;
+    --skip-tests)  SKIP_TESTS=1; shift ;;
+    --skip-mirror) SKIP_MIRROR=1; shift ;;
     -h|--help)    awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; exit 0 ;;
     *)            die "未知参数：$1（用 --help 查看用法）" ;;
   esac
@@ -98,6 +102,21 @@ ok "工作区干净，${BRANCH} 已与远程同步，${TAG} 未被占用"
 command -v gh >/dev/null 2>&1 || die "缺 gh 命令：brew install gh && gh auth login"
 gh auth status >/dev/null 2>&1 || die "gh 未登录：gh auth login"
 ok "gh 已登录（$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || echo '当前仓库')）"
+
+# ---------- 4.5 更新镜像凭据（可选：发版后推镜像，很多网络到不了 GitHub） ----------
+# 只做齐备性检查（环境变量或 ~/.vibe-pet/mirror*.txt 任一来源即可），
+# 实际读取与推送在第 11 步交给 push-mirror.sh；缺任何一项都不阻断发版。
+MIRROR_READY=0
+if [[ -n "${MIRROR_BASE_URL:-}" || -f "${HOME}/.vibe-pet/mirror.txt" ]] \
+  && [[ -n "${MIRROR_ADMIN_USER:-}" || -f "${HOME}/.vibe-pet/mirror-admin-user.txt" ]] \
+  && [[ -n "${MIRROR_ADMIN_PASS:-}" || -f "${HOME}/.vibe-pet/mirror-admin-pass.txt" ]]; then
+  MIRROR_READY=1
+  ok "更新镜像凭据已就绪（发版后自动推送，内容不回显）"
+elif [[ $SKIP_MIRROR -eq 1 ]]; then
+  ok "已按 --skip-mirror 跳过镜像推送"
+else
+  warn "镜像凭据不全（MIRROR_BASE_URL/ADMIN_USER/ADMIN_PASS 或 ~/.vibe-pet/mirror*.txt），第 11 步将跳过镜像推送，GitHub Release 不受影响"
+fi
 
 # ---------- --check 到此为止 ----------
 if [[ $CHECK_ONLY -eq 1 ]]; then
@@ -290,4 +309,20 @@ if [[ $SIGNING -eq 1 ]]; then
   printf '  %s提示%s：仓库公开后自动更新检查才生效（私有期匿名检查 404 静默失败）；本次已正式签名 + 公证，下载者可正常打开。\n' "$C_WARN" "$C_RESET"
 else
   printf '  %s提示%s：仓库公开后自动更新检查才生效（私有期匿名检查 404 静默失败）；下载者首次打开若被拦，右键应用 → 打开（本次为 ad-hoc 签名，未公证，属正常现象）。\n' "$C_WARN" "$C_RESET"
+fi
+
+# ---------- 11. 推送更新镜像（GitHub Releases 是真源；失败不阻断，可补推） ----------
+# 镜像是国内可达的搬运副本：客户端 updater 镜像优先、GitHub 兜底，
+# 所以镜像失败只是「部分用户晚点收到更新」，绝不影响发版本身。
+if [[ $SKIP_MIRROR -eq 1 ]]; then
+  warn "已跳过镜像推送（--skip-mirror）；事后补推：bash scripts/push-mirror.sh ${V}"
+elif [[ $MIRROR_READY -eq 1 ]]; then
+  step "推送更新镜像（先包后单 + 回读校验）"
+  if bash scripts/push-mirror.sh "$V" --artifact "$ART" --manifest latest.json; then
+    ok "镜像已同步：客户端下轮检查即走镜像"
+  else
+    warn "镜像推送失败 —— GitHub Release 已发布，不影响本次发版；镜像恢复后补推：bash scripts/push-mirror.sh ${V}"
+  fi
+else
+  warn "未配置镜像凭据，跳过镜像推送；配置后可随时补推：bash scripts/push-mirror.sh ${V}"
 fi
