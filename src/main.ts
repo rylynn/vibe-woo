@@ -604,6 +604,9 @@ function applyAway(n: {
     }, 1000);
   } else {
     stopAwayTicker();
+    // 清掉出门演出残留的 goto 目标，否则回家后续走到屏幕边缘
+    //（演出只走了一半就隐藏，隐藏期间行为冻结，回家后 continueWalk 会恢复执行）
+    pet.stopWander();
   }
   awayIcon.style.display = n.away ? "flex" : "none";
   awayIcon.title = "点击召回宠物";
@@ -779,8 +782,15 @@ function onFrame(now: number): void {
   }
 
   if (pet.isHidden) {
-    // 不在家：零绘制零行为，500ms 一拍兜底；回家事件会立即唤醒
-    setTimeout(wakeFrame, 500);
+    // 不在家：零绘制零行为，500ms 一拍兜底；回家事件会立即唤醒。
+    // 送客/访客离场期间抬帧（与在家分支同款判定与间隔），否则 2fps
+    // 下一拍走不出屏幕 —— 1.2s 离场到点就被移除，访客半路就消失。
+    // 没有访客活动时仍走 500ms，锁屏/离家的省电语义不变。
+    const busy = guests.wantsFastFrame || flash.isBusy;
+    setTimeout(
+      wakeFrame,
+      busy ? Math.min(pet.debugIntervalMs, GUEST_INTERVAL_MS) : 500,
+    );
     return;
   }
 
