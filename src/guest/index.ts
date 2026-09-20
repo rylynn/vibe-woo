@@ -24,6 +24,7 @@ export class GuestRegistry {
     private readonly ctx: CanvasRenderingContext2D,
     private readonly canvas: HTMLCanvasElement,
     private side: number,
+    private readonly host: () => Box | null,
   ) {}
 
   /**
@@ -70,17 +71,27 @@ export class GuestRegistry {
       }
     }
 
-    // 新面孔 → 找空位坐下
+    // 新面孔 → 从靠近主宠物一侧的屏幕边缘出生，跟随逻辑牵引它走过去
     for (const s of want) {
       if (this.list.some((g) => g.seed.uid === s.uid)) continue;
       const slot = this.slots.findIndex((g) => g === null);
       if (slot < 0) continue; // 满了就等下一拍，不挤掉正在淡出的
+      const host = this.host();
+      const x = host
+        ? host.x + host.w / 2 < this.canvas.width / 2
+          ? 0
+          : this.canvas.width - this.side
+        : Math.round(this.canvas.width * (SPAWN_RATIOS[slot] ?? 0.5) - this.side / 2);
+      const y = host
+        ? Math.round(host.y + host.h - this.side)
+        : Math.round(this.canvas.height * BASE_Y_RATIO);
       const g = new GuestPet(s, {
-        x: Math.round(this.canvas.width * SPAWN_RATIOS[slot] - this.side / 2),
-        y: Math.round(this.canvas.height * BASE_Y_RATIO),
+        x,
+        y,
         side: this.side,
         nowMs,
         index: slot,
+        host: this.host,
       });
       this.slots[slot] = g;
       arrived.push(g);

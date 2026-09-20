@@ -28,6 +28,33 @@ const GUEST_FPS = 24;
  */
 const LEAVE_MS = 1200;
 
+/** 跟随判定阈值：与目标位距离超过 1.5 个身位才开始追。 */
+export const FOLLOW_THRESHOLD_RATIO = 1.5;
+/** 多访客的跟随间距（有符号，单位 = 身位倍数）：左 / 右 / 远左，错开防重叠。 */
+const FOLLOW_OFFSETS = [-1.2, 1.2, -2.2];
+
+/**
+ * 伙伴式跟随的下一步目标（纯函数，供单测）。
+ *
+ * @param me 访客当前 x（左上角）
+ * @param host 主宠物中心 x；null = 主人不在家，不跟
+ * @param offset 目标间距（有符号像素：负在主宠物左侧、正在右侧）
+ * @returns 需要走时的目标 x（左上角坐标，已钳制屏幕内）；null = 距离够近，原地待着
+ */
+export function followStep(
+  me: number,
+  host: number | null,
+  offset: number,
+  side: number,
+  boundsWidth: number,
+): number | null {
+  if (host === null) return null;
+  const maxX = Math.max(0, boundsWidth - side);
+  const target = Math.max(0, Math.min(maxX, host + offset - side / 2));
+  if (Math.abs(target - me) <= side * FOLLOW_THRESHOLD_RATIO) return null;
+  return target;
+}
+
 /**
  * 由 uid 确定性生成形象。
  *
@@ -84,15 +111,31 @@ export class GuestPet {
   private leaving = false;
   private leaveAt = 0;
 
+  /** 主宠物身体供应商（null = 主人不在家：不跟随，原地小范围晃悠）。 */
+  private readonly host: () => Box | null;
+  /** 跟随间距（像素，有符号）。 */
+  private readonly followOffset: number;
+  /** 正在追主宠物（用于到达检测 → 重锚）。 */
+  private chasing = false;
+
   constructor(
     seed: GuestSeed,
-    opts: { x: number; y: number; side: number; nowMs: number; index: number },
+    opts: {
+      x: number;
+      y: number;
+      side: number;
+      nowMs: number;
+      index: number;
+      host: () => Box | null;
+    },
   ) {
     this.seed = seed;
     this.avatar = avatarForUid(seed.uid);
     this.side = opts.side;
     this.startMs = opts.nowMs;
     this.phaseOffset = opts.index * 470;
+    this.host = opts.host;
+    this.followOffset = FOLLOW_OFFSETS[opts.index % FOLLOW_OFFSETS.length] * opts.side;
 
     let s = (opts.index + 1) * 7919;
     const rng = () => {
@@ -183,6 +226,26 @@ export class GuestPet {
     const dt = this.lastTickMs === 0 ? 0 : (nowMs - this.lastTickMs) / 1000;
     this.lastTickMs = nowMs;
     const safeDt = Math.min(dt, 0.12);
+    // 伙伴式跟随：离主宠物太远就追，追上后把锚点重设在它身边
+    //（之后的小范围晃悠围绕新家，主宠物照常游走不受影响）。
+    // 放在 update 之前、不受渲染帧率门限影响 —— goto 指令每拍都该下发。
+    if (!this.leaving) {
+      const host = this.host();
+      if (host) {
+        const hostCx = host.x + host.w / 2;
+        const st0 = this.behavior.current;
+        const target = followStep(st0.x, hostCx, this.followOffset, this.side, bounds.width);
+        if (target !== null) {
+          this.chasing = true;
+          this.behavior.goto(target, bounds.width);
+        } else if (this.chasing) {
+          this.chasing = false;
+          // 就位：重锚 + 脚线对齐主宠物，面向它
+          this.behavior.placeAt(st0.x, Math.round(host.y + host.h - this.side));
+          this.behavior.face(hostCx >= st0.x ? 1 : -1);
+        }
+      }
+    }
     if (safeDt > 0) {
       this.behavior.update({
         dt: safeDt,

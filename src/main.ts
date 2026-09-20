@@ -140,7 +140,9 @@ const friendsPanel = new FriendsPanel(banner);
 
 // —— 访客：别人家的宠物来做客 ——
 // 画在主宠物同一张画布上；主宠物清脏矩形时会擦到访客，所以访客后画。
-const guests = new GuestRegistry(ctx2d, canvas, 48);
+const guests = new GuestRegistry(ctx2d, canvas, 48, () =>
+  pet.isHidden ? null : pet.body,
+);
 const flash = new FlashGuests();
 const guestDialog = new GuestDialog((text) => {
   // 主宠物的回应走主气泡；不在家就不说话。

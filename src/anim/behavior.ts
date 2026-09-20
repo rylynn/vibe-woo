@@ -211,6 +211,12 @@ export class Behavior {
     this.state.facing = this.targetX >= this.state.x ? 1 : -1;
   }
 
+  /** 定向：待机时面向某方向（对话/跟随面对面用）。走动中无效 —— 朝向由目标决定。 */
+  face(dir: -1 | 1): void {
+    if (this.targetX !== null) return;
+    this.state.facing = dir;
+  }
+
   /** 仪式完成，回到待机。 */
   finishGoto(): void {
     if (this.targetX === null) return;

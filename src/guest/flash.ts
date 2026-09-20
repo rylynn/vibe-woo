@@ -56,6 +56,8 @@ export class FlashGuests {
       side: this.side,
       nowMs,
       index: 2,
+      // 快闪走位由 arrive/walkTo 全程编排，不参与伙伴式跟随（host 给 null 即关闭）
+      host: () => null,
     });
     pet.walkTo(targetX, canvasW);
     this.current = pet;
