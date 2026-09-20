@@ -587,6 +587,18 @@ pub fn spawn(app: &AppHandle) {
                                             }
                                             Err(e) => {
                                                 eprintln!("[social] 串门被拒：{e}");
+                                                // 被拒也该让主人知道，
+                                                // 不然「想出门没出门」毫无痕迹
+                                                let _ = app.emit(
+                                                    EVENT_SOCIAL,
+                                                    serde_json::json!({
+                                                        "event": {
+                                                            "type": "visit_rejected",
+                                                            "nick": t.nick,
+                                                            "pet_name": "",
+                                                        }
+                                                    }),
+                                                );
                                             }
                                         }
                                     }
@@ -674,9 +686,13 @@ fn handle_event(e: &serde_json::Value, affinity: &mut Affinity, app: &AppHandle)
         }
         "interaction" => {
             affinity.on_interacted();
+            // 「被摸了 N 下」的 N 目前只写日志就丢了，透传给前端（缺省 1）
+            let pats = e["event"]["pats"].as_u64().unwrap_or(1);
             let _ = app.emit(
                 EVENT_SOCIAL,
-                serde_json::json!({ "event": { "type": "interaction", "from_nick": from_nick } }),
+                serde_json::json!(
+                    { "event": { "type": "interaction", "from_nick": from_nick, "pats": pats } }
+                ),
             );
         }
         "greet" => {
