@@ -135,6 +135,20 @@ describe("摸摸（本地先行计数）", () => {
     expect(g.pat(100)).toBe("TA 正在回家");
   });
 
+  it("离场中的访客矩形不再上报穿透（拦截面=可摸面）", () => {
+    const reg = new GuestRegistry(fakeCtx(), fakeCanvas(), 64, () => null);
+    reg.sync([{ uid: "10000001", nick: "a", pet_name: "a" }], 0);
+    expect(reg.bodies.length).toBe(1);
+
+    const g = reg.list[0];
+    g.leave(100, 1440);
+    // 离场要走完 1200ms 才 gone，期间槽位还没释放
+    expect(g.isLeaving).toBe(true);
+    expect(reg.isEmpty).toBe(false);
+    // 但命中框已经不该上报 —— 否则点它会被透明窗拦下且无任何反馈
+    expect(reg.bodies.length).toBe(0);
+  });
+
   it("命中判定从后往前找，离场中不算，空白处为 null", () => {
     const reg = new GuestRegistry(fakeCtx(), fakeCanvas(), 64, () => null);
     reg.sync(

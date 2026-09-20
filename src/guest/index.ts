@@ -122,9 +122,13 @@ export class GuestRegistry {
     return drew;
   }
 
-  /** 命中上报用：每只访客的矩形逐个给出（不能合并成并集矩形）。 */
+  /**
+   * 命中上报用：每只访客的矩形逐个给出（不能合并成并集矩形）。
+   * 拦截面 = 可摸面：离场中的访客 hit() 已不可摸，这里同样不上报，
+   * 否则点击落在透明窗上既无反馈也到不了下面的应用。
+   */
   get bodies(): Box[] {
-    return this.list.map((g) => g.body);
+    return this.list.filter((g) => !g.isLeaving).map((g) => g.body);
   }
 
   /** 摸摸命中判定：点访客身体即触发；离场中的不可摸。从后往前找（后画的在上层）。 */
