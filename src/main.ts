@@ -542,7 +542,7 @@ void onAwayChange((n) => {
   // setHidden 会整屏 clearRect，访客必须作废指纹重画，否则会消失
   guests.invalidate();
   if (n.away) {
-    // 宠物走了：贴它身上的通知没了依托，收掉（右上角提醒卡片不受影响）
+    // 宠物走了：贴身通知退回右上角、内容保留（右上角提醒卡片不受影响）
     banner.releaseFromPet();
     flash.clear(ctx2d);
     awayKind = n.kind;
@@ -589,16 +589,12 @@ void listen<PluginCard>("pet://plugin-card", (e) => {
  * 贴着宠物头顶的通知条。
  *
  * 宠物相关的通知就该长在宠物身上 —— 固定在右上角会让人找不着是谁在说话。
- * 宠物不在家（去串门）时没有身体可贴，退回右上角，至少不丢消息。
+ * 宠物不在家（去串门）时没有身体可贴，show 内部自动退回右上角。
  */
-function notifyNearPet(text: string): void {
-  if (pet.isHidden) {
-    banner.show(text);
-    return;
-  }
-  banner.show(text, undefined, { followPet: true });
-  // 立刻定位一次，避免上屏第一帧先闪在右上角
-  banner.follow(pet.body);
+function notifyNearPet(text: string, autoDismissMs = 8000): void {
+  banner.show(text, undefined, { followPet: true, autoDismissMs });
+  // 立刻定位一次（带上主气泡让位），避免上屏第一帧闪在右上角
+  if (!pet.isHidden) banner.follow(pet.body, bubble.box);
 }
 
 // —— 番茄工作法已迁为插件：阶段通知走 pet://plugin-card（见上方监听） ——
@@ -703,7 +699,7 @@ function onFrame(now: number): void {
   // 位置量化到整数像素 —— 不绘制则位置必然未变，DOM 写纯属浪费。
   if (drew) {
     bubble.follow(pet.body);
-    banner.follow(pet.body);
+    banner.follow(pet.body, bubble.box);
   }
 
   if (pet.isHidden) {

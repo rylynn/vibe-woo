@@ -4,6 +4,46 @@ import { enablePanelDrag } from "./panel-drag";
 /** 气泡与宠物身体之间的留白（也是尾巴三角形的高度）。 */
 const TAIL_GAP = 10;
 
+/** 锚链（宠物头 → 主气泡 → 通知条）之间的间隙。 */
+const STACK_GAP = 10;
+
+/**
+ * 通知条在锚链中的位置（纯函数，供单测与 Banner.follow 共用）。
+ *
+ * 顺序：宠物头 → 主气泡 → 通知条，沿远离宠物的方向依次纵向排开；
+ * 头顶放不下时整体翻到脚下（与主气泡同一规则）。
+ * @param pet 宠物身体；null 表示宠物不在家（返回 null，走右上角）
+ * @param avoid 主气泡矩形；null 表示主气泡没开
+ */
+export function bannerStackPos(
+  pet: Box | null,
+  avoid: Box | null,
+  size: { w: number; h: number },
+  screen: { w: number; h: number },
+): { x: number; y: number } | null {
+  if (!pet) return null;
+  const x = Math.round(
+    Math.max(4, Math.min(screen.w - size.w - 4, pet.x + pet.w / 2 - size.w / 2)),
+  );
+  const aboveY = pet.y - size.h - TAIL_GAP;
+  const belowY = Math.min(pet.y + pet.h + TAIL_GAP, screen.h - size.h - 4);
+  // 主气泡相对宠物的位置：在上半还是下半
+  const avoidAbove = avoid !== null && avoid.y + avoid.h <= pet.y + pet.h / 2;
+  const avoidBelow = avoid !== null && avoid.y >= pet.y + pet.h / 2;
+  const stackBelow = Math.round(
+    Math.max(
+      4,
+      avoidBelow ? Math.min(screen.h - size.h - 4, avoid.y + avoid.h + STACK_GAP) : belowY,
+    ),
+  );
+  if (aboveY >= 4) {
+    const stacked = avoidAbove ? avoid.y - STACK_GAP - size.h : aboveY;
+    if (stacked >= 4) return { x, y: Math.round(stacked) };
+    return { x, y: stackBelow }; // 头顶叠不下：整体翻脚下
+  }
+  return { x, y: stackBelow };
+}
+
 /**
  * 宠物气泡。
  *
@@ -256,14 +296,17 @@ export class Banner {
 
   /**
    * 显示通知条。
-   * @param opts.followPet 贴着宠物头顶显示；宠物不在家时自动退回右上角
+   * @param opts.followPet 贴着宠物头顶显示（默认 true —— 轻通知都收拢到
+   *        宠物头上）；没有可贴的身体（不在家）或显式 false 时走右上角
+   * @param opts.autoDismissMs 自动收起时间；缺省 10 分钟
    */
   show(
     text: string,
     time?: string,
-    opts: { followPet?: boolean } = {},
+    opts: { followPet?: boolean; autoDismissMs?: number } = {},
   ): void {
-    this.anchored = opts.followPet ?? false;
+    this.anchored = opts.followPet ?? true;
+    if (this.anchored && !this.body) this.anchored = false; // 不在家：退右上角
     this.setAnchored(this.anchored);
     this.el.replaceChildren();
     if (time) {
@@ -286,8 +329,8 @@ export class Banner {
 
     if (this.timer) clearTimeout(this.timer);
     // 重要提醒也不过期自动关 —— 用户可能刚好不在，回来还要能看到。
-    // 但如果 10 分钟还没人理，也别一直挂着
-    this.timer = setTimeout(() => this.dismiss(), 10 * 60 * 1000);
+    // 但如果 10 分钟还没人理，也别一直挂着（可被 autoDismissMs 覆盖）
+    this.timer = setTimeout(() => this.dismiss(), opts.autoDismissMs ?? 10 * 60 * 1000);
 
     this.el.style.display = "block";
     this.open = true;
@@ -296,18 +339,21 @@ export class Banner {
   }
 
   /**
-   * 通用小卡片：右上角，一段文字 + 若干操作按钮。
+   * 通用小卡片：宠物在家贴头顶、不在家退右上角，一段文字 + 若干操作按钮。
    * 好友搜索结果、申请回执这类「主动操作的回执」用它 —— 视觉权重
-   * 高于贴宠物的气泡，又不该跟着宠物乱跑。60 秒无操作自动收起。
+   * 高于贴宠物的气泡。60 秒无操作自动收起。
    */
   showCard(opts: {
     tag: string;
     text: string;
     actions: Array<{ label: string; primary?: boolean; onClick: () => void }>;
   }): void {
-    this.anchored = false;
-    this.setAnchored(false);
+    // 好友回执这类轻操作卡：宠物在家就贴头顶，不在家退回右上角。
+    // 先重置外观类再切贴身模式 —— 顺序反了 pet-banner-follow 会被覆盖掉，
+    // 贴身定位就会和右上角的 right:12px 打架。
     this.el.className = "pet-banner pet-banner-reminder";
+    this.anchored = this.body !== null;
+    this.setAnchored(this.anchored);
     this.el.onclick = null;
     this.el.replaceChildren();
 
@@ -351,6 +397,7 @@ export class Banner {
 
     this.el.style.display = "block";
     this.open = true;
+    if (this.anchored && this.body) this.follow(this.body);
   }
 
   /**
@@ -507,25 +554,20 @@ export class Banner {
 
   /**
    * 渲染循环每帧调用：贴宠物模式下跟随身体。
-   *
-   * 宠物被拖到屏幕顶部时头顶放不下，翻到脚下；水平方向越界则贴边。
+   * @param avoid 主气泡矩形 —— 锚链防重叠：头顶/脚下都让主气泡先挑位置
    */
-  follow(body: Box): void {
+  follow(body: Box, avoid?: Box | null): void {
     this.body = body;
     if (!this.open || !this.anchored) return;
-    const w = this.el.offsetWidth;
-    const h = this.el.offsetHeight;
-    const left = Math.max(
-      4,
-      Math.min(window.innerWidth - w - 4, body.x + body.w / 2 - w / 2),
+    const pos = bannerStackPos(
+      body,
+      avoid ?? null,
+      { w: this.el.offsetWidth, h: this.el.offsetHeight },
+      { w: window.innerWidth, h: window.innerHeight },
     );
-    const above = body.y - h - TAIL_GAP;
-    const top =
-      above >= 4
-        ? above
-        : Math.min(body.y + body.h + TAIL_GAP, window.innerHeight - h - 4);
-    this.el.style.left = `${Math.round(left)}px`;
-    this.el.style.top = `${Math.round(Math.max(4, top))}px`;
+    if (!pos) return;
+    this.el.style.left = `${pos.x}px`;
+    this.el.style.top = `${pos.y}px`;
   }
 
   dismiss(): void {
@@ -536,13 +578,13 @@ export class Banner {
   }
 
   /**
-   * 宠物离家时收起贴身通知。
-   *
-   * 没有宠物可贴，留着就变成悬在半空的孤零零一条 —— 直接收掉。
-   * 提醒大卡片不跟随宠物，不受影响。
+   * 宠物离家：贴身通知退回右上角，内容保留（不在家也不丢消息）。
+   * 同时清空身体引用 —— 之后 showCard/show 不该再锚到过期位置。
    */
   releaseFromPet(): void {
-    if (this.open && this.anchored) this.dismiss();
+    this.body = null;
+    if (this.open && this.anchored) this.setAnchored(false);
+    this.anchored = false;
   }
 
   get isOpen(): boolean {
