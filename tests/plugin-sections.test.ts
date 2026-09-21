@@ -183,4 +183,49 @@ describe("资讯面板分区", () => {
     expect(el.textContent).toContain("今日 7 条");
     expect(el.textContent).not.toContain("更新于");
   });
+
+  it("卡片带策展理由时显示理由行", () => {
+    const el = newsFrontend.renderCard(
+      {
+        plugin_id: "news",
+        kind: "news",
+        priority: "low",
+        ttl_secs: 20,
+        payload: {
+          headline: "h",
+          source: "s",
+          url: "https://x",
+          digest: null,
+          reason: "值得关注的格局变化",
+          ai: false,
+        },
+      } as Parameters<typeof newsFrontend.renderCard>[0],
+      host,
+    );
+    expect(el.textContent).toContain("值得关注的格局变化");
+  });
+
+  it("digest 与理由都在时 digest 在前", () => {
+    const el = newsFrontend.renderCard(
+      {
+        plugin_id: "news",
+        kind: "news",
+        priority: "low",
+        ttl_secs: 20,
+        payload: {
+          headline: "h",
+          source: "s",
+          url: "https://x",
+          digest: "今日总评",
+          reason: "单条理由",
+          ai: true,
+        },
+      } as Parameters<typeof newsFrontend.renderCard>[0],
+      host,
+    );
+    const lines = [...el.querySelectorAll(".pet-news-digest")].map(
+      (n) => n.textContent,
+    );
+    expect(lines).toEqual(["今日总评", "单条理由"]);
+  });
 });

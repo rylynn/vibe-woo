@@ -6,6 +6,8 @@ interface NewsPayload {
   source: string;
   url: string;
   digest: string | null;
+  /** LLM 策展推荐理由（1.6.0 起有；旧后端无此字段）。 */
+  reason?: string | null;
   ai: boolean;
 }
 
@@ -22,9 +24,9 @@ const DEFAULT_CFG: NewsConfigView = {
   fetch_hour: 9,
 };
 
-/** 类别（与 Rust CATEGORIES 清单一致）。tech 已聚焦为 AI·广告，id 不变保兼容。 */
+/** 类别（与 Rust CATEGORIES 清单一致）。tech 定位「AI 进展 + 行业动态」，id 不变保兼容。 */
 const CATEGORIES: [string, string][] = [
-  ["tech", "AI·广告"],
+  ["tech", "科技·AI"],
   ["finance", "财经"],
   ["design", "设计"],
 ];
@@ -51,6 +53,14 @@ export const newsFrontend: PluginFrontend = {
       digest.className = "pet-news-digest";
       digest.textContent = p.digest;
       el.appendChild(digest);
+    }
+
+    if (p.reason) {
+      // 策展理由复用 digest 的小字样式；两者都有时 digest 在前（上面已 append）
+      const reason = document.createElement("div");
+      reason.className = "pet-news-digest";
+      reason.textContent = p.reason;
+      el.appendChild(reason);
     }
 
     const link = document.createElement("button");
