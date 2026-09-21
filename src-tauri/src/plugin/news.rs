@@ -566,7 +566,8 @@ fn parse_picks(text: &str) -> Vec<CuratorPick> {
 }
 
 /// 策展落池（纯函数）：先清空未消费条目的旧策展标记（分数落回、理由清空），
-/// 再按 URL 成员校验应用新 picks（≤MAX_PICKS；编造 URL 静默丢弃，绝不入池），
+/// 再按 URL 成员校验应用新 picks（≤MAX_PICKS；编造 URL 静默丢弃，绝不入池；
+/// 重复 URL 只生效一次），
 /// 选中条目 +CURATE_BONUS 并挂 ≤30 字理由，最后重排未消费尾巴。
 /// 已消费条目（next_idx 之前）一律不动。返回实际应用条数。
 fn apply_curation(items: &mut [NewsItem], next_idx: usize, picks: &[CuratorPick]) -> usize {
@@ -584,13 +585,15 @@ fn apply_curation(items: &mut [NewsItem], next_idx: usize, picks: &[CuratorPick]
         if reason.is_empty() {
             continue;
         }
-        if let Some(it) = items[idx..].iter_mut().find(|i| i.url == p.url) {
+        // 重复 URL 只提档一次：清过旧标记后尾巴分数必 <50（规则分上限 45），
+        // ≥50 即本轮已应用过 —— LLM 重复输出同一链接不再叠分、不占名额
+        if let Some(it) = items[idx..].iter_mut().find(|i| i.url == p.url && i.score < CURATE_BONUS) {
             it.score += CURATE_BONUS;
             it.reason = Some(reason);
             applied += 1;
         }
     }
-    items[idx..].sort_by(|a, b| b.score.cmp(&a.score));
+    sort_pending(items, idx); // 与拉取合并后的排序同一出处：策展 > 高分 > 入池序
     applied
 }
 
@@ -1414,5 +1417,27 @@ mod tests {
             .collect();
         assert_eq!(apply_curation(&mut items, 0, &picks), 6, "最多 6 条");
         assert_eq!(items.iter().filter(|i| i.reason.is_some()).count(), 6);
+    }
+
+    #[test]
+    fn 策展理由截断到30字且重复url只提档一次() {
+        let mk = |u: &str, s: u32| NewsItem {
+            headline: format!("h{u}"),
+            source: "s".into(),
+            url: u.into(),
+            score: s,
+            reason: None,
+        };
+        let mut items = vec![mk("https://x/1", 10), mk("https://x/2", 20)];
+        let long = "很".repeat(40);
+        let picks = vec![
+            CuratorPick { url: "https://x/1".into(), reason: long },
+            CuratorPick { url: "https://x/1".into(), reason: "重复".into() },
+        ];
+        assert_eq!(apply_curation(&mut items, 0, &picks), 1, "重复 URL 只提档一次");
+        let x1 = items.iter().find(|i| i.url == "https://x/1").unwrap();
+        assert_eq!(x1.score, 60, "10 + 50，只加一次");
+        let expect: String = "很".repeat(30);
+        assert_eq!(x1.reason.as_deref(), Some(expect.as_str()), "理由截 30 字");
     }
 }
