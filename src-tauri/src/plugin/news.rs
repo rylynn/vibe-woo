@@ -311,6 +311,10 @@ struct NewsState {
     /// 上次成功拉取的时刻（epoch 分钟），面板「更新于 HH:MM」用。
     #[serde(default)]
     last_success_mins: u64,
+    /// 上次策展时刻（epoch 分钟）；0 = 今天还没策展过。未配置 LLM 时跳过
+    /// 策展**不**记时刻 —— 用户中途配好后下一轮增量即生效。
+    #[serde(default)]
+    last_curate_mins: u64,
     /// 是否有拉取在飞行中（线程起来时置 true，收尾时置 false）。
     /// 飞行中不再重复起线程 —— 否则异步线程还在跑、判定每 30s 过一次，
     /// 会在源挂掉时叠出十几个并发请求。**不落盘**：新的一天从 false 起。
@@ -650,7 +654,8 @@ fn apply_fetch_result(s: &mut NewsState, today: &str, any_ok: bool, now: u64) {
 /// 异步拉取选中类别的全部源，**增量合并**进缓存。
 ///
 /// digest 只在「当天首批内容」落位时生成一次：增量轮（items 已有内容）
-/// 不再调 LLM —— 当天头条不会翻盘，省 token。
+/// 不再重写 —— 当天头条不会翻盘，省 token。策展（spawn_curate）是另一条
+/// 旁路：首批策展一次，之后增量轮有新条目且距上次 ≥2h 才重策展。
 fn spawn_fetch(cfg: NewsConfig, today: String, app: tauri::AppHandle) {
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_current_thread()
@@ -689,10 +694,11 @@ fn spawn_fetch(cfg: NewsConfig, today: String, app: tauri::AppHandle) {
             }
         }
 
-        let (digest_needed, all_items) = with_state(|s| {
+        let (digest_needed, curate_needed, curate_from, all_items) = with_state(|s| {
             let was_empty = s.items.is_empty();
+            let mut added = 0usize;
             for (items, quota) in batches {
-                merge_batch(&mut s.items, items, quota);
+                added += merge_batch(&mut s.items, items, quota);
             }
             s.date = today.clone();
             s.next_idx = s.next_idx.min(s.items.len()); // 防御：游标不越界
@@ -700,12 +706,19 @@ fn spawn_fetch(cfg: NewsConfig, today: String, app: tauri::AppHandle) {
             apply_fetch_result(s, &today, any_ok, epoch_mins());
             // 未消费尾巴按分数重排：下午入池的重磅发布排到上午普通条目前面
             sort_pending(&mut s.items, s.next_idx);
-            (was_empty && !s.items.is_empty(), s.items.clone())
+            // 策展触发：当天首批内容策展一次；之后增量有新条目且距上次 ≥2h 重策展
+            let first = was_empty && !s.items.is_empty();
+            let incremental =
+                added > 0 && epoch_mins().saturating_sub(s.last_curate_mins) >= CURATE_GAP_MINS;
+            (first, incremental, s.next_idx.min(s.items.len()), s.items.clone())
         });
         save_state(&app);
 
         if digest_needed {
-            spawn_digest(cfg, all_items, today, app);
+            spawn_digest(cfg.clone(), all_items.clone(), today.clone(), app.clone());
+        }
+        if digest_needed || curate_needed {
+            spawn_curate(cfg, all_items, curate_from, today, app);
         }
     });
 }
@@ -753,6 +766,77 @@ fn spawn_digest(cfg: NewsConfig, items: Vec<NewsItem>, today: String, app: tauri
             } else {
                 false // 跨天了，别把昨天的点评写到今天
             }
+        });
+        if hit {
+            save_state(&app);
+        }
+    });
+}
+
+/// 策展轮次的最小间隔（分钟）：增量轮有新条目也要隔 2 小时才重策展
+/// （自然上限约 4-5 次/天，每次输入只有标题列表）。
+const CURATE_GAP_MINS: u64 = 120;
+
+/// 异步 LLM 策展：从当天未消费池子里按「前沿公司从业者视角」挑 top-N
+/// 并写回缓存。失败一律静默 —— 规则分排序兜底，绝不打扰用户。
+/// LLM 只挑选输入列表里已有的 URL（apply_curation 做成员校验），
+/// 绝不采信编造的链接。
+fn spawn_curate(cfg: NewsConfig, items: Vec<NewsItem>, next_idx: usize, today: String, app: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        let llm = crate::configcmd::current().llm;
+        if !llm.enabled || llm.api_key.is_empty() {
+            return; // 未配置 LLM：不策展也不记时刻
+        }
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(_) => return,
+        };
+        let from = next_idx.min(items.len());
+        // 最新在前、最多 40 条：最旧的存量大概率已过时
+        let lines: Vec<String> = items[from..]
+            .iter()
+            .rev()
+            .take(40)
+            .map(|i| format!("{}｜{}｜{}｜{}", i.source, i.headline, i.url, i.score))
+            .collect();
+        if lines.is_empty() {
+            return;
+        }
+        let user = format!(
+            "关注类别：{}\n今日池子：\n{}",
+            cfg.categories
+                .iter()
+                .map(|c| category_label(c))
+                .collect::<Vec<_>>()
+                .join("、"),
+            lines.join("\n")
+        );
+        let system = concat!(
+            "你是互联网、科技、手机行业前沿公司的资深行业编辑。从今天的资讯池里",
+            "挑出对行业格局、产品决策、AI 进展真正重要的条目，最多 6 条，宁缺毋滥。",
+            "只输出 JSON：{\"picks\":[{\"url\":\"原样复制输入中的链接\",",
+            "\"reason\":\"30 字内的中文推荐理由\"}]}。",
+            "url 只能来自输入列表，绝不编造。"
+        );
+        let opts = crate::llm::CompleteOptions {
+            temperature: 0.2,
+            max_output_tokens: Some(1024),
+            max_output_chars: 600,
+        };
+        let Ok(out) = rt.block_on(crate::llm::complete_with(&llm, system, &user, true, opts)) else {
+            return; // 静默：规则分排序兜底
+        };
+        let picks = parse_picks(&out);
+        let hit = with_state(|s| {
+            if s.date != today || !s.fetched {
+                return false; // 跨天了，别把昨天的策展写到今天
+            }
+            apply_curation(&mut s.items, s.next_idx, &picks);
+            s.last_curate_mins = epoch_mins();
+            true
         });
         if hit {
             save_state(&app);
@@ -1243,6 +1327,7 @@ mod tests {
             fetch_date: "2026-09-01".into(),
             fetch_failures: 0,
             last_success_mins: 4242,
+            last_curate_mins: 4242,
             fetch_inflight: false,
         };
         rollover(&mut s, "2026-09-02");
@@ -1252,6 +1337,7 @@ mod tests {
         assert!(!s.fetched);
         assert!(s.digest.is_empty());
         assert_eq!(s.last_fetch_mins, 0, "跨天后当轮立即重新拉取");
+        assert_eq!(s.last_curate_mins, 0, "跨天重置策展时刻");
         assert_eq!(s.fetch_date, "", "跨天后内容视为陈旧，触发补拉");
 
         // 同日不动
