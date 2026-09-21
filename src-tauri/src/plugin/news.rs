@@ -531,6 +531,69 @@ fn score_item(weight: u8, headline: &str) -> u32 {
     u32::from(weight) + (hits as u32 * KW_BONUS).min(KW_BONUS_CAP)
 }
 
+// ---------- LLM 策展（可选增强：配置了 LLM 才跑；纯函数部分在此） ----------
+
+/// 策展提档加分：压过一切规则分（规则分上限 30 + 15 = 45）。
+const CURATE_BONUS: u32 = 50;
+/// 单次策展最多选中的条数。
+const MAX_PICKS: usize = 6;
+
+/// 策展输出的一条（LLM 只允许挑选输入列表里已有的 url）。
+#[derive(Debug, Clone, Deserialize)]
+struct CuratorPick {
+    url: String,
+    reason: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct PickList {
+    picks: Vec<CuratorPick>,
+}
+
+/// 解析策展输出 JSON：{"picks":[{"url":"…","reason":"…"}]}。
+/// 容错：直接解析失败时取首个 `{` 到最后一个 `}` 之间再试一次
+/// （模型偶尔带 markdown 围栏）；仍失败返回空 —— 等于本次没策展。
+fn parse_picks(text: &str) -> Vec<CuratorPick> {
+    if let Ok(l) = serde_json::from_str::<PickList>(text.trim()) {
+        return l.picks;
+    }
+    let (Some(a), Some(b)) = (text.find('{'), text.rfind('}')) else {
+        return Vec::new();
+    };
+    serde_json::from_str::<PickList>(&text[a..=b])
+        .unwrap_or_default()
+        .picks
+}
+
+/// 策展落池（纯函数）：先清空未消费条目的旧策展标记（分数落回、理由清空），
+/// 再按 URL 成员校验应用新 picks（≤MAX_PICKS；编造 URL 静默丢弃，绝不入池），
+/// 选中条目 +CURATE_BONUS 并挂 ≤30 字理由，最后重排未消费尾巴。
+/// 已消费条目（next_idx 之前）一律不动。返回实际应用条数。
+fn apply_curation(items: &mut [NewsItem], next_idx: usize, picks: &[CuratorPick]) -> usize {
+    let idx = next_idx.min(items.len());
+    // 清旧标记：规则分上限 45 < CURATE_BONUS，分数 ≥ 50 必是策展档
+    for it in &mut items[idx..] {
+        if it.score >= CURATE_BONUS {
+            it.score -= CURATE_BONUS;
+        }
+        it.reason = None;
+    }
+    let mut applied = 0usize;
+    for p in picks.iter().take(MAX_PICKS) {
+        let reason: String = p.reason.trim().chars().take(30).collect();
+        if reason.is_empty() {
+            continue;
+        }
+        if let Some(it) = items[idx..].iter_mut().find(|i| i.url == p.url) {
+            it.score += CURATE_BONUS;
+            it.reason = Some(reason);
+            applied += 1;
+        }
+    }
+    items[idx..].sort_by(|a, b| b.score.cmp(&a.score));
+    applied
+}
+
 /// 补拉退避：连续失败第 n 次后要等多久再试（0 → 5 → 15 → 30 封顶）。
 fn retry_backoff_mins(failures: u8) -> u64 {
     RETRY_BACKOFF_MINS[usize::from(failures).min(RETRY_BACKOFF_MINS.len() - 1)]
@@ -1271,5 +1334,85 @@ mod tests {
         assert_eq!(score_item(20, "Bank raises Series B"), 25);
         // 无命中 = 纯源权重
         assert_eq!(score_item(20, "平平无奇的一条"), 20);
+    }
+
+    #[test]
+    fn 策展解析容错围栏与非法json() {
+        let picks = parse_picks(r#"{"picks":[{"url":"https://x/1","reason":"重要"}]}"#);
+        assert_eq!(picks.len(), 1);
+        assert_eq!(picks[0].url, "https://x/1");
+        // 模型偶尔带 markdown 围栏：取首个 { 到最后一个 } 之间再试一次
+        let picks = parse_picks("```json\n{\"picks\":[{\"url\":\"https://x/1\",\"reason\":\"r\"}]}\n```");
+        assert_eq!(picks.len(), 1);
+        assert!(parse_picks("完全不是 json").is_empty());
+        assert!(parse_picks("{\"picks\":[]}").is_empty());
+    }
+
+    #[test]
+    fn 策展落地只认池内url并提档挂理由() {
+        let mk = |u: &str, s: u32| NewsItem {
+            headline: format!("h{u}"),
+            source: "s".into(),
+            url: u.into(),
+            score: s,
+            reason: None,
+        };
+        let mut items = vec![mk("https://x/1", 10), mk("https://x/2", 20), mk("https://x/3", 30)];
+        let picks = vec![
+            CuratorPick { url: "https://x/2".into(), reason: "  行业格局变化  ".into() },
+            CuratorPick { url: "https://编造/9".into(), reason: "编造的".into() },
+        ];
+        assert_eq!(apply_curation(&mut items, 0, &picks), 1, "编造 URL 静默丢弃");
+        assert_eq!(items[0].url, "https://x/2", "提档后排最前");
+        assert_eq!(items[0].score, 70, "20 + 50");
+        assert_eq!(items[0].reason.as_deref(), Some("行业格局变化"), "理由去空白并截 30 字");
+        assert!(items.iter().all(|i| i.url != "https://编造/9"), "编造条目绝不入池");
+    }
+
+    #[test]
+    fn 重策展清旧标记且已消费不动() {
+        let mk = |u: &str, s: u32| NewsItem {
+            headline: format!("h{u}"),
+            source: "s".into(),
+            url: u.into(),
+            score: s,
+            reason: None,
+        };
+        let mut items = vec![mk("https://x/1", 10), mk("https://x/2", 20), mk("https://x/3", 30)];
+        // 首轮策展：x/1 已消费（next_idx=1），只有 x/2 生效
+        let picks = vec![
+            CuratorPick { url: "https://x/1".into(), reason: "旧理由".into() },
+            CuratorPick { url: "https://x/2".into(), reason: "旧理由2".into() },
+        ];
+        apply_curation(&mut items, 1, &picks);
+        assert!(items[0].reason.is_none(), "已消费条目不策展");
+        assert_eq!(items[0].score, 10);
+        assert_eq!(items[1].score, 70);
+        // 重策展不再选 x/2 → 落回规则分、理由清空
+        apply_curation(&mut items, 1, &[]);
+        // 清标记后重排未消费尾巴（卡序按分数）：x/3（30）回到 x/2（20）前面
+        assert_eq!(items[1].url, "https://x/3", "落回后按分数重排");
+        assert_eq!(items[1].score, 30);
+        let x2 = items.iter().find(|i| i.url == "https://x/2").unwrap();
+        assert_eq!(x2.score, 20, "旧策展分回落");
+        assert!(x2.reason.is_none());
+    }
+
+    #[test]
+    fn 策展最多六条() {
+        let mut items: Vec<NewsItem> = (0..8)
+            .map(|i| NewsItem {
+                headline: format!("h{i}"),
+                source: "s".into(),
+                url: format!("https://x/{i}"),
+                score: 10,
+                reason: None,
+            })
+            .collect();
+        let picks: Vec<CuratorPick> = (0..8)
+            .map(|i| CuratorPick { url: format!("https://x/{i}"), reason: "r".into() })
+            .collect();
+        assert_eq!(apply_curation(&mut items, 0, &picks), 6, "最多 6 条");
+        assert_eq!(items.iter().filter(|i| i.reason.is_some()).count(), 6);
     }
 }
