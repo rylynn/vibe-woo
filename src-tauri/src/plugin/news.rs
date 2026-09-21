@@ -9,18 +9,23 @@
 //!   重复调用，省 token），未配置 LLM 则 digest 为空。
 //! - 源失败**静默**（下轮增量自然重试），绝不弹错误气泡 —— 源站挂了
 //!   不是用户需要知道的事。
-//! - tech 类源聚焦「AI 一手进展 + 互联网广告行业」：大模型官网技术博客
-//!   （OpenAI / DeepMind / Google AI / Hugging Face）、业界播客（Latent
-//!   Space）、广告行业一手媒体（Adweek / AdExchanger / Modern Retail）、
-//!   中文聚合补充（量子位）。「筛选」靠两层实现：源级聚焦 + 仅当天过滤。
+//! - tech 类源定位「AI 一手进展 + 互联网/科技/手机行业动态」：大模型官网
+//!   技术博客（OpenAI / DeepMind / Google AI / Hugging Face）、业界播客
+//!   （Latent Space）、AI 实践者（Simon Willison）、综合行业媒体（TechCrunch /
+//!   The Verge / Ars Technica，手机与消费科技由它们自然覆盖）、中文聚合补充
+//!   （量子位，每日配额 2 压住量产文）。「筛选」靠四层实现：源级聚焦 +
+//!   每源每日配额 + 仅当天过滤 + 打分排序（LLM 策展可选增强）。
 //!
 //! 网络全部走异步旁路线程（与 words 的 LLM 增强同一模式）—— host 线程
 //! 绝不被网络请求阻塞，其他插件不受影响。
 //!
-//! 内置源清单可用性以 2026-09-04 网络实测为准；机器之心 RSS 已失效
-//! （返回 HTML）、Anthropic 官网无 RSS、Marketing Dive 404、麦迪逊邦
-//! 不可达、AdExchanger 对非浏览器请求返回反爬页、AdAge 直接拒绝，
-//! 均不收录。世界类中文源（BBC 等）同样不可达，暂缺。
+//! 内置源清单可用性以 2026-09-21 网络实测为准；The Verge 与 Simon Willison
+//! 为 Atom 源（atom_syndication 解析）。已阵亡不收录：机器之心（返回
+//! HTML）、Anthropic（无 RSS）、AdExchanger（反爬）、AdAge（拒绝）、
+//! Marketing Dive / 麦迪逊邦（0.7.0 结论）、Engadget（403）、NN/g 与
+//! It's Nice That（RSS 404）、Sidebar（返回空体）、Creative Review /
+//! Design Week（403）、Core77 / Dexigner（404）。CNBC Tech 可用但未收录
+//! （综合源已够三家）。世界类中文源（BBC 等）同样不可达，暂缺。
 
 use std::sync::Mutex;
 use std::time::Duration;
@@ -68,92 +73,153 @@ struct RssSource {
     name: &'static str,
     url: &'static str,
     category: &'static str,
+    /// 打分用的源权重三档：一手/策展 30、行业综合 20、中文聚合 10。
+    weight: u8,
+    /// 每日配额：该源每天最多入池条数（合并时按天截断，见 merge_batch）。
+    quota: u8,
 }
 
 const SOURCES: &[RssSource] = &[
-    // ---- AI 一手源：大模型官网技术博客与业界播客 ----
+    // ---- AI 一手：大模型官网技术博客、业界播客与实践者 ----
     RssSource {
         id: "openai-news",
         name: "OpenAI",
         url: "https://openai.com/news/rss.xml",
         category: "tech",
+        weight: 30,
+        quota: 8,
     },
     RssSource {
         id: "deepmind-blog",
         name: "DeepMind",
         url: "https://deepmind.google/blog/rss.xml",
         category: "tech",
+        weight: 30,
+        quota: 8,
     },
     RssSource {
         id: "google-ai-blog",
         name: "Google AI",
         url: "https://blog.google/technology/ai/rss/",
         category: "tech",
+        weight: 30,
+        quota: 8,
     },
     RssSource {
         id: "hf-blog",
         name: "Hugging Face",
         url: "https://huggingface.co/blog/feed.xml",
         category: "tech",
+        weight: 30,
+        quota: 8,
     },
     RssSource {
         id: "latent-space",
         name: "Latent Space",
         url: "https://www.latent.space/feed",
         category: "tech",
+        weight: 30,
+        quota: 8,
     },
-    // ---- 互联网广告行业一手源 ----
-    // （AdExchanger 对非浏览器请求返回 HTML 反爬页、AdAge 直接拒绝，
-    // 均不稳定，不收录）
+    // AI 实践者一手视角（Atom 源，经 atom_syndication 解析）
     RssSource {
-        id: "adweek",
-        name: "Adweek",
-        url: "https://www.adweek.com/feed/",
+        id: "simon-willison",
+        name: "Simon Willison",
+        url: "https://simonwillison.net/atom/everything/",
         category: "tech",
+        weight: 30,
+        quota: 8,
+    },
+    // ---- 互联网/科技/手机行业动态：综合媒体自然覆盖手机与消费科技 ----
+    RssSource {
+        id: "techcrunch",
+        name: "TechCrunch",
+        url: "https://www.techcrunch.com/feed/",
+        category: "tech",
+        weight: 20,
+        quota: 4,
+    },
+    // The Verge 已转 Atom
+    RssSource {
+        id: "the-verge",
+        name: "The Verge",
+        url: "https://www.theverge.com/rss/index.xml",
+        category: "tech",
+        weight: 20,
+        quota: 4,
     },
     RssSource {
-        id: "digiday",
-        name: "Digiday",
-        url: "https://www.digiday.com/feed/",
+        id: "ars-technica",
+        name: "Ars Technica",
+        url: "https://feeds.arstechnica.com/arstechnica/index",
         category: "tech",
+        weight: 20,
+        quota: 4,
     },
-    RssSource {
-        id: "modern-retail",
-        name: "Modern Retail",
-        url: "https://www.modernretail.co/feed/",
-        category: "tech",
-    },
-    // ---- 中文聚合补充（非一手，兼顾中文阅读）----
+    // ---- 中文聚合补充（配额压住量产文）----
     RssSource {
         id: "qbitai",
         name: "量子位",
         url: "https://www.qbitai.com/feed",
         category: "tech",
+        weight: 10,
+        quota: 2,
     },
     RssSource {
         id: "nyt-biz",
         name: "NYT 商业",
         url: "https://rss.nytimes.com/services/xml/rss/nyt/Business.xml",
         category: "finance",
+        weight: 20,
+        quota: 4,
     },
     RssSource {
         id: "wsj",
         name: "WSJ 市场",
         url: "https://feeds.a.dj.com/rss/RSSMarketsMain.xml",
         category: "finance",
+        weight: 20,
+        quota: 4,
+    },
+    // ---- 设计行业动态（全英文；NN/g、Sidebar、It's Nice That 的 RSS 已死，见头注释）----
+    RssSource {
+        id: "webdesigner-news",
+        name: "Webdesigner News",
+        url: "https://www.webdesignernews.com/feed",
+        category: "design",
+        weight: 30,
+        quota: 8,
     },
     RssSource {
-        id: "uisdc",
-        name: "优设",
-        url: "https://www.uisdc.com/feed",
+        id: "fast-company",
+        name: "Fast Company",
+        url: "https://www.fastcompany.com/rss",
         category: "design",
+        weight: 20,
+        quota: 4,
+    },
+    RssSource {
+        id: "smashing",
+        name: "Smashing Magazine",
+        url: "https://www.smashingmagazine.com/feed/",
+        category: "design",
+        weight: 20,
+        quota: 4,
+    },
+    RssSource {
+        id: "ux-collective",
+        name: "UX Collective",
+        url: "https://uxdesign.cc/feed",
+        category: "design",
+        weight: 20,
+        quota: 4,
     },
 ];
 
 /// 类别（id，中文名）。用户最多选 3 个。
-/// tech 已聚焦为「AI·广告」，id 不变 —— 老用户配置无缝兼容。
+/// tech 定位「AI 进展 + 互联网/科技行业动态」，id 不变 —— 老用户配置无缝兼容。
 const CATEGORIES: &[(&str, &str)] = &[
-    ("tech", "AI·广告"),
+    ("tech", "科技·AI"),
     ("finance", "财经"),
     ("design", "设计"),
 ];
@@ -907,12 +973,12 @@ mod tests {
         assert!(srcs.iter().all(|s| s.category == "finance"));
         assert_eq!(srcs.len(), 2);
 
-        // tech 已聚焦为 AI+广告：5 个 AI 一手 + 3 个广告 + 1 个中文聚合
+        // tech 聚焦为 AI 一手 + 行业动态：6 个 AI 一手/实践者 + 3 个综合 + 1 个中文聚合
         let srcs = sources_for(&["tech".to_string()]);
-        assert_eq!(srcs.len(), 9);
+        assert_eq!(srcs.len(), 10);
 
         let srcs = sources_for(&["tech".to_string(), "design".to_string()]);
-        assert_eq!(srcs.len(), 10);
+        assert_eq!(srcs.len(), 14);
     }
 
     #[test]
@@ -986,7 +1052,7 @@ mod tests {
     }
 
     #[test]
-    fn 内置源全部带合法类别与url() {
+    fn 内置源全部带合法类别url权重与配额() {
         for s in SOURCES {
             assert!(!s.name.is_empty());
             assert!(s.url.starts_with("https://"), "{} 的 url 必须是 https", s.id);
@@ -995,6 +1061,8 @@ mod tests {
                 "{} 类别非法",
                 s.id
             );
+            assert!([30u8, 20, 10].contains(&s.weight), "{} 权重必须三档", s.id);
+            assert!([8u8, 4, 2].contains(&s.quota), "{} 配额必须三档", s.id);
         }
     }
 
