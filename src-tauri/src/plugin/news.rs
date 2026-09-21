@@ -795,10 +795,10 @@ fn spawn_curate(cfg: NewsConfig, items: Vec<NewsItem>, next_idx: usize, today: S
             Err(_) => return,
         };
         let from = next_idx.min(items.len());
-        // 最新在前、最多 40 条：最旧的存量大概率已过时
+        // 池子尾巴经 sort_pending 已按分数降序：从头取即「最重要的 40 条」。
+        // 低分旧存量大概率已过时，不进 LLM 视野（条目无时间戳，分数即新鲜度代理）
         let lines: Vec<String> = items[from..]
             .iter()
-            .rev()
             .take(40)
             .map(|i| format!("{}｜{}｜{}｜{}", i.source, i.headline, i.url, i.score))
             .collect();
@@ -824,7 +824,9 @@ fn spawn_curate(cfg: NewsConfig, items: Vec<NewsItem>, next_idx: usize, today: S
         let opts = crate::llm::CompleteOptions {
             temperature: 0.2,
             max_output_tokens: Some(1024),
-            max_output_chars: 600,
+            // 6 条 pick ×（真实 URL 60-120 字符 + 30 字理由 + JSON 包裹）≈ 1100+，
+            // 上限须容纳规格允许的满额输出，否则满额轮会触发上限而静默放弃
+            max_output_chars: 1200,
         };
         let Ok(out) = rt.block_on(crate::llm::complete_with(&llm, system, &user, true, opts)) else {
             return; // 静默：规则分排序兜底
