@@ -439,17 +439,6 @@ fn collect_from(
         .collect()
 }
 
-/// 增量合并：新条目按 url 去重后**追加**（已出过的卡不重复出，游标由调用方维护）。
-fn merge_into(existing: &mut Vec<NewsItem>, incoming: Vec<NewsItem>) {
-    let mut seen: std::collections::HashSet<String> =
-        existing.iter().map(|i| i.url.clone()).collect();
-    for it in incoming {
-        if seen.insert(it.url.clone()) {
-            existing.push(it);
-        }
-    }
-}
-
 /// 增量合并（带每源每日配额）：按 url 去重后**追加**，同源当天总量不超过
 /// quota（按「已入池的同源条数」算，跨轮累计；去重丢弃的不占配额）。
 /// 返回实际入池条数（策展触发判定「有没有新条目」用）。
@@ -605,7 +594,7 @@ fn spawn_fetch(cfg: NewsConfig, today: String, app: tauri::AppHandle) {
             Ok(rt) => rt,
             Err(_) => return,
         };
-        let mut batches = Vec::new();
+        let mut batches: Vec<(Vec<NewsItem>, u8)> = Vec::new();
         let mut any_ok = false;
         for src in sources_for(&cfg.categories) {
             // 部分源要求 UA；超时 15s —— 单源挂了不拖死整轮
@@ -625,7 +614,7 @@ fn spawn_fetch(cfg: NewsConfig, today: String, app: tauri::AppHandle) {
                     let items = collect_from(&text, src.name, src.weight, &today, PER_SOURCE_ITEMS);
                     eprintln!("[plugin:{ID}] {}：当天 {} 条", src.name, items.len());
                     any_ok = true; // 源通了就算成功，哪怕当天 0 条新内容
-                    batches.push(items);
+                    batches.push((items, src.quota));
                 }
                 Err(e) => {
                     // 源失败静默：下轮按退避自然重试，不打扰用户
@@ -634,14 +623,17 @@ fn spawn_fetch(cfg: NewsConfig, today: String, app: tauri::AppHandle) {
             }
         }
 
-        let incoming: Vec<NewsItem> = batches.into_iter().flatten().collect();
         let (digest_needed, all_items) = with_state(|s| {
             let was_empty = s.items.is_empty();
-            merge_into(&mut s.items, incoming);
+            for (items, quota) in batches {
+                merge_batch(&mut s.items, items, quota);
+            }
             s.date = today.clone();
             s.next_idx = s.next_idx.min(s.items.len()); // 防御：游标不越界
             s.fetched = true;
             apply_fetch_result(s, &today, any_ok, epoch_mins());
+            // 未消费尾巴按分数重排：下午入池的重磅发布排到上午普通条目前面
+            sort_pending(&mut s.items, s.next_idx);
             (was_empty && !s.items.is_empty(), s.items.clone())
         });
         save_state(&app);
@@ -787,6 +779,7 @@ impl Plugin for NewsPlugin {
                 "source": item.source,
                 "url": item.url,
                 "digest": digest,
+                "reason": item.reason,
                 "ai": digest.is_some(),
             }),
         }]
