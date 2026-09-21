@@ -329,6 +329,57 @@ fn sources_for(categories: &[String]) -> Vec<&'static RssSource> {
         .collect()
 }
 
+// ---------- 打分（纯函数，零 LLM 依赖） ----------
+
+/// 英文关键词（全小写、按词界匹配；`*` 结尾表示前缀匹配，如 regulat* 命中
+/// regulation / regulations / regulators）。词界匹配避免 ban 命中 bank / urban
+/// 这类误报 —— 关键词分只做排序微调，但没理由放过已知的误报源。
+const KEYWORDS_EN: &[&str] = &[
+    "release", "launch", "announce", "open source", "acquire", "acquisition",
+    "funding", "raises", "ipo", "ban", "lawsuit", "regulat*", "breakthrough",
+    "benchmark", "gpt", "claude", "gemini", "llama", "qwen", "deepseek",
+];
+/// 中文关键词（子串匹配 —— 中文没有词界）。
+const KEYWORDS_ZH: &[&str] = &["发布", "开源", "收购", "融资", "上线", "突破", "监管", "上市"];
+/// 每命中一个关键词的加分与封顶。
+const KW_BONUS: u32 = 5;
+const KW_BONUS_CAP: u32 = 15;
+
+/// 英文词界匹配：keyword 前面必须是非字母数字，后面接非字母数字才算命中
+/// （多词关键词中间的空格是模式的一部分）；唯一例外是后面紧跟一个复数 s
+/// 且 s 之后仍是词界 —— release 因此能命中 releases，而 ban 依旧不会命中
+/// bank / urban。`*` 结尾 = 前缀匹配（只要求前面有词界）。hay 须已小写。
+fn hit_en(lower: &str, kw: &str) -> bool {
+    let (kw, prefix) = match kw.strip_suffix('*') {
+        Some(base) => (base, true),
+        None => (kw, false),
+    };
+    let hay: Vec<char> = lower.chars().collect();
+    let pat: Vec<char> = kw.chars().collect();
+    if pat.is_empty() || hay.len() < pat.len() {
+        return false;
+    }
+    let is_word = |c: char| c.is_alphanumeric();
+    // 命中末尾在 j 处时是否算「词界收尾」：到串尾，或下一个字符非字母数字。
+    let ends_clean = |j: usize| j == hay.len() || !is_word(hay[j]);
+    (0..=hay.len() - pat.len()).any(|i| {
+        hay[i..].starts_with(&pat[..])
+            && (i == 0 || !is_word(hay[i - 1]))
+            && (prefix
+                || ends_clean(i + pat.len())
+                || (hay[i + pat.len()] == 's' && ends_clean(i + pat.len() + 1)))
+    })
+}
+
+/// 打分：源权重 + 关键词命中加分（每词 +5，封顶 +15）。
+/// 分数入池时算一次就不再变（LLM 策展提档除外，见 apply_curation）。
+fn score_item(weight: u8, headline: &str) -> u32 {
+    let lower = headline.to_lowercase();
+    let hits = KEYWORDS_EN.iter().filter(|kw| hit_en(&lower, kw)).count()
+        + KEYWORDS_ZH.iter().filter(|kw| lower.contains(*kw)).count();
+    u32::from(weight) + (hits as u32 * KW_BONUS).min(KW_BONUS_CAP)
+}
+
 /// 补拉退避：连续失败第 n 次后要等多久再试（0 → 5 → 15 → 30 封顶）。
 fn retry_backoff_mins(failures: u8) -> u64 {
     RETRY_BACKOFF_MINS[usize::from(failures).min(RETRY_BACKOFF_MINS.len() - 1)]
@@ -945,5 +996,40 @@ mod tests {
                 s.id
             );
         }
+    }
+
+    #[test]
+    fn 关键词英文按词界匹配() {
+        assert!(hit_en("openai releases gpt-5 api", "release"));
+        assert!(hit_en("eu ban on x", "ban"));
+        assert!(!hit_en("bank of america faces lawsuit", "ban"), "bank 不是 ban");
+        assert!(!hit_en("urban design week", "ban"), "urban 不含词界 ban");
+        assert!(hit_en("new regulations for ai", "regulat*"), "前缀命中 regulations");
+        assert!(hit_en("gpt-5 launched", "gpt"));
+        assert!(hit_en("an open source release", "open source"), "多词关键词");
+    }
+
+    #[test]
+    fn 关键词中文子串匹配() {
+        // 中文没有词界，走 contains（score_item 内部对 KEYWORDS_ZH 用子串匹配）
+        let lower = "阿里开源千亿模型并发布".to_string();
+        assert!(KEYWORDS_ZH.iter().filter(|kw| lower.contains(*kw)).count() >= 2);
+    }
+
+    #[test]
+    fn 打分等于源权重加封顶关键词分() {
+        // release + gpt 各 +5
+        assert_eq!(score_item(30, "OpenAI releases GPT-5"), 40);
+        // 发布 + 开源 各 +5
+        assert_eq!(score_item(10, "某公司发布新模型并开源"), 20);
+        // 命中再多也封顶 +15
+        assert_eq!(
+            score_item(20, "release launch announce breakthrough funding 融资 发布 开源 监管"),
+            35
+        );
+        // bank 不命中 ban，只剩 raises +5
+        assert_eq!(score_item(20, "Bank raises Series B"), 25);
+        // 无命中 = 纯源权重
+        assert_eq!(score_item(20, "平平无奇的一条"), 20);
     }
 }
