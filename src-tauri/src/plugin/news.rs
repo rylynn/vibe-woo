@@ -60,7 +60,8 @@ const RETRY_BACKOFF_MINS: [u64; 4] = [0, 5, 15, 30];
 /// 给到 10 分钟兜底 —— 异步线程 panic 时不能把补拉永久卡死。
 const FETCH_INFLIGHT_MAX_MINS: u64 = 10;
 
-/// 每个源每轮最多取的**当天**条数（控制当日缓存规模；先过滤当天再截断）。
+/// 单轮抓取每源最多取的**当天**条数（只是抓取上限；每日配额由源清单的
+/// quota 在合并时按天执行）。先过滤当天再截断。
 const PER_SOURCE_ITEMS: usize = 8;
 
 /// 轻量轮询间隔：读配置感知开关（只读本地文件）。
@@ -275,6 +276,12 @@ pub struct NewsItem {
     pub headline: String,
     pub source: String,
     pub url: String,
+    /// 规则分：源权重 + 关键词加分（LLM 策展选中再 +CURATE_BONUS）。旧缓存缺字段补 0。
+    #[serde(default)]
+    pub score: u32,
+    /// LLM 策展推荐理由（未策展 / 旧缓存为 None）。
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -350,28 +357,83 @@ fn pubdate_local(it: &rss::Item) -> Option<String> {
     Some(dt.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string())
 }
 
-/// 从一段 RSS 2.0 文本提取**本地当天**的条目（解析交给 rss crate，这里只做裁剪）。
+/// 统一的扁平条目（RSS 2.0 与 Atom 解析归一后的公共形状）。
+struct FeedEntry {
+    title: String,
+    url: String,
+    /// 本地日期 `YYYY-MM-DD`；缺失 / 非法为 None（一律按非当天丢弃）。
+    date_local: Option<String>,
+}
+
+/// 解析 RSS 2.0 或 Atom（按根元素嗅探），统一成扁平条目。
+/// 解析交给 rss / atom_syndication crate，这里只做形状归一，不做过滤。
+fn parse_entries(text: &str) -> Vec<FeedEntry> {
+    let head: String = text.trim_start().chars().take(200).collect();
+    if head.contains("<feed") {
+        let Ok(fd) = atom_syndication::Feed::read_from(text.as_bytes()) else {
+            return Vec::new();
+        };
+        fd.entries()
+            .iter()
+            .map(|e| FeedEntry {
+                // Atom 的 title 是必备元素，crate 返回 &Text 而非 Option
+                title: e.title().as_str().trim().to_string(),
+                url: e
+                    .links()
+                    .iter()
+                    .find(|l| !l.href().is_empty())
+                    .map(|l| l.href().trim().to_string())
+                    .unwrap_or_default(),
+                // published 优先（发表时刻），缺失退 updated（Atom 必备元素，非 Option）
+                date_local: e.published().or(Some(e.updated())).map(|d| {
+                    d.with_timezone(&chrono::Local)
+                        .format("%Y-%m-%d")
+                        .to_string()
+                }),
+            })
+            .collect()
+    } else {
+        let Ok(ch) = rss::Channel::read_from(text.as_bytes()) else {
+            return Vec::new();
+        };
+        ch.items()
+            .iter()
+            .map(|it| FeedEntry {
+                title: it.title().map(|t| t.trim().to_string()).unwrap_or_default(),
+                url: it.link().map(|l| l.trim().to_string()).unwrap_or_default(),
+                date_local: pubdate_local(it),
+            })
+            .collect()
+    }
+}
+
+/// 从一段 RSS 2.0 / Atom 文本提取**本地当天**的条目，入池即带打分。
 ///
-/// 严格「仅当天」：pubDate 缺失、非法、非当天一律丢弃 —— 宁可少一条，
-/// 不拿昨天的凑数。先过滤当天再截断，避免源把旧条目排在前面挤掉新内容。
-fn collect_from(text: &str, source_name: &str, today: &str) -> Vec<NewsItem> {
-    let Ok(ch) = rss::Channel::read_from(text.as_bytes()) else {
-        return Vec::new();
-    };
-    ch.items()
-        .iter()
-        .filter(|it| pubdate_local(it).as_deref() == Some(today))
-        .take(PER_SOURCE_ITEMS)
-        .filter_map(|it| {
-            let headline = it.title()?.trim().to_string();
-            let url = it.link()?.trim().to_string();
-            if headline.is_empty() || url.is_empty() {
+/// 严格「仅当天」：日期缺失、非法、非当天一律丢弃 —— 宁可少一条，
+/// 不拿昨天的凑数。先过滤当天再截断（take_max 只是单轮抓取上限，每日
+/// 配额在合并时按源另算），避免源把旧条目排在前面挤掉新内容。
+fn collect_from(
+    text: &str,
+    source_name: &str,
+    weight: u8,
+    today: &str,
+    take_max: usize,
+) -> Vec<NewsItem> {
+    parse_entries(text)
+        .into_iter()
+        .filter(|e| e.date_local.as_deref() == Some(today))
+        .take(take_max)
+        .filter_map(|e| {
+            if e.title.is_empty() || e.url.is_empty() {
                 return None;
             }
+            let score = score_item(weight, &e.title);
             Some(NewsItem {
-                headline,
+                headline: e.title,
                 source: source_name.to_string(),
-                url,
+                url: e.url,
+                score,
+                reason: None,
             })
         })
         .collect()
@@ -526,7 +588,7 @@ fn spawn_fetch(cfg: NewsConfig, today: String, app: tauri::AppHandle) {
             });
             match fetched {
                 Ok(text) => {
-                    let items = collect_from(&text, src.name, &today);
+                    let items = collect_from(&text, src.name, src.weight, &today, PER_SOURCE_ITEMS);
                     eprintln!("[plugin:{ID}] {}：当天 {} 条", src.name, items.len());
                     any_ok = true; // 源通了就算成功，哪怕当天 0 条新内容
                     batches.push(items);
@@ -793,11 +855,12 @@ mod tests {
             rss_item("缺日期", "https://example.com/3", None),
             rss_item("非法日期", "https://example.com/4", Some("not a date")),
         );
-        let items = collect_from(&xml, "测试源", &today);
+        let items = collect_from(&xml, "测试源", 20, &today, 8);
         assert_eq!(items.len(), 1, "仅保留本地当天的条目");
         assert_eq!(items[0].headline, "今天的 & 细节");
         assert_eq!(items[0].url, "https://example.com/1");
         assert_eq!(items[0].source, "测试源");
+        assert_eq!(items[0].score, 20, "入池即带源权重（无关键词命中）");
     }
 
     #[test]
@@ -813,27 +876,48 @@ mod tests {
             old,
             rss_item("新条目", "https://example.com/new", Some(&now_rfc2822()))
         );
-        let items = collect_from(&xml, "s", &today);
+        let items = collect_from(&xml, "s", 20, &today, 8);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].headline, "新条目");
     }
 
     #[test]
+    fn 解析atom源仅保留当天条目并带源权重() {
+        let today = today_str();
+        let now_iso = chrono::Local::now().format("%+").to_string();
+        let yesterday_iso = (chrono::Local::now() - chrono::Duration::hours(24))
+            .format("%+")
+            .to_string();
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom"><title>T</title><updated>{now_iso}</updated>
+<entry><title>今天的</title><link href="https://example.com/1"/><published>{now_iso}</published><updated>{now_iso}</updated></entry>
+<entry><title>昨天的</title><link href="https://example.com/2"/><published>{yesterday_iso}</published><updated>{yesterday_iso}</updated></entry>
+<entry><title>没日期的</title><link href="https://example.com/3"/></entry>
+</feed>"#
+        );
+        let items = collect_from(&xml, "测试Atom", 30, &today, 8);
+        assert_eq!(items.len(), 1, "仅保留本地当天且必须有日期");
+        assert_eq!(items[0].url, "https://example.com/1");
+        assert_eq!(items[0].score, 30, "入池即带源权重");
+    }
+
+    #[test]
     fn 解析失败返回空而非panic() {
         let today = today_str();
-        assert!(collect_from("not xml at all", "x", &today).is_empty());
-        assert!(collect_from("", "x", &today).is_empty());
+        assert!(collect_from("not xml at all", "x", 20, &today, 8).is_empty());
+        assert!(collect_from("", "x", 20, &today, 8).is_empty());
     }
 
     #[test]
     fn 增量合并去重追加且不动已有条目() {
         let mut existing = vec![
-            NewsItem { headline: "h1".into(), source: "s".into(), url: "https://x/1".into() },
-            NewsItem { headline: "h2".into(), source: "s".into(), url: "https://x/2".into() },
+            NewsItem { headline: "h1".into(), source: "s".into(), url: "https://x/1".into(), score: 0, reason: None },
+            NewsItem { headline: "h2".into(), source: "s".into(), url: "https://x/2".into(), score: 0, reason: None },
         ];
         let incoming = vec![
-            NewsItem { headline: "h2-dup".into(), source: "s2".into(), url: "https://x/2".into() },
-            NewsItem { headline: "h3".into(), source: "s2".into(), url: "https://x/3".into() },
+            NewsItem { headline: "h2-dup".into(), source: "s2".into(), url: "https://x/2".into(), score: 0, reason: None },
+            NewsItem { headline: "h3".into(), source: "s2".into(), url: "https://x/3".into(), score: 0, reason: None },
         ];
         merge_into(&mut existing, incoming);
         assert_eq!(existing.len(), 3, "按 url 去重");
@@ -860,6 +944,8 @@ mod tests {
             headline: "h".into(),
             source: "s".into(),
             url: "u".into(),
+            score: 0,
+            reason: None,
         }];
         assert!(!due_fetch(&stocked, 10 * 60, 10_000 + 119, 9, today));
         // 满 2 小时：拉
@@ -887,6 +973,8 @@ mod tests {
             headline: "h".into(),
             source: "s".into(),
             url: "u".into(),
+            score: 0,
+            reason: None,
         }];
         fresh.next_idx = 1; // 存量看完
         assert!(!due_fetch(&fresh, 10 * 60, 10_000 + 59, 9, "2026-09-07"));
@@ -938,6 +1026,8 @@ mod tests {
             headline: "h".into(),
             source: "s".into(),
             url: "u".into(),
+            score: 0,
+            reason: None,
         }];
         assert_eq!(fetch_interval_mins(&s), 120, "还有没看的存量 → 120 分钟");
         s.next_idx = 1;
@@ -1006,6 +1096,8 @@ mod tests {
                 headline: "x".into(),
                 source: "s".into(),
                 url: "u".into(),
+                score: 0,
+                reason: None,
             }],
             next_idx: 1,
             digest: "昨日点评".into(),
@@ -1041,6 +1133,16 @@ mod tests {
         .unwrap();
         assert_eq!(s.last_fetch_mins, 0);
         assert!(s.fetched);
+    }
+
+    #[test]
+    fn 旧缓存缺score与reason字段可反序列化() {
+        let s: NewsState = serde_json::from_str(
+            r#"{"date":"2026-09-04","items":[{"headline":"h","source":"s","url":"u"}],"next_idx":0,"digest":"","fetched":true,"last_card_mins":42}"#,
+        )
+        .unwrap();
+        assert_eq!(s.items[0].score, 0, "serde default 补 0");
+        assert!(s.items[0].reason.is_none());
     }
 
     #[test]
