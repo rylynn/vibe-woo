@@ -450,6 +450,40 @@ fn merge_into(existing: &mut Vec<NewsItem>, incoming: Vec<NewsItem>) {
     }
 }
 
+/// 增量合并（带每源每日配额）：按 url 去重后**追加**，同源当天总量不超过
+/// quota（按「已入池的同源条数」算，跨轮累计；去重丢弃的不占配额）。
+/// 返回实际入池条数（策展触发判定「有没有新条目」用）。
+/// quota 只对 incoming 的源生效 —— 不同源互不影响。
+fn merge_batch(existing: &mut Vec<NewsItem>, incoming: Vec<NewsItem>, quota: u8) -> usize {
+    let src = incoming.first().map(|i| i.source.clone()).unwrap_or_default();
+    let mut room = (quota as usize).saturating_sub(
+        existing.iter().filter(|i| i.source == src).count(),
+    );
+    let mut seen: std::collections::HashSet<String> =
+        existing.iter().map(|i| i.url.clone()).collect();
+    let mut added = 0usize;
+    for it in incoming {
+        if room == 0 {
+            break;
+        }
+        if seen.insert(it.url.clone()) {
+            existing.push(it);
+            room -= 1;
+            added += 1;
+        }
+    }
+    added
+}
+
+/// 未消费尾巴按分数稳定降序（同分保持入池先后）；已消费的头部不动、游标
+/// 不回退 —— 「已出过的卡不重复出」不变。增量轮下午入池的重磅发布自然
+/// 排到上午普通条目前面。
+fn sort_pending(items: &mut [NewsItem], next_idx: usize) {
+    // 起点先算进局部变量：切片借用期间不能再 items.len()（E0502）
+    let start = next_idx.min(items.len());
+    items[start..].sort_by(|a, b| b.score.cmp(&a.score));
+}
+
 fn sources_for(categories: &[String]) -> Vec<&'static RssSource> {
     SOURCES
         .iter()
@@ -910,20 +944,63 @@ mod tests {
     }
 
     #[test]
-    fn 增量合并去重追加且不动已有条目() {
-        let mut existing = vec![
-            NewsItem { headline: "h1".into(), source: "s".into(), url: "https://x/1".into(), score: 0, reason: None },
-            NewsItem { headline: "h2".into(), source: "s".into(), url: "https://x/2".into(), score: 0, reason: None },
-        ];
+    fn 配额合并按源截断且去重不占额() {
+        let mk = |h: &str, u: &str| NewsItem {
+            headline: h.into(),
+            source: "量子位".into(),
+            url: u.into(),
+            score: 10,
+            reason: None,
+        };
+        let mut pool = vec![mk("已有1", "https://x/1")];
+        // 第二轮：重复的 x/1 不占额，4 条新里只能再进 1 条（当日配额 2）
         let incoming = vec![
-            NewsItem { headline: "h2-dup".into(), source: "s2".into(), url: "https://x/2".into(), score: 0, reason: None },
-            NewsItem { headline: "h3".into(), source: "s2".into(), url: "https://x/3".into(), score: 0, reason: None },
+            mk("重复", "https://x/1"),
+            mk("新2", "https://x/2"),
+            mk("新3", "https://x/3"),
+            mk("新4", "https://x/4"),
         ];
-        merge_into(&mut existing, incoming);
-        assert_eq!(existing.len(), 3, "按 url 去重");
-        assert_eq!(existing[0].headline, "h1", "已有条目原位保留");
-        assert_eq!(existing[1].headline, "h2", "先到的保留，重复的丢弃");
-        assert_eq!(existing[2].headline, "h3", "新条目追加到尾部");
+        assert_eq!(merge_batch(&mut pool, incoming, 2), 1);
+        assert_eq!(pool.len(), 2);
+        assert_eq!(pool[1].headline, "新2", "先到的保留，重复的丢弃");
+        // 第三轮：配额已满，一律不再进
+        assert_eq!(merge_batch(&mut pool, vec![mk("新5", "https://x/5")], 2), 0);
+        assert_eq!(pool.len(), 2);
+    }
+
+    #[test]
+    fn 不同源互不占配额() {
+        let a = NewsItem { headline: "a".into(), source: "A".into(), url: "https://a/1".into(), score: 20, reason: None };
+        let b = NewsItem { headline: "b".into(), source: "B".into(), url: "https://b/1".into(), score: 30, reason: None };
+        let mut pool = vec![a];
+        assert_eq!(merge_batch(&mut pool, vec![b], 1), 1, "B 源不受 A 源配额影响");
+        assert_eq!(pool.len(), 2);
+    }
+
+    #[test]
+    fn 未消费尾巴按分数稳定降序且不动头部() {
+        let mk = |h: &str, s: u32| NewsItem {
+            headline: h.into(),
+            source: "s".into(),
+            url: format!("https://x/{h}"),
+            score: s,
+            reason: None,
+        };
+        let mut items = vec![
+            mk("已出1", 5),
+            mk("已出2", 3),
+            mk("低", 10),
+            mk("高", 40),
+            mk("同分先", 20),
+            mk("同分后", 20),
+        ];
+        sort_pending(&mut items, 2);
+        assert_eq!(items[0].headline, "已出1", "已消费头部不动");
+        assert_eq!(items[1].headline, "已出2");
+        assert_eq!(items[2].headline, "高");
+        assert_eq!(items[3].headline, "同分先", "同分稳定：入池先后保持");
+        assert_eq!(items[4].headline, "同分后");
+        assert_eq!(items[5].headline, "低");
     }
 
     #[test]
