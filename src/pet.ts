@@ -25,10 +25,13 @@ import { squashScale } from "./anim/squash";
 import {
   DEFAULT_AVATAR,
   asParametric,
+  isMcAvatar,
   type ParametricAvatar,
   type PetAvatar,
 } from "./avatar/types";
 import { applyTint } from "./avatar/palette";
+import { drawMcFigure, mcDirtyBounds } from "./mc/figure";
+import { getMcSkinResources } from "./mc/skin-registry";
 
 /** 像素艺术必须整数倍缩放，否则糊。基础格 48px。 */
 const BASE_CELL = 48;
@@ -507,6 +510,32 @@ export class Pet {
       this.drawDitherGlow(px, py, w, h);
     }
 
+    if (isMcAvatar(this.avatar)) {
+      // MC 形态：倍率取未呼吸缩放的边长（呼吸/挤压的连续缩放会让
+      // floor(h/48) 跳档，导致形象在 1x/2x 之间跳变——M2 起姿态自带
+      // 量化呼吸，不走代码缩放）。
+      const m = this.side / BASE_CELL;
+      const ox = Math.round(this.x + this.side / 2);
+      const oy = Math.round(this.y + this.side);
+      const res = getMcSkinResources(this.avatar.skinId);
+      if (res) {
+        drawMcFigure(
+          ctx,
+          // 盒子 = 宠物逻辑框（未呼吸缩放）；figure 内部取盒底中心为锚，
+          // 与下面 dirty 用的 ox/oy 一致（side 为偶数，两次取整等价）。
+          { bodyX: Math.round(this.x), bodyY: Math.round(this.y), w: this.side, h: this.side },
+          this.avatar,
+          this.eye,
+          res,
+        );
+      }
+      if (this.effects.size > 0) {
+        this.drawEffects(ctx, px, py, w, h, nowMs);
+      }
+      this.dirty = mcDirtyBounds(ox, oy, m);
+      return;
+    }
+
     // 形象合成：身体（形状+纹理）→ 特征件（顶部预留区）→ 眼睛 → 眉毛。
     // 特征件存在时身体压缩高度，附件画在 bbox 内顶部（脏矩形零改动）。
     const full = { bodyX: px, bodyY: py, w, h };
@@ -891,6 +920,11 @@ export class Pet {
     // 尺寸变化后旧脏矩形范围不足以覆盖新尺寸，会留下残影
     this.dirty = null;
     this.lastDrawKey = null;
+  }
+
+  /** 当前形象（开发切换入口需要读取/恢复）。 */
+  get currentAvatar(): PetAvatar {
+    return this.avatar;
   }
 
   /** 设置形象。联动动作风格到行为层，并立即重绘。 */

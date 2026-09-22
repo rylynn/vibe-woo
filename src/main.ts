@@ -38,6 +38,8 @@ import { prettyShortcut } from "./shortcut";
 import { AvatarPicker } from "./overlay/avatar-picker";
 import { asParametric, avatarFromView, avatarToView } from "./avatar/types";
 import { analyzeImageFile } from "./avatar/from-image";
+import defaultSkinUrl from "./mc/assets/default-skin.png";
+import { installMcDevToggle } from "./mc/dev-toggle";
 import { PluginHubPanel } from "./plugins/hub";
 import { pomodoroFrontend } from "./plugins/cards/pomodoro";
 import { wordFrontend } from "./plugins/cards/word";
@@ -58,6 +60,13 @@ if (!ctx) throw new Error("2d context unavailable");
 const ctx2d: CanvasRenderingContext2D = ctx;
 
 const pet = new Pet(canvas, ctx2d);
+
+// 开发期 MC 形态硬切入口（Ctrl+Alt+M）：只在 dev 构建装配，绝不持久化
+if (import.meta.env.DEV) {
+  void installMcDevToggle(pet, async () =>
+    new Uint8Array(await (await fetch(defaultSkinUrl)).arrayBuffer()),
+  );
+}
 
 // 预建时间下拉建议：通知卡片上的「改时间」输入也要用它
 refreshTimeDatalist();

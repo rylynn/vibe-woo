@@ -7,8 +7,10 @@ import { drawEyes, EYE_COLOR } from "../render/eyes";
 import { drawAttachments, splitBodyBox } from "../render/attachments";
 import { drawSpots } from "../render/patterns";
 import { generateCandidates } from "../avatar/generator";
-import { asParametric, type PetAvatar } from "../avatar/types";
+import { isMcAvatar, type PetAvatar } from "../avatar/types";
 import type { Box } from "../interact/hit-test";
+import { drawMcFigure } from "../mc/figure";
+import { getMcSkinResources } from "../mc/skin-registry";
 import { panelChrome } from "./chrome";
 
 /** 预览画布的 CSS 像素边长。 */
@@ -121,7 +123,13 @@ export function drawAvatarFigure(
   avatar: PetAvatar,
   frame: EyeFrame,
 ): void {
-  const av = asParametric(avatar);
+  if (isMcAvatar(avatar)) {
+    // 资源未注册（远程访客 M4 才有皮肤同步）→ 不画，不画错。
+    const res = getMcSkinResources(avatar.skinId);
+    if (res) drawMcFigure(ctx, full, avatar, frame, res);
+    return;
+  }
+  const av = avatar;
   const { body } = splitBodyBox(full, av.attachment);
   drawBody(
     ctx,
