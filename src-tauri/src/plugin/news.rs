@@ -477,6 +477,19 @@ fn sort_pending(items: &mut [NewsItem], next_idx: usize) {
     items[start..].sort_by(|a, b| b.score.cmp(&a.score));
 }
 
+/// 面板「最新」行选取（纯函数）：优先取未消费尾巴的队首 5 条 —— 尾巴按
+/// 分数降序、策展档最前，队首即接下来要出的最高分条目；池子耗尽（当天
+/// 已看完）时回退到末 5 条已消费，面板不至于空着。
+fn latest_rows(items: &[NewsItem], next_idx: usize) -> Vec<&NewsItem> {
+    let start = next_idx.min(items.len());
+    if start < items.len() {
+        items[start..].iter().take(5).collect()
+    } else {
+        let from = items.len().saturating_sub(5);
+        items[from..].iter().collect()
+    }
+}
+
 fn sources_for(categories: &[String]) -> Vec<&'static RssSource> {
     SOURCES
         .iter()
@@ -590,7 +603,7 @@ fn apply_curation(items: &mut [NewsItem], next_idx: usize, picks: &[CuratorPick]
             continue;
         }
         // 重复 URL 只提档一次：清过旧标记后尾巴分数必 <50（规则分上限 45），
-        // ≥50 即本轮已应用过 —— LLM 重复输出同一链接不再叠分、不占名额
+        // ≥50 即本轮已应用过 —— LLM 重复输出同一链接不再叠分（重复 pick 仍占 MAX_PICKS 截断名额）
         if let Some(it) = items[idx..].iter_mut().find(|i| i.url == p.url && i.score < CURATE_BONUS) {
             it.score += CURATE_BONUS;
             it.reason = Some(reason);
@@ -824,9 +837,9 @@ fn spawn_curate(cfg: NewsConfig, items: Vec<NewsItem>, next_idx: usize, today: S
         let opts = crate::llm::CompleteOptions {
             temperature: 0.2,
             max_output_tokens: Some(1024),
-            // 6 条 pick ×（真实 URL 60-120 字符 + 30 字理由 + JSON 包裹）≈ 1100+，
-            // 上限须容纳规格允许的满额输出，否则满额轮会触发上限而静默放弃
-            max_output_chars: 1200,
+            // 6 条 pick ×（URL 最长 ~120 字符 + 30 字理由 + JSON 包裹 ≈ 200/条）
+            // ≈ 1250 上界，1600 留余量 —— 否则满额轮会触发上限而静默放弃
+            max_output_chars: 1600,
         };
         let Ok(out) = rt.block_on(crate::llm::complete_with(&llm, system, &user, true, opts)) else {
             return; // 静默：规则分排序兜底
@@ -956,11 +969,8 @@ pub fn meta(app: &tauri::AppHandle) -> PluginMeta {
         Some(mut s) => {
             rollover(&mut s, &today);
             let remaining = s.items.len().saturating_sub(s.next_idx);
-            let latest: Vec<serde_json::Value> = s
-                .items
-                .iter()
-                .rev()
-                .take(5)
+            let latest: Vec<serde_json::Value> = latest_rows(&s.items, s.next_idx)
+                .into_iter()
                 .map(|i| {
                     serde_json::json!({ "headline": i.headline, "source": i.source, "url": i.url })
                 })
@@ -1146,6 +1156,29 @@ mod tests {
         assert_eq!(items[3].headline, "同分先", "同分稳定：入池先后保持");
         assert_eq!(items[4].headline, "同分后");
         assert_eq!(items[5].headline, "低");
+    }
+
+    #[test]
+    fn 面板最新行取未消费队首() {
+        let mk = |h: &str, s: u32| NewsItem {
+            headline: h.into(),
+            source: "s".into(),
+            url: format!("https://x/{h}"),
+            score: s,
+            reason: None,
+        };
+        let items = vec![mk("已出", 5), mk("高", 40), mk("中", 20), mk("低", 10)];
+        let rows = latest_rows(&items, 1);
+        assert_eq!(
+            rows.iter().map(|i| i.headline.as_str()).collect::<Vec<_>>(),
+            vec!["高", "中", "低"],
+            "未消费尾巴队首、按分降序"
+        );
+        // 池子耗尽：回退到末 5 条已消费（不足 5 条给全部）
+        let rows = latest_rows(&items, 4);
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[0].headline, "已出");
+        assert!(latest_rows(&[], 0).is_empty());
     }
 
     #[test]
