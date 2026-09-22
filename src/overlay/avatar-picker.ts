@@ -7,7 +7,7 @@ import { drawEyes, EYE_COLOR } from "../render/eyes";
 import { drawAttachments, splitBodyBox } from "../render/attachments";
 import { drawSpots } from "../render/patterns";
 import { generateCandidates } from "../avatar/generator";
-import type { PetAvatar } from "../avatar/types";
+import { asParametric, type PetAvatar } from "../avatar/types";
 import type { Box } from "../interact/hit-test";
 import { panelChrome } from "./chrome";
 
@@ -121,40 +121,32 @@ export function drawAvatarFigure(
   avatar: PetAvatar,
   frame: EyeFrame,
 ): void {
-  const { body } = splitBodyBox(full, avatar.attachment);
+  const av = asParametric(avatar);
+  const { body } = splitBodyBox(full, av.attachment);
   drawBody(
     ctx,
-    avatar.shape,
+    av.shape,
     body.x,
     body.y,
     body.w,
     body.h,
-    avatar.bodyColor,
-    avatar.pattern === "stripes" && avatar.secondaryColor
-      ? avatar.secondaryColor
-      : undefined,
+    av.bodyColor,
+    av.pattern === "stripes" && av.secondaryColor ? av.secondaryColor : undefined,
   );
-  if (avatar.pattern === "spots" && avatar.secondaryColor) {
-    drawSpots(ctx, avatar.shape, body, avatar.secondaryColor);
+  if (av.pattern === "spots" && av.secondaryColor) {
+    drawSpots(ctx, av.shape, body, av.secondaryColor);
   }
-  drawAttachments(ctx, full, avatar.attachment, avatar.accentColor);
+  drawAttachments(ctx, full, av.attachment, av.accentColor);
 
   const layout = { bodyX: body.x, bodyY: body.y, w: body.w, h: body.h };
   drawEyes(
     ctx,
     layout,
     frame,
-    { iris: EYE_COLOR, catchlight: avatar.accentColor, eyebag: null },
-    avatar.eyeStyle,
+    { iris: EYE_COLOR, catchlight: av.accentColor, eyebag: null },
+    av.eyeStyle,
   );
-  drawBrows(
-    ctx,
-    layout,
-    avatar.browStyle,
-    frame,
-    avatar.accentColor,
-    avatar.eyeStyle,
-  );
+  drawBrows(ctx, layout, av.browStyle, frame, av.accentColor, av.eyeStyle);
 }
 
 interface PreviewSlot {

@@ -36,7 +36,7 @@ import { describe as describeState } from "./appearance";
 import { getConfig, updateConfig, type ConfigView } from "./config";
 import { prettyShortcut } from "./shortcut";
 import { AvatarPicker } from "./overlay/avatar-picker";
-import { avatarFromView, avatarToView } from "./avatar/types";
+import { asParametric, avatarFromView, avatarToView } from "./avatar/types";
 import { analyzeImageFile } from "./avatar/from-image";
 import { PluginHubPanel } from "./plugins/hub";
 import { pomodoroFrontend } from "./plugins/cards/pomodoro";
@@ -85,7 +85,7 @@ function applyConfig(c: ConfigView): void {
 const avatarPicker = new AvatarPicker({
   onConfirm: (a) => {
     pet.setAvatar(a);
-    void updateConfig({ avatar: avatarToView(a) });
+    void updateConfig({ avatar: avatarToView(asParametric(a)) });
   },
   analyzeImage: analyzeImageFile,
 });

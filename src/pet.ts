@@ -22,7 +22,12 @@ import { drawBrows } from "./render/brows";
 import { drawAttachments, splitBodyBox } from "./render/attachments";
 import { drawSpots } from "./render/patterns";
 import { squashScale } from "./anim/squash";
-import { DEFAULT_AVATAR, type PetAvatar } from "./avatar/types";
+import {
+  DEFAULT_AVATAR,
+  asParametric,
+  type ParametricAvatar,
+  type PetAvatar,
+} from "./avatar/types";
 import { applyTint } from "./avatar/palette";
 
 /** 像素艺术必须整数倍缩放，否则糊。基础格 48px。 */
@@ -505,25 +510,25 @@ export class Pet {
     // 形象合成：身体（形状+纹理）→ 特征件（顶部预留区）→ 眼睛 → 眉毛。
     // 特征件存在时身体压缩高度，附件画在 bbox 内顶部（脏矩形零改动）。
     const full = { bodyX: px, bodyY: py, w, h };
-    const { body } = splitBodyBox(full, this.avatar.attachment);
+    const { body } = splitBodyBox(full, this.pAvatar().attachment);
     const bodyColor = this.bodyColor();
-    const secondary = this.avatar.secondaryColor
-      ? applyTint(this.avatar.secondaryColor, this.look.tint)
+    const secondary = this.pAvatar().secondaryColor
+      ? applyTint(this.pAvatar().secondaryColor, this.look.tint)
       : "";
     drawBody(
       ctx,
-      this.avatar.shape,
+      this.pAvatar().shape,
       body.x,
       body.y,
       body.w,
       body.h,
       bodyColor,
-      this.avatar.pattern === "stripes" && secondary ? secondary : undefined,
+      this.pAvatar().pattern === "stripes" && secondary ? secondary : undefined,
     );
-    if (this.avatar.pattern === "spots" && secondary) {
-      drawSpots(ctx, this.avatar.shape, body, secondary);
+    if (this.pAvatar().pattern === "spots" && secondary) {
+      drawSpots(ctx, this.pAvatar().shape, body, secondary);
     }
-    drawAttachments(ctx, full, this.avatar.attachment, this.accentColor());
+    drawAttachments(ctx, full, this.pAvatar().attachment, this.accentColor());
 
     const layout = { bodyX: body.x, bodyY: body.y, w: body.w, h: body.h };
     drawEyes(
@@ -535,15 +540,15 @@ export class Pet {
         catchlight: this.accentColor(),
         eyebag: this.look.tired ? TIRED_COLOR : null,
       },
-      this.avatar.eyeStyle,
+      this.pAvatar().eyeStyle,
     );
     drawBrows(
       ctx,
       layout,
-      this.avatar.browStyle,
+      this.pAvatar().browStyle,
       this.eye,
       this.accentColor(),
-      this.avatar.eyeStyle,
+      this.pAvatar().eyeStyle,
     );
 
     if (this.effects.size > 0) {
@@ -774,14 +779,19 @@ export class Pet {
     return null;
   }
 
+  /** 参数形象（MC 形态兜底为默认参数形象，渲染分流前的过渡）。 */
+  private pAvatar(): ParametricAvatar {
+    return asParametric(this.avatar);
+  }
+
   /** 形象基色 × 状态色调：focused 提亮、dim 压暗降饱和。 */
   private bodyColor(): string {
-    return applyTint(this.avatar.bodyColor, this.look.tint);
+    return applyTint(this.pAvatar().bodyColor, this.look.tint);
   }
 
   /** 点缀色（高光/眉毛）随状态色调同规则变换，保持整体协调。 */
   private accentColor(): string {
-    return applyTint(this.avatar.accentColor, this.look.tint);
+    return applyTint(this.pAvatar().accentColor, this.look.tint);
   }
 
   /** 擦除上一帧的脏矩形；首帧或 resize 后为整屏。 */
@@ -886,7 +896,7 @@ export class Pet {
   /** 设置形象。联动动作风格到行为层，并立即重绘。 */
   setAvatar(a: PetAvatar): void {
     this.avatar = a;
-    this.behavior.setActionStyle(a.actionStyle);
+    this.behavior.setActionStyle(asParametric(a).actionStyle);
     this.dirty = null;
     this.lastRenderMs = 0;
     this.lastDrawKey = null; // 配色/五官已变，指纹必然失效

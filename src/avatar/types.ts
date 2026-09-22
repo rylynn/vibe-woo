@@ -10,6 +10,8 @@
  * serde rename_all 处理），任何改动需同步 config.rs。
  */
 
+import type { McForm } from "../mc/model";
+
 /** 身体形状。 */
 export type BodyShape =
   | "box"
@@ -51,7 +53,9 @@ export type BrowStyle = "none" | "flat" | "slanted" | "arched" | "bushy";
 /** 动作风格：待机动作（hop/stretch/lookaround）的触发偏好。 */
 export type ActionStyle = "calm" | "bouncy" | "curious";
 
-export interface PetAvatar {
+export interface ParametricAvatar {
+  /** 形象体系判别：缺省（旧数据/旧构造）= parametric。 */
+  kind?: "parametric";
   shape: BodyShape;
   eyeStyle: EyeStyle;
   browStyle: BrowStyle;
@@ -66,6 +70,25 @@ export interface PetAvatar {
   pattern: Pattern;
   /** 次色 #RRGGBB（纹理用色）；空串表示无（pattern=none 时）。 */
   secondaryColor: string;
+}
+
+/** MC 形态形象：体素盒模型 + 皮肤（skinId 指向皮肤注册表/库）。 */
+export interface McAvatar {
+  kind: "minecraft";
+  form: McForm;
+  skinId: string;
+}
+
+/** 宠物形象：参数化像素画（默认）或 MC 体素形态。 */
+export type PetAvatar = ParametricAvatar | McAvatar;
+
+export function isMcAvatar(a: PetAvatar): a is McAvatar {
+  return a.kind === "minecraft";
+}
+
+/** MC 形态兜底为默认参数形象（渲染分流前的过渡 + 旧版本行为）。 */
+export function asParametric(a: PetAvatar): ParametricAvatar {
+  return isMcAvatar(a) ? DEFAULT_AVATAR : a;
 }
 
 export const BODY_SHAPES: BodyShape[] = [
@@ -105,7 +128,7 @@ export interface AvatarConfigView {
   secondary_color: string;
 }
 
-export function avatarToView(a: PetAvatar): AvatarConfigView {
+export function avatarToView(a: ParametricAvatar): AvatarConfigView {
   return {
     shape: a.shape,
     eye_style: a.eyeStyle,
@@ -119,7 +142,7 @@ export function avatarToView(a: PetAvatar): AvatarConfigView {
   };
 }
 
-export function avatarFromView(v: AvatarConfigView): PetAvatar {
+export function avatarFromView(v: AvatarConfigView): ParametricAvatar {
   return {
     shape: v.shape,
     eyeStyle: v.eye_style,
@@ -134,7 +157,7 @@ export function avatarFromView(v: AvatarConfigView): PetAvatar {
 }
 
 /** 未选择形象时的默认外观（现状矩形+经典眼的延续，配色与旧常量一致）。 */
-export const DEFAULT_AVATAR: PetAvatar = {
+export const DEFAULT_AVATAR: ParametricAvatar = {
   shape: "box",
   eyeStyle: "classic",
   browStyle: "none",

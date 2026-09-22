@@ -1,5 +1,6 @@
 import { describe as d, expect, it } from "vitest";
 import { generateCandidates } from "../src/avatar/generator";
+import { asParametric } from "../src/avatar/types";
 
 /** 确定性 RNG（mulberry32），测试可复现。 */
 function mulberry32(seed: number): () => number {
@@ -42,7 +43,9 @@ function hueDistance(a: number, b: number): number {
 
 /** 多个种子各生成一遍，覆盖随机路径。 */
 function batches(seeds: number[], count?: number) {
-  return seeds.map((s) => generateCandidates(mulberry32(s), count));
+  return seeds.map((s) =>
+    generateCandidates(mulberry32(s), count).map(asParametric),
+  );
 }
 
 const SEEDS = Array.from({ length: 20 }, (_, i) => i + 1);

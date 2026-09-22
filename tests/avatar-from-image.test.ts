@@ -6,6 +6,7 @@ import {
   extractFeatures,
 } from "../src/avatar/from-image";
 import { hexToHsl } from "../src/avatar/palette";
+import { asParametric } from "../src/avatar/types";
 
 function mulberry32(seed: number): () => number {
   let a = seed >>> 0;
@@ -142,7 +143,10 @@ d("主体识别与轮廓分析", () => {
   });
 
   it("猫图 → round 身 + pointy-ears（形状与核心特征都被像素化）", () => {
-    const [first] = avatarFromAnalysis(analyzeImage(catImage()), mulberry32(1));
+    const [first] = avatarFromAnalysis(
+      analyzeImage(catImage()),
+      mulberry32(1),
+    ).map(asParametric);
     expect(first.shape).toBe("round");
     expect(first.attachment).toBe("pointy-ears");
     // 主色取猫的橙色
@@ -156,7 +160,7 @@ d("主体识别与轮廓分析", () => {
     const [first] = avatarFromAnalysis(
       analyzeImage(stripedCircleImage()),
       mulberry32(1),
-    );
+    ).map(asParametric);
     expect(first.pattern).toBe("stripes");
     expect(first.secondaryColor).toMatch(/^#[0-9A-F]{6}$/);
   });
@@ -165,7 +169,7 @@ d("主体识别与轮廓分析", () => {
     const [first] = avatarFromAnalysis(
       analyzeImage(checkerImage()),
       mulberry32(1),
-    );
+    ).map(asParametric);
     expect(first.shape).not.toBe("blob");
     // 但眉毛仍保留「复杂图」的信号
     expect(first.browStyle).toBe("bushy");
@@ -177,13 +181,13 @@ d("主体识别与轮廓分析", () => {
 d("无主体退回与特征映射", () => {
   it("横长源图 → wide 形状", () => {
     const f = extractFeatures(solid(200, 100, 80), 2.4);
-    const [first] = avatarFromFeatures(f, mulberry32(1));
+    const [first] = avatarFromFeatures(f, mulberry32(1)).map(asParametric);
     expect(first.shape).toBe("wide");
   });
 
   it("竖长源图 → tall 形状", () => {
     const f = extractFeatures(solid(200, 100, 80), 0.4);
-    const [first] = avatarFromFeatures(f, mulberry32(1));
+    const [first] = avatarFromFeatures(f, mulberry32(1)).map(asParametric);
     expect(first.shape).toBe("tall");
   });
 
@@ -191,11 +195,11 @@ d("无主体退回与特征映射", () => {
     const dark = avatarFromFeatures(
       extractFeatures(solid(25, 25, 35)),
       mulberry32(1),
-    )[0];
+    ).map(asParametric)[0];
     const bright = avatarFromFeatures(
       extractFeatures(solid(240, 235, 210)),
       mulberry32(1),
-    )[0];
+    ).map(asParametric)[0];
     expect(dark.eyeStyle).toBe("sleepy");
     expect(bright.eyeStyle).toBe("big");
   });
@@ -209,7 +213,7 @@ d("形象输出约束", () => {
   it("所有候选的主色都来自图片主色（色相偏差 ≤32°）", () => {
     const a = analyzeImage(solid(210, 80, 60));
     const expectedHue = a.colors.primary.h;
-    for (const c of avatarFromAnalysis(a, mulberry32(1))) {
+    for (const c of avatarFromAnalysis(a, mulberry32(1)).map(asParametric)) {
       const h = hexToHsl(c.bodyColor).h;
       const dist = Math.min(
         Math.abs(h - expectedHue),
@@ -221,7 +225,7 @@ d("形象输出约束", () => {
 
   it("主色被钳制到协调域（过饱和/过暗的图不会生成刺眼形象）", () => {
     const a = analyzeImage(solid(255, 0, 0));
-    for (const c of avatarFromAnalysis(a, mulberry32(1))) {
+    for (const c of avatarFromAnalysis(a, mulberry32(1)).map(asParametric)) {
       const { s, l } = hexToHsl(c.bodyColor);
       expect(s).toBeLessThanOrEqual(0.76);
       expect(l).toBeGreaterThanOrEqual(0.44);
@@ -230,7 +234,9 @@ d("形象输出约束", () => {
   });
 
   it("候选间形状或眼睛风格不同（差异化与随机生成器一致）", () => {
-    const list = avatarFromAnalysis(analyzeImage(circleImage()), mulberry32(1));
+    const list = avatarFromAnalysis(analyzeImage(circleImage()), mulberry32(1)).map(
+      asParametric,
+    );
     for (let i = 0; i < list.length; i++) {
       for (let j = i + 1; j < list.length; j++) {
         const same =
@@ -249,7 +255,9 @@ d("形象输出约束", () => {
   });
 
   it("特征件的次色为点缀色系（accent 更亮）", () => {
-    const list = avatarFromAnalysis(analyzeImage(catImage()), mulberry32(1));
+    const list = avatarFromAnalysis(analyzeImage(catImage()), mulberry32(1)).map(
+      asParametric,
+    );
     for (const c of list) {
       const body = hexToHsl(c.bodyColor);
       const accent = hexToHsl(c.accentColor);

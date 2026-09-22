@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { avatarForUid, followStep, GuestPet } from "../src/guest/guest-pet";
+import { asParametric } from "../src/avatar/types";
 import { GuestRegistry } from "../src/guest";
 
 /** 绘制函数只需要一个「方法都能调用」的空壳，测试不校验像素。 */
@@ -27,8 +28,8 @@ describe("访客形象", () => {
   });
 
   it("不同 uid 大概率不一样", () => {
-    const a = avatarForUid("12345678");
-    const b = avatarForUid("87654321");
+    const a = asParametric(avatarForUid("12345678"));
+    const b = asParametric(avatarForUid("87654321"));
     const key = (x: typeof a) => `${x.shape}/${x.eyeStyle}/${x.bodyColor}`;
     expect(key(a)).not.toBe(key(b));
   });

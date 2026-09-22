@@ -4,7 +4,7 @@ import { MicroExpression } from "../anim/expression";
 import type { EyeFrame } from "../anim/expression";
 import { squashScale } from "../anim/squash";
 import { generateCandidates } from "../avatar/generator";
-import type { PetAvatar } from "../avatar/types";
+import { asParametric, type PetAvatar } from "../avatar/types";
 import type { Box } from "../interact/hit-test";
 import { drawAvatarFigure } from "../overlay/avatar-picker";
 
@@ -169,7 +169,7 @@ export class GuestPet {
     };
     // nearby 范围：以出生点为锚小范围晃悠，不会满屏乱跑
     this.behavior = new Behavior(opts.x, opts.y, rng);
-    this.behavior.setActionStyle(this.avatar.actionStyle);
+    this.behavior.setActionStyle(asParametric(this.avatar).actionStyle);
     this.expr = new MicroExpression(rng);
   }
 
