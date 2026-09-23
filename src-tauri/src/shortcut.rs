@@ -32,6 +32,9 @@ pub const EVENT_HUB_OPEN: &str = "pet://hub-open";
 /// 屏幕框选 OCR 呼出事件名。
 pub const EVENT_OCR_OPEN: &str = "pet://text-tools-ocr";
 
+/// MC 形态开发切换事件名（debug 构建独有，M3 设置 UI 落地后移除）。
+pub const EVENT_MC_DEV_TOGGLE: &str = "pet://mc-dev-toggle";
+
 /// 各快捷键的默认值（config.rs 的 Default 与前端 FALLBACK 与此保持一致）。
 pub const DEFAULT_SHORTCUT_NOTE: &str = "Alt+Space";
 pub const DEFAULT_SHORTCUT_REMINDER: &str = "Alt+R";
@@ -52,6 +55,15 @@ pub fn kill_switch() -> Shortcut {
         ),
         Code::KeyQ,
     )
+}
+
+/// MC 形态开发切换快捷键：Ctrl+Alt+M（仅 debug 构建注册）。
+///
+/// 宠物窗是非激活 NSPanel（不抢焦点），前端 window keydown 永远收不到
+/// 按键——必须走系统级全局快捷键再转发事件。与 kill_switch 一样不走
+/// 配置生命周期（apply_from_config 的 REGISTERED 不含它）。
+pub fn mc_dev_toggle() -> Shortcut {
+    Shortcut::new(Some(Modifiers::CONTROL.union(Modifiers::ALT)), Code::KeyM)
 }
 
 /// 当前已注册的自定义快捷键（存储格式），改键时先按它反注册。
@@ -280,6 +292,13 @@ pub fn handle(app: &AppHandle, shortcut: &Shortcut, event: ShortcutState) {
     if event != ShortcutState::Pressed {
         return;
     }
+    // 开发期 MC 形态切换：debug 构建独有（生产构建不注册，此分支不编译）
+    #[cfg(debug_assertions)]
+    if shortcut == &mc_dev_toggle() {
+        eprintln!("[mc-dev] 切换快捷键已按下");
+        let _ = app.emit(EVENT_MC_DEV_TOGGLE, ());
+        return;
+    }
     let cfg = configcmd::current();
     if eq_spec(shortcut, &cfg.shortcut_note) {
         eprintln!("[note] 速记窗已呼出");
@@ -408,6 +427,15 @@ mod tests {
         assert_eq!(s, Shortcut::new(
             Some(Modifiers::CONTROL | Modifiers::ALT | Modifiers::SUPER),
             Code::KeyQ,
+        ));
+    }
+
+    #[test]
+    fn mc_dev_toggle_is_ctrl_alt_m() {
+        let s = mc_dev_toggle();
+        assert_eq!(s, Shortcut::new(
+            Some(Modifiers::CONTROL | Modifiers::ALT),
+            Code::KeyM,
         ));
     }
 }
