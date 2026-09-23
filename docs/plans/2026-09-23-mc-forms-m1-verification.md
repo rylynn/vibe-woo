@@ -12,7 +12,8 @@ MC 形态 M1 PoC 的手工验收步骤。对应计划
 
 - [ ] `pnpm tauri dev` 启动，单测与类型检查全绿
       （`npx vitest run`、`npx tsc --noEmit`）
-- [ ] 开发切换入口：`Ctrl+Alt+M`（仅 dev 生效，不持久化）
+- [ ] 开发切换入口：`Ctrl+Alt+M`（全局快捷键，Rust 侧注册，仅 debug
+      构建生效，不持久化——无需点宠物取焦点，任意应用前台时按下即可）
 
 ## 逐项验证（照计划 Task 7 Step 7）
 
