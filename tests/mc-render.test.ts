@@ -14,7 +14,9 @@ interface Probe {
 function probeCtx() {
   const p: Probe = { transforms: [], draws: 0, saves: 0, restores: 0 };
   const ctx = {
-    globalAlpha: 1,
+    // 初值 0.5 而非 1：若渲染漏掉「恒 1」赋值，下面的断言才会红，
+    // 而不是被初值 1 空转放过（零半透明是渲染红线）
+    globalAlpha: 0.5,
     imageSmoothingEnabled: true,
     save: () => {
       p.saves++;

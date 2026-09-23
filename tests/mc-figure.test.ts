@@ -1,7 +1,7 @@
 // tests/mc-figure.test.ts
 import { describe, expect, it } from "vitest";
 import type { McAvatar } from "../src/avatar/types";
-import { drawMcFigure, filterEmptyOverlays, mcScaleFor } from "../src/mc/figure";
+import { drawMcFigure, filterEmptyOverlays, mcDirtyBounds, mcScaleFor } from "../src/mc/figure";
 import { PLAYER_MODEL } from "../src/mc/model";
 import { projectModel } from "../src/mc/project";
 import type { SkinData } from "../src/mc/skin";
@@ -56,8 +56,15 @@ describe("drawMcFigure", () => {
     // 初始 true（TS 5.9 下 getter/setter 类型需一致）：若绘制未显式
     // 关闭平滑，断言 toBe(false) 会抓到，而不是被初值蒙混过关
     let smoothing = true;
+    // 初值 0.5 同理：绘制必须把 alpha 拉回恒 1，漏掉赋值时断言才抓得住
+    let alpha = 0.5;
     const ctx = {
-      globalAlpha: 1,
+      get globalAlpha() {
+        return alpha;
+      },
+      set globalAlpha(v: number) {
+        alpha = v;
+      },
       get imageSmoothingEnabled() {
         return smoothing;
       },
@@ -71,7 +78,12 @@ describe("drawMcFigure", () => {
         draws++;
       },
     } as unknown as CanvasRenderingContext2D;
-    return { ctx, draws: () => draws, smoothing: () => smoothing };
+    return {
+      ctx,
+      draws: () => draws,
+      smoothing: () => smoothing,
+      alpha: () => alpha,
+    };
   }
   const frame = { shape: "round" as const, lid: 0, gazeX: 0, gazeY: 0 };
 
@@ -86,5 +98,41 @@ describe("drawMcFigure", () => {
     );
     expect(p.draws()).toBe(18);
     expect(p.smoothing()).toBe(false);
+    // 绘制结束 alpha 必须恒 1（零半透明红线明文要求的探针断言）
+    expect(p.alpha()).toBe(1);
+  });
+});
+
+describe("mcDirtyBounds ⊇ 投影极值", () => {
+  /**
+   * 78fb0e0 修过的残影 bug 类的不变量护栏：脏矩形必须盖住全部投影顶点。
+   * M2 加姿态、M3 加体型不同的猫狗时，手推导的 ±16m / 51m 常数一旦失配
+   * 这里立刻红。不 filter overlay——全 overlay 皮肤是最坏情形（全 36 面）。
+   */
+  it("m=1..4 全 36 面四角都落在脏矩形内", () => {
+    for (const m of [1, 2, 3, 4]) {
+      const faces = projectModel(PLAYER_MODEL, {}, { m, ox: 100, oy: 200 });
+      expect(faces).toHaveLength(36);
+      const d = mcDirtyBounds(100, 200, m);
+      for (const f of faces) {
+        const { o, u, v, tex } = f;
+        // 平行四边形四角；顶点可能是 x.5（奇数 m），直接数值比较
+        const corners = [
+          o,
+          { x: o.x + u.x * tex.sw, y: o.y + u.y * tex.sw },
+          { x: o.x + v.x * tex.sh, y: o.y + v.y * tex.sh },
+          {
+            x: o.x + u.x * tex.sw + v.x * tex.sh,
+            y: o.y + u.y * tex.sw + v.y * tex.sh,
+          },
+        ];
+        for (const c of corners) {
+          expect(c.x).toBeGreaterThanOrEqual(d.x);
+          expect(c.x).toBeLessThanOrEqual(d.x + d.w);
+          expect(c.y).toBeGreaterThanOrEqual(d.y);
+          expect(c.y).toBeLessThanOrEqual(d.y + d.h);
+        }
+      }
+    }
   });
 });
