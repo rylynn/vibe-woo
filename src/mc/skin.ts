@@ -5,6 +5,8 @@
  * 全部与 DOM 解耦（自有 SkinData 结构）——node 环境可测；
  * 浏览器侧的 PNG 解码在 loader.ts（驱动层保持薄）。
  */
+import { applyTint } from "../avatar/palette";
+import type { McTint } from "./pose";
 
 /** RGBA 行主序位图（data.length === w*h*4）。 */
 export interface SkinData {
@@ -116,4 +118,23 @@ export function hasOpaquePixels(
     }
   }
   return false;
+}
+
+/**
+ * 状态色调重映射（就地）：不透明像素逐个过 applyTint——与参数形象
+ * 同一变换，状态语义跨形象体系一致。只在加载期对克隆数据用一次，
+ * 绘制帧查表（skin-registry 的三画布），透明像素不动。
+ */
+export function remapTint(skin: SkinData, tint: McTint): void {
+  if (tint === "normal") return;
+  const d = skin.data;
+  for (let i = 0; i < d.length; i += 4) {
+    if (d[i + 3] === 0) continue;
+    const hex =
+      "#" + [0, 1, 2].map((k) => d[i + k].toString(16).padStart(2, "0")).join("");
+    const out = applyTint(hex, tint);
+    d[i] = parseInt(out.slice(1, 3), 16);
+    d[i + 1] = parseInt(out.slice(3, 5), 16);
+    d[i + 2] = parseInt(out.slice(5, 7), 16);
+  }
 }

@@ -6,11 +6,13 @@
  * loader（内置/导入）与 M4 的访客拉取。查不到返回 null，调用方
  * 跳过绘制（而不是画错）。
  */
+import type { McTint } from "./pose";
 import type { SkinData } from "./skin";
 
 export interface McSkinResources {
   skin: SkinData;
-  canvas: CanvasImageSource;
+  /** normal/focused/dim 三张预生成画布（绘制帧按姿态 tint 查表）。 */
+  canvases: Record<McTint, CanvasImageSource>;
 }
 
 const REGISTRY = new Map<string, McSkinResources>();

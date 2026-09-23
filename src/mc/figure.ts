@@ -40,7 +40,7 @@ export function drawMcFigure(
     projectModel(modelForForm(avatar.form), mcRestPose(), { m, ox, oy }),
     res.skin,
   );
-  drawMcFaces(ctx, faces, res.canvas);
+  drawMcFaces(ctx, faces, res.canvases.normal);
 }
 
 /**

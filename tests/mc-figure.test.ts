@@ -5,6 +5,7 @@ import { drawMcFigure, filterEmptyOverlays, mcDirtyBounds, mcScaleFor } from "..
 import { PLAYER_MODEL } from "../src/mc/model";
 import { projectModel } from "../src/mc/project";
 import { mcRestPose } from "../src/mc/pose";
+import type { McTint } from "../src/mc/pose";
 import type { SkinData } from "../src/mc/skin";
 
 const MC_AVATAR: McAvatar = { kind: "minecraft", form: "player", skinId: "t" };
@@ -24,6 +25,11 @@ function makeSkin(rects: [number, number, number, number][]): SkinData {
     }
   }
   return { w: 64, h: 64, data };
+}
+
+function stubRes(skin: SkinData) {
+  const c = {} as CanvasImageSource;
+  return { skin, canvases: { normal: c, focused: c, dim: c } as Record<McTint, CanvasImageSource> };
 }
 
 describe("mcScaleFor", () => {
@@ -95,7 +101,7 @@ describe("drawMcFigure", () => {
       { bodyX: 0, bodyY: 0, w: 96, h: 96 },
       MC_AVATAR,
       frame,
-      { skin: makeSkin([[8, 8, 8, 8]]), canvas: {} as CanvasImageSource },
+      stubRes(makeSkin([[8, 8, 8, 8]])),
     );
     expect(p.draws()).toBe(18);
     expect(p.smoothing()).toBe(false);

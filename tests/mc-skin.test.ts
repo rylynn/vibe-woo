@@ -1,12 +1,15 @@
 // tests/mc-skin.test.ts
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { applyTint } from "../src/avatar/palette";
+import type { McTint } from "../src/mc/pose";
 import {
   SKIN_MAX_BYTES,
   binarizeAlpha,
   hasOpaquePixels,
   normalizeSkin,
   parsePngSize,
+  remapTint,
   validateSkin,
   type SkinData,
 } from "../src/mc/skin";
@@ -109,5 +112,46 @@ describe("hasOpaquePixels", () => {
     const s = makeSkin(64, 64, [40, 8, 8, 8]); // 仅帽子区
     expect(hasOpaquePixels(s, { sx: 40, sy: 8, sw: 8, sh: 8 })).toBe(true);
     expect(hasOpaquePixels(s, { sx: 16, sy: 32, sw: 24, sh: 16 })).toBe(false);
+  });
+});
+
+describe("remapTint", () => {
+  function onePixelSkin(rgb: [number, number, number], alpha = 255): SkinData {
+    const s = makeSkin(1, 1);
+    s.data[0] = rgb[0]; s.data[1] = rgb[1]; s.data[2] = rgb[2]; s.data[3] = alpha;
+    return s;
+  }
+  const chan = (s: SkinData, k: number) => s.data[k];
+
+  it("normal：字节级原样", () => {
+    const s = onePixelSkin([100, 150, 200]);
+    const before = new Uint8ClampedArray(s.data);
+    remapTint(s, "normal");
+    expect([...s.data]).toEqual([...before]);
+  });
+
+  it("focused/dim：与 applyTint 逐通道一致（rgb→hex→applyTint→rgb 管道）", () => {
+    for (const tint of ["focused", "dim"] as McTint[]) {
+      const s = onePixelSkin([100, 150, 200]);
+      remapTint(s, tint);
+      const hex = applyTint("#6496c8", tint);
+      expect([chan(s, 0), chan(s, 1), chan(s, 2)]).toEqual([
+        parseInt(hex.slice(1, 3), 16),
+        parseInt(hex.slice(3, 5), 16),
+        parseInt(hex.slice(5, 7), 16),
+      ]);
+    }
+  });
+
+  it("方向正确：focused 提亮、dim 压暗；透明像素不动", () => {
+    const mid = onePixelSkin([128, 128, 128]);
+    remapTint(mid, "focused");
+    expect(chan(mid, 0)).toBeGreaterThan(128);
+    const dim = onePixelSkin([128, 128, 128]);
+    remapTint(dim, "dim");
+    expect(chan(dim, 0)).toBeLessThan(128);
+    const alpha0 = onePixelSkin([10, 20, 30], 0);
+    remapTint(alpha0, "dim");
+    expect([chan(alpha0, 0), chan(alpha0, 1), chan(alpha0, 2), chan(alpha0, 3)]).toEqual([10, 20, 30, 0]);
   });
 });

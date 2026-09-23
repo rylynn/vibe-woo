@@ -4,7 +4,8 @@
  * 校验 → 解码 → 归一化 → alpha 二值化 → 注册。
  * 失败只回 null，不透传解码细节。
  */
-import { binarizeAlpha, normalizeSkin, validateSkin, type SkinData } from "./skin";
+import type { McTint } from "./pose";
+import { binarizeAlpha, normalizeSkin, remapTint, validateSkin, type SkinData } from "./skin";
 import { registerMcSkin, type McSkinResources } from "./skin-registry";
 
 async function decodeToSkinData(bytes: Uint8Array): Promise<SkinData> {
@@ -38,6 +39,13 @@ function skinToCanvas(skin: SkinData): HTMLCanvasElement {
   return canvas;
 }
 
+/** 克隆数据 → 重映射 → 画布（绝不改已注册的原 skin）。 */
+function tintedCanvas(skin: SkinData, tint: McTint): HTMLCanvasElement {
+  const clone: SkinData = { w: skin.w, h: skin.h, data: new Uint8ClampedArray(skin.data) };
+  remapTint(clone, tint);
+  return skinToCanvas(clone);
+}
+
 export async function loadAndRegisterSkin(
   id: string,
   bytes: Uint8Array,
@@ -47,7 +55,14 @@ export async function loadAndRegisterSkin(
     let skin = await decodeToSkinData(bytes);
     skin = normalizeSkin(skin);
     binarizeAlpha(skin);
-    const res: McSkinResources = { skin, canvas: skinToCanvas(skin) };
+    const res: McSkinResources = {
+      skin,
+      canvases: {
+        normal: skinToCanvas(skin),
+        focused: tintedCanvas(skin, "focused"),
+        dim: tintedCanvas(skin, "dim"),
+      },
+    };
     registerMcSkin(id, res);
     return res;
   } catch {
