@@ -52,7 +52,7 @@ type PetAvatar =
 | `skin.ts` | 皮肤加载与校验（PNG 魔数、64×64 或 64×32、≤64KB）、归一化（64×32→64×64：补透明区、左腿由右腿镜像生成）、alpha 二值化（阈值 50%）、tint 重映射贴图生成（离屏 canvas，档位切换才重生成） |
 | `pose.ts` | 纯函数：`Motion + t + EyeFrame + Appearance → 量化姿态`。所有自由度量化成档：头 yaw 8 档（[-45°,+45°]）、头 pitch 3 档、四肢摆动相位 8 档、呼吸 3 档、squash 档复用现有公式 |
 | `project.ts` | 纯函数：姿态 → 面多边形列表（固定正交轴测投影 + painter's 深度排序）。视角全应用唯一、参数写死：身体恒定正面微右偏 + 俯角（2:1 类 MC 等距观感） |
-| `render.ts` | 面列表 → `drawImage` 序列：`setTransform` 整数量化剪切、`imageSmoothingEnabled=false`、顶点 `Math.round`；每帧可见面 drawImage 上限 30 次 |
+| `render.ts` | 面列表 → `drawImage` 序列：`setTransform` 整数量化剪切、`imageSmoothingEnabled=false`、顶点 `Math.round`；每帧可见面 drawImage 典型 ≤24、最坏 36（与 §6 一致） |
 
 **接入点**：`drawAvatarFigure()`（现三处共用：主宠物/选择器预览/访客）按 `avatar.kind` 分流。parametric 路径零改动；mc 路径产出同等地位的绘制序列。`pet.ts draw()` 末端的脏矩形/指纹结构不动，只扩指纹字段。
 

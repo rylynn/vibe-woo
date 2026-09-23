@@ -504,12 +504,6 @@ export class Pet {
     // 全屏清除（1440×900 ≈ 130 万像素）会让 GPU 每帧重新合成整个透明层。
     this.clearDirty();
 
-    // 辉光只在「进入状态」时出现 —— 它是语义信号（你来劲了），
-    // 不是常驻装饰。常亮的辉光就是廉价的闪烁感。
-    if (this.look.tint === "focused") {
-      this.drawDitherGlow(px, py, w, h);
-    }
-
     if (isMcAvatar(this.avatar)) {
       // MC 形态：倍率取未呼吸缩放的边长（呼吸/挤压的连续缩放会让
       // floor(h/48) 跳档，导致形象在 1x/2x 之间跳变——M2 起姿态自带
@@ -532,8 +526,18 @@ export class Pet {
       if (this.effects.size > 0) {
         this.drawEffects(ctx, px, py, w, h, nowMs);
       }
-      this.dirty = mcDirtyBounds(ox, oy, m);
+      // 特效会画到身位之外（泡泡上浮/头顶光环），激活时脏矩形并到
+      // glowBounds——它已含特效外扩逻辑，覆盖范围 ⊇ MC 身位。
+      this.dirty = this.effects.size > 0
+        ? this.glowBounds(px, py, w, h)
+        : mcDirtyBounds(ox, oy, m);
       return;
+    }
+
+    // 辉光只在「进入状态」时出现 —— 它是语义信号（你来劲了），
+    // 不是常驻装饰。常亮的辉光就是廉价的闪烁感。
+    if (this.look.tint === "focused") {
+      this.drawDitherGlow(px, py, w, h);
     }
 
     // 形象合成：身体（形状+纹理）→ 特征件（顶部预留区）→ 眼睛 → 眉毛。
