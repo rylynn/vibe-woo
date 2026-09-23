@@ -5,6 +5,7 @@ import { drawMcFigure, filterEmptyOverlays, mcDirtyBounds, mcScaleFor } from "..
 import { PLAYER_MODEL } from "../src/mc/model";
 import { projectModel } from "../src/mc/project";
 import { mcRestPose } from "../src/mc/pose";
+import type { McPose } from "../src/mc/pose";
 import type { McTint } from "../src/mc/pose";
 import type { SkinData } from "../src/mc/skin";
 
@@ -81,6 +82,8 @@ describe("drawMcFigure", () => {
       save() {},
       restore() {},
       setTransform() {},
+      // 眼部覆盖（drawMcEyes）用整数矩形填充，探针只需接住调用
+      fillRect: () => {},
       drawImage() {
         draws++;
       },
@@ -138,6 +141,79 @@ describe("mcDirtyBounds ⊇ 投影极值", () => {
           expect(c.x).toBeLessThanOrEqual(d.x + d.w);
           expect(c.y).toBeGreaterThanOrEqual(d.y);
           expect(c.y).toBeLessThanOrEqual(d.y + d.h);
+        }
+      }
+    }
+  });
+});
+
+describe("drawMcFigure 姿态", () => {
+  const frame = { shape: "round" as const, lid: 0, gazeX: 0, gazeY: 0 };
+
+  it("走动相位：drawImage 次数不变（18）且 fillRect 眼部跟上（≥1）", () => {
+    let draws = 0;
+    let fills = 0;
+    const ctx = {
+      globalAlpha: 1, imageSmoothingEnabled: true, fillStyle: "",
+      save() {}, restore() {}, setTransform() {},
+      drawImage: () => { draws++; },
+      fillRect: () => { fills++; },
+    } as unknown as CanvasRenderingContext2D;
+    const pose: McPose = { ...mcRestPose(), limbPhase: 3, tint: "focused" };
+    drawMcFigure(
+      ctx,
+      { bodyX: 0, bodyY: 0, w: 96, h: 96 },
+      MC_AVATAR,
+      frame,
+      stubRes(makeSkin([[8, 8, 8, 8]])),
+      pose,
+    );
+    expect(draws).toBe(18);
+    expect(fills).toBeGreaterThanOrEqual(4); // 两眼至少各 2 像素
+  });
+});
+
+describe("mcDirtyBounds（投影推导）", () => {
+  const pose = (over: Partial<McPose>): McPose => ({ ...mcRestPose(), ...over });
+
+  it("rest 精确值（m=2, ox=248, oy=296）", () => {
+    expect(mcDirtyBounds(248, 296, 2)).toEqual({ x: 219, y: 195, w: 58, h: 104 });
+  });
+
+  it("躺平精确值：x∈[ox−22m,ox+22m]、y∈[oy−25m,oy]；吸气头抬再高 3m", () => {
+    expect(mcDirtyBounds(248, 296, 2, pose({ lying: true }))).toEqual({
+      x: 203, y: 245, w: 90, h: 52,
+    });
+    // breath=+1 → 头 dz=+2，PT 下 y_s −= 1.5m·2 = 3m = 6px
+    expect(mcDirtyBounds(248, 296, 2, pose({ lying: true, breath: 1 }))).toEqual({
+      x: 203, y: 239, w: 90, h: 58,
+    });
+  });
+
+  it("全姿态 × m 1..4：所有面角点都落在脏矩形内（含镜像/摆动/举臂/躺平）", () => {
+    const variants = [
+      pose({}),
+      pose({ limbPhase: 3 }),
+      pose({ mirrored: true, limbPhase: 5 }),
+      pose({ armsUp: true }),
+      pose({ armsSpread: true }),
+      pose({ lying: true, breath: 1 }),
+      pose({ headYaw: 3, headPitch: 1 }),
+    ];
+    for (let m = 1; m <= 4; m++) {
+      const ox = 100, oy = 300;
+      for (const p of variants) {
+        const b = mcDirtyBounds(ox, oy, m, p);
+        const faces = projectModel(PLAYER_MODEL, p, { m, ox, oy });
+        for (const f of faces) {
+          for (const [c, r] of [[0, 0], [f.tex.sw, 0], [0, f.tex.sh], [f.tex.sw, f.tex.sh]] as const) {
+            const x = f.o.x + f.u.x * c + f.v.x * r;
+            const y = f.o.y + f.u.y * c + f.v.y * r;
+            expect(x).toBeGreaterThanOrEqual(b.x);
+            expect(x).toBeLessThanOrEqual(b.x + b.w);
+            expect(y).toBeGreaterThanOrEqual(b.y);
+            expect(y).toBeLessThanOrEqual(b.y + b.h);
+          }
         }
       }
     }
