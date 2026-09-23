@@ -31,6 +31,7 @@ import {
 } from "./avatar/types";
 import { applyTint } from "./avatar/palette";
 import { drawMcFigure, mcDirtyBounds } from "./mc/figure";
+import { mcFrameKey, mcPose } from "./mc/pose";
 import { getMcSkinResources } from "./mc/skin-registry";
 
 /** 像素艺术必须整数倍缩放，否则糊。基础格 48px。 */
@@ -475,6 +476,57 @@ export class Pet {
     });
     this.pokeEdge = false;
 
+    if (isMcAvatar(this.avatar)) {
+      // MC 形态：倍率取未呼吸缩放的边长（连续缩放会让 floor(h/48) 跳档
+      // ——M2 姿态自带量化呼吸，不走代码缩放）。姿态由行为/视线/呼吸
+      // 周期实时量化；跳帧走 mcFrameKey（与参数形象的 frameVisualKey
+      // 互不蕴含，各判各的）。
+      const m = this.side / BASE_CELL;
+      const ox = Math.round(this.x + this.side / 2);
+      const oy = Math.round(this.y + this.side);
+      const pose = mcPose({
+        motion: this.motion,
+        actPhase: this.actPhase,
+        facing: this.facing,
+        nowMs,
+        breathePeriodMs: this.look.breathePeriodMs,
+        asleep: this.look.asleep,
+        gazeX: this.eye.gazeX,
+        gazeY: this.eye.gazeY,
+        tint: this.look.tint,
+        tired: this.look.tired,
+      });
+      // 特效是常驻逐帧动画，激活期间不跳帧
+      if (this.effects.size === 0) {
+        const key = mcFrameKey(pose, this.avatar.skinId, this.eye, ox, oy, m);
+        if (key === this.lastDrawKey) return;
+        this.lastDrawKey = key;
+      }
+      this.clearDirty();
+      const res = getMcSkinResources(this.avatar.skinId);
+      if (res) {
+        drawMcFigure(
+          ctx,
+          // 盒子 = 宠物逻辑框；figure 内部取盒底中心为锚，与下面 dirty
+          // 用的 ox/oy 一致（side 为偶数，两次取整等价）。
+          { bodyX: Math.round(this.x), bodyY: Math.round(this.y), w: this.side, h: this.side },
+          this.avatar,
+          this.eye,
+          res,
+          pose,
+        );
+      }
+      if (this.effects.size > 0) {
+        this.drawEffects(ctx, px, py, w, h, nowMs);
+      }
+      // 特效会画到身位之外（泡泡上浮/头顶光环），激活时脏矩形并到
+      // glowBounds——它已含特效外扩逻辑，覆盖范围 ⊇ MC 身位。
+      this.dirty = this.effects.size > 0
+        ? this.glowBounds(px, py, w, h)
+        : mcDirtyBounds(ox, oy, m, pose);
+      return;
+    }
+
     // 无变化跳帧：视觉指纹与上一帧相同 ⇒ 输出逐像素相同，整帧跳过。
     // 不触碰 canvas 就不会触发 WebKit 层合成（RemoteLayerTree 事务会
     // 一路走到 GPU 进程）—— 这是空闲 CPU 的关键路径：idle 档 12fps 里，
@@ -503,36 +555,6 @@ export class Pet {
     // 脏矩形清除：只擦上一帧画过的区域，不整屏 clearRect。
     // 全屏清除（1440×900 ≈ 130 万像素）会让 GPU 每帧重新合成整个透明层。
     this.clearDirty();
-
-    if (isMcAvatar(this.avatar)) {
-      // MC 形态：倍率取未呼吸缩放的边长（呼吸/挤压的连续缩放会让
-      // floor(h/48) 跳档，导致形象在 1x/2x 之间跳变——M2 起姿态自带
-      // 量化呼吸，不走代码缩放）。
-      const m = this.side / BASE_CELL;
-      const ox = Math.round(this.x + this.side / 2);
-      const oy = Math.round(this.y + this.side);
-      const res = getMcSkinResources(this.avatar.skinId);
-      if (res) {
-        drawMcFigure(
-          ctx,
-          // 盒子 = 宠物逻辑框（未呼吸缩放）；figure 内部取盒底中心为锚，
-          // 与下面 dirty 用的 ox/oy 一致（side 为偶数，两次取整等价）。
-          { bodyX: Math.round(this.x), bodyY: Math.round(this.y), w: this.side, h: this.side },
-          this.avatar,
-          this.eye,
-          res,
-        );
-      }
-      if (this.effects.size > 0) {
-        this.drawEffects(ctx, px, py, w, h, nowMs);
-      }
-      // 特效会画到身位之外（泡泡上浮/头顶光环），激活时脏矩形并到
-      // glowBounds——它已含特效外扩逻辑，覆盖范围 ⊇ MC 身位。
-      this.dirty = this.effects.size > 0
-        ? this.glowBounds(px, py, w, h)
-        : mcDirtyBounds(ox, oy, m);
-      return;
-    }
 
     // 辉光只在「进入状态」时出现 —— 它是语义信号（你来劲了），
     // 不是常驻装饰。常亮的辉光就是廉价的闪烁感。
