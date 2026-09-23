@@ -57,6 +57,19 @@ describe("PLAYER_MODEL", () => {
       expect(b.faces.overlay).toBeDefined();
     }
   });
+
+  it("bottom 贴图仅双臂声明，尺寸 = 宽×深（举臂顶面用）", () => {
+    for (const b of PLAYER_MODEL.boxes) {
+      const isArm = b.name === "right-arm" || b.name === "left-arm";
+      expect(b.faces.bottom !== undefined).toBe(isArm);
+      if (b.faces.bottom) {
+        const [w, , d] = b.size;
+        expect([b.faces.bottom.sw, b.faces.bottom.sh]).toEqual([w, d]);
+      }
+    }
+    expect(PLAYER_MODEL.boxes[0].faces.bottom).toEqual({ sx: 48, sy: 16, sw: 4, sh: 4 });
+    expect(PLAYER_MODEL.boxes[1].faces.bottom).toEqual({ sx: 40, sy: 48, sw: 4, sh: 4 });
+  });
 });
 
 describe("modelForForm", () => {

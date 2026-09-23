@@ -30,6 +30,8 @@ export interface McBoxFaceSet {
   front: McTexRect;
   top: McTexRect;
   left: McTexRect;
+  /** 底面贴图（举臂后顶面朝上露出手底；仅双臂声明）。 */
+  bottom?: McTexRect;
   overlay?: { front: McTexRect; top: McTexRect; left: McTexRect };
 }
 
@@ -61,6 +63,7 @@ export const PLAYER_MODEL: McModel = {
         front: { sx: 44, sy: 20, sw: 4, sh: 12 },
         top: { sx: 44, sy: 16, sw: 4, sh: 4 },
         left: { sx: 40, sy: 20, sw: 4, sh: 12 },
+        bottom: { sx: 48, sy: 16, sw: 4, sh: 4 },
         overlay: {
           front: { sx: 44, sy: 36, sw: 4, sh: 12 },
           top: { sx: 44, sy: 32, sw: 4, sh: 4 },
@@ -76,6 +79,7 @@ export const PLAYER_MODEL: McModel = {
         front: { sx: 36, sy: 52, sw: 4, sh: 12 },
         top: { sx: 36, sy: 48, sw: 4, sh: 4 },
         left: { sx: 40, sy: 52, sw: 4, sh: 12 },
+        bottom: { sx: 40, sy: 48, sw: 4, sh: 4 },
         overlay: {
           front: { sx: 52, sy: 52, sw: 4, sh: 12 },
           top: { sx: 52, sy: 48, sw: 4, sh: 4 },

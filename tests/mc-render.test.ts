@@ -2,6 +2,7 @@
 import { describe, expect, it } from "vitest";
 import { PLAYER_MODEL } from "../src/mc/model";
 import { projectModel } from "../src/mc/project";
+import { mcRestPose } from "../src/mc/pose";
 import { drawMcFaces } from "../src/mc/render";
 
 interface Probe {
@@ -38,7 +39,7 @@ const HALF_GRID = (n: number) => Number.isInteger(n * 2);
 
 describe("drawMcFaces", () => {
   it("每个面恰好一次 drawImage，次数不超过预算 36", () => {
-    const faces = projectModel(PLAYER_MODEL, {}, { m: 2, ox: 0, oy: 0 });
+    const faces = projectModel(PLAYER_MODEL, mcRestPose(), { m: 2, ox: 0, oy: 0 });
     const { ctx, p } = probeCtx();
     drawMcFaces(ctx, faces, {} as CanvasImageSource);
     expect(p.draws).toBe(faces.length);
@@ -46,7 +47,7 @@ describe("drawMcFaces", () => {
   });
 
   it("save/restore 严格配对", () => {
-    const faces = projectModel(PLAYER_MODEL, {}, { m: 1, ox: 0, oy: 0 });
+    const faces = projectModel(PLAYER_MODEL, mcRestPose(), { m: 1, ox: 0, oy: 0 });
     const { ctx, p } = probeCtx();
     drawMcFaces(ctx, faces, {} as CanvasImageSource);
     expect(p.saves).toBe(faces.length);
@@ -61,7 +62,7 @@ describe("drawMcFaces", () => {
   });
 
   it("所有变换系数在 0.5 网格、平移整数（m=1 奇数倍率）", () => {
-    const faces = projectModel(PLAYER_MODEL, {}, { m: 1, ox: 7, oy: 13 });
+    const faces = projectModel(PLAYER_MODEL, mcRestPose(), { m: 1, ox: 7, oy: 13 });
     const { ctx, p } = probeCtx();
     drawMcFaces(ctx, faces, {} as CanvasImageSource);
     expect(p.transforms.length).toBe(faces.length);

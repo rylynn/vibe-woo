@@ -4,6 +4,7 @@ import type { McAvatar } from "../src/avatar/types";
 import { drawMcFigure, filterEmptyOverlays, mcDirtyBounds, mcScaleFor } from "../src/mc/figure";
 import { PLAYER_MODEL } from "../src/mc/model";
 import { projectModel } from "../src/mc/project";
+import { mcRestPose } from "../src/mc/pose";
 import type { SkinData } from "../src/mc/skin";
 
 const MC_AVATAR: McAvatar = { kind: "minecraft", form: "player", skinId: "t" };
@@ -37,7 +38,7 @@ describe("mcScaleFor", () => {
 });
 
 describe("filterEmptyOverlays", () => {
-  const faces = projectModel(PLAYER_MODEL, {}, { m: 1, ox: 0, oy: 0 });
+  const faces = projectModel(PLAYER_MODEL, mcRestPose(), { m: 1, ox: 0, oy: 0 });
 
   it("基础面永远保留；空 overlay 全跳过", () => {
     const out = filterEmptyOverlays(faces, makeSkin([[8, 8, 8, 8]]));
@@ -111,7 +112,7 @@ describe("mcDirtyBounds ⊇ 投影极值", () => {
    */
   it("m=1..4 全 36 面四角都落在脏矩形内", () => {
     for (const m of [1, 2, 3, 4]) {
-      const faces = projectModel(PLAYER_MODEL, {}, { m, ox: 100, oy: 200 });
+      const faces = projectModel(PLAYER_MODEL, mcRestPose(), { m, ox: 100, oy: 200 });
       expect(faces).toHaveLength(36);
       const d = mcDirtyBounds(100, 200, m);
       for (const f of faces) {

@@ -11,6 +11,7 @@ import type { Box } from "../interact/hit-test";
 import type { McAvatar } from "../avatar/types";
 import { modelForForm } from "./model";
 import { projectModel, type McFace } from "./project";
+import { mcRestPose } from "./pose";
 import { drawMcFaces } from "./render";
 import type { McSkinResources } from "./skin-registry";
 import { hasOpaquePixels, type SkinData } from "./skin";
@@ -36,7 +37,7 @@ export function drawMcFigure(
   const ox = Math.round(full.bodyX + full.w / 2);
   const oy = Math.round(full.bodyY + full.h);
   const faces = filterEmptyOverlays(
-    projectModel(modelForForm(avatar.form), {}, { m, ox, oy }),
+    projectModel(modelForForm(avatar.form), mcRestPose(), { m, ox, oy }),
     res.skin,
   );
   drawMcFaces(ctx, faces, res.canvas);
