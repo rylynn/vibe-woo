@@ -10,6 +10,7 @@ import { generateCandidates } from "../avatar/generator";
 import { isMcAvatar, type PetAvatar } from "../avatar/types";
 import type { Box } from "../interact/hit-test";
 import { drawMcFigure } from "../mc/figure";
+import { mcPose, type McPose } from "../mc/pose";
 import { getMcSkinResources } from "../mc/skin-registry";
 import { panelChrome } from "./chrome";
 
@@ -122,11 +123,12 @@ export function drawAvatarFigure(
   full: { bodyX: number; bodyY: number; w: number; h: number },
   avatar: PetAvatar,
   frame: EyeFrame,
+  pose?: McPose,
 ): void {
   if (isMcAvatar(avatar)) {
     // 资源未注册（远程访客 M4 才有皮肤同步）→ 不画，不画错。
     const res = getMcSkinResources(avatar.skinId);
-    if (res) drawMcFigure(ctx, full, avatar, frame, res);
+    if (res) drawMcFigure(ctx, full, avatar, frame, res, pose);
     return;
   }
   const av = avatar;
@@ -370,6 +372,39 @@ export class AvatarPicker {
       gazeTarget:
         pose.motion === "lookaround" ? { x: pose.facing * 0.85, y: 0 } : null,
     });
+
+    // MC 形态：不用参数形象的呼吸/挤压盒——姿态自带量化呼吸与动作，
+    // hop 的腾空仍走 y 抬升（与参数形象同一观感），所见即桌面所得。
+    if (isMcAvatar(avatar)) {
+      const box = {
+        bodyX: Math.round((PREVIEW_SIDE - PET_SIDE) / 2),
+        bodyY: Math.round(
+          PREVIEW_SIDE - 6 - PET_SIDE - pose.lift * PET_SIDE * 0.45,
+        ),
+        w: PET_SIDE,
+        h: PET_SIDE,
+      };
+      ctx.clearRect(0, 0, PREVIEW_SIDE, PREVIEW_SIDE);
+      drawAvatarFigure(
+        ctx,
+        box,
+        avatar,
+        eye,
+        mcPose({
+          motion: pose.motion,
+          actPhase: pose.phase,
+          facing: pose.facing,
+          nowMs: now,
+          breathePeriodMs: BREATHE_PERIOD_MS,
+          asleep: false,
+          gazeX: eye.gazeX,
+          gazeY: eye.gazeY,
+          tint: "normal",
+          tired: false,
+        }),
+      );
+      return;
+    }
 
     // 与 pet.ts draw() 同一套合成：呼吸缩放 → squash 形变 → 底部对齐
     const scale = breatheScale(

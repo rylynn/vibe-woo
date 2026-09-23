@@ -91,7 +91,8 @@ type PetAvatar =
 
 ### 3.3 帧指纹扩展（性能关键）
 
-`frameVisualKey()`（pet.ts）追加 mc 维度：`(form, skinId, tint 档, mirrored, motion, limbPhase, headYawStep, headPitchStep, breathStep, squashStep, eyeKey)`（本地皮肤以 skinId 标识内容；sha256 hash 只用于同步协议）。姿态全量化 → 有限姿态集，画面不变时零绘制，跳帧机制对体素路径完全生效。
+MC 形态走专属 `mcFrameKey()`（pet.ts，分支置于参数形象跳帧之前，
+两类指纹互不蕴含、各判各的）：`(skinId, m, ox, oy, tint, tired, mirrored, lying, armsUp, armsSpread, headYaw, headPitch, limbPhase, breath, eye.shape, round(lid·16), round(gazeX·3), round(gazeY))`（本地皮肤以 skinId 标识内容；sha256 hash 只用于同步协议）。姿态全量化 → 有限姿态集，画面不变时零绘制，跳帧机制对体素路径完全生效。
 
 ## 4. 素材与设置
 
