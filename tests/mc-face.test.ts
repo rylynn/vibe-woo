@@ -52,6 +52,21 @@ describe("mcEyePixels", () => {
     expect(closed.every((p) => p.r === 5)).toBe(true);
   });
 
+  it("帧指纹不变量：同 1/16 桶内的相邻 lid 产出完全相同像素", () => {
+    // round(lid·16) 同为 8：对齐前 visible 是 2 vs 1（曾违反同指纹同像素）
+    expect(Math.round(0.4999 * 16)).toBe(8);
+    expect(Math.round(0.5 * 16)).toBe(8);
+    expect(mcEyePixels(EYE({ lid: 0.4999 }), pose())).toEqual(
+      mcEyePixels(EYE({ lid: 0.5 }), pose()),
+    );
+    // 桶边界对：round(·16) 同为 7
+    expect(Math.round(0.4374 * 16)).toBe(7);
+    expect(Math.round(0.4375 * 16)).toBe(7);
+    expect(mcEyePixels(EYE({ lid: 0.4374 }), pose())).toEqual(
+      mcEyePixels(EYE({ lid: 0.4375 }), pose()),
+    );
+  });
+
   it("catchlight：左眼最上左一颗 EYE_LIGHT；happy/worried 不点", () => {
     const px = mcEyePixels(EYE(), pose());
     const lights = px.filter((p) => p.color === EYE_LIGHT);

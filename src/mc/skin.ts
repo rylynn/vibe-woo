@@ -121,9 +121,10 @@ export function hasOpaquePixels(
 }
 
 /**
- * 状态色调重映射（就地）：不透明像素逐个过 applyTint——与参数形象
+ * 状态色调重映射（就地）：非全透明像素逐个过 applyTint——与参数形象
  * 同一变换，状态语义跨形象体系一致。只在加载期对克隆数据用一次，
- * 绘制帧查表（skin-registry 的三画布），透明像素不动。
+ * 绘制帧查表（skin-registry 的三画布）。生产里 loader 已先
+ * binarizeAlpha（alpha 只剩 0/255），跳过 0 即覆盖全部可见像素。
  */
 export function remapTint(skin: SkinData, tint: McTint): void {
   if (tint === "normal") return;

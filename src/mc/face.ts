@@ -54,8 +54,11 @@ function clamp(v: number, lo: number, hi: number): number {
 export function mcEyePixels(frame: EyeFrame, pose: McPose): McEyePixel[] {
   const pattern = PATTERNS[frame.shape];
   const H = Math.max(...pattern.map(([, dy]) => dy)) + 1;
-  // 眨眼自上而下收：只保最底 visible 行（至少 1 行，闭眼是一条线）
-  const visible = Math.max(1, Math.ceil(H * (1 - frame.lid)));
+  // 眨眼自上而下收：只保最底 visible 行（至少 1 行，闭眼是一条线）。
+  // lid 先对齐帧指纹的 1/16 网格（与 mcFrameKey 同一刻度）：同一指纹
+  // 桶内的相邻 lid 必须产生相同像素，否则眨眼的行收缩会滞后一个桶。
+  const lid = Math.round(frame.lid * 16) / 16;
+  const visible = Math.max(1, Math.ceil(H * (1 - lid)));
   const gx = clamp(Math.round(frame.gazeX), -1, 1) * (pose.mirrored ? -1 : 1);
   const gy = clamp(Math.round(frame.gazeY), -1, 1) + pose.headPitch;
   const out: McEyePixel[] = [];
@@ -101,8 +104,9 @@ export function drawMcEyes(
   if (!face) return;
   ctx.globalAlpha = 1;
   for (const p of mcEyePixels(frame, pose)) {
-    // (c,r) 与 (c+1,r+1) 两角映射到设备空间；镜像/躺平的 u/v 任意
-    // 方向都成立——取 min/max 后圆整，矩形恒整数、无缝隙无重叠。
+    // (c,r) 与 (c+1,r+1) 两角映射到设备空间。两角取 min/max 是真实
+    // 外接盒的前提是 u.x/v.x 各自同号（现有发射面均满足：正面轴对齐、
+    // 顶/侧面 2:1 斜率）；异号的剪切面会缺半格，届时须改取四角。
     const a = {
       x: face.o.x + face.u.x * p.c + face.v.x * p.r,
       y: face.o.y + face.u.y * p.c + face.v.y * p.r,

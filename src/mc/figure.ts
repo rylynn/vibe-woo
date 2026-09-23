@@ -53,6 +53,9 @@ export function drawMcFigure(
  * 常量表多花的几次乘加远小于一次多余的整块重绘。
  */
 export function mcDirtyBounds(ox: number, oy: number, m: number, pose: McPose = mcRestPose()): Box {
+  // M3 约束：这里硬编码 PLAYER_MODEL（当前唯一模型，而 drawMcFigure 走
+  // modelForForm）。M3 引入第二个模型后必须改为按 form 取模型（两处
+  // 同源），否则脏矩形按错误模型的投影推导。
   const faces = projectModel(PLAYER_MODEL, pose, { m, ox, oy });
   let minX = Infinity;
   let maxX = -Infinity;

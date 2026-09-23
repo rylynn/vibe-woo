@@ -1,6 +1,6 @@
 // src/mc/skin-registry.ts
 /**
- * 已加载皮肤资源的进程内注册表：skinId → { skin, canvas }。
+ * 已加载皮肤资源的进程内注册表：skinId → { skin, canvases }。
  *
  * 渲染路径只查表不加载（绘制帧里绝无异步/解码）；注册发生在
  * loader（内置/导入）与 M4 的访客拉取。查不到返回 null，调用方
