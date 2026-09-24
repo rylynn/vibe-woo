@@ -27,6 +27,8 @@ chrono = "0.4"
 tauri-plugin-opener = "2"
 # 腾讯行情接口返回 GBK 编码（A 股中文名），需要解码。
 encoding_rs = "0.8"
+# MC 皮肤库内容寻址（mcskin.rs：sha256 hex 作为皮肤文件名）。
+sha2 = "0.10"
 
 # 安全兜底：全局快捷键提供不依赖 UI 的强制退出通道；
 # 单实例锁避免多开导致多层全屏透明窗叠加。

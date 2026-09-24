@@ -13,6 +13,7 @@ mod habitmemory;
 mod hittest;
 mod inputfocus;
 mod llm;
+mod mcskin;
 mod memory;
 mod mood;
 mod mouse;
