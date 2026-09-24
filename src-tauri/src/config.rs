@@ -250,11 +250,11 @@ pub enum Pattern {
     Spots,
 }
 
-/// 宠物形象配置（首次启动三选一选定后持久化）。
+/// 参数形象（原 9 字段原样内联；untagged 联合的 Parametric 变体）。
 ///
 /// 全部为值语义小字段，前端渲染层据此程序化绘制；无外部资源引用。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct AvatarConfig {
+pub struct ParametricAvatarConfig {
     pub shape: BodyShape,
     pub eye_style: EyeStyle,
     pub brow_style: BrowStyle,
@@ -272,6 +272,36 @@ pub struct AvatarConfig {
     /// 次色 #RRGGBB（纹理用色）；空串表示无。
     #[serde(default)]
     pub secondary_color: String,
+}
+
+/// MC 形态种类（小写序列化，与前端 McForm 对齐）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum McFormConfig {
+    Player,
+    Cat,
+    Dog,
+}
+
+/// MC 形态形象：体素盒模型 + 皮肤库 id。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McAvatarConfig {
+    pub form: McFormConfig,
+    /// "builtin:default"（前端内置资产）或 sha256 hex（皮肤库文件）。
+    pub skin_id: String,
+}
+
+/// 宠物形象配置：参数形象（默认/旧配置）或 MC 形态。
+///
+/// untagged：序列化内联变体（输出平铺、无 kind 标记）。Parametric 在前
+/// ——旧参数配置无任何标记字段，只能靠必填字段命中；MC 配置 {form,
+/// skin_id} 缺 shape 等必填 → Parametric 落空 → 匹配 Minecraft。两组
+/// 必填字段不相交，untagged联合按必填字段三向匹配 测试锁死该行为。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AvatarConfig {
+    Parametric(ParametricAvatarConfig),
+    Minecraft(McAvatarConfig),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -623,7 +653,7 @@ mod tests {
     #[test]
     fn 形象配置往返序列化() {
         let mut c = Config::default();
-        c.avatar = Some(AvatarConfig {
+        c.avatar = Some(AvatarConfig::Parametric(ParametricAvatarConfig {
             shape: BodyShape::Round,
             eye_style: EyeStyle::Big,
             brow_style: BrowStyle::Flat,
@@ -633,7 +663,7 @@ mod tests {
             attachment: Attachment::Ears,
             pattern: Pattern::Spots,
             secondary_color: "#7A3B22".into(),
-        });
+        }));
         let text = serde_json::to_string(&c).unwrap();
         let back: Config = serde_json::from_str(&text).unwrap();
         assert_eq!(back.avatar, c.avatar);
@@ -654,7 +684,7 @@ mod tests {
 
     #[test]
     fn 形象字段名为snake_case与前端约定一致() {
-        let a = AvatarConfig {
+        let a = AvatarConfig::Parametric(ParametricAvatarConfig {
             shape: BodyShape::Tall,
             eye_style: EyeStyle::Sleepy,
             brow_style: BrowStyle::Arched,
@@ -664,7 +694,7 @@ mod tests {
             attachment: Attachment::None,
             pattern: Pattern::None,
             secondary_color: String::new(),
-        };
+        });
         let v = serde_json::to_value(&a).unwrap();
         for key in [
             "shape",
@@ -687,9 +717,49 @@ mod tests {
         // 注意：颜色值含 `"#` 序列，原始字符串必须用 r## 避免提前终止
         let json = r##"{"shape":"round","eye_style":"big","brow_style":"flat","action_style":"calm","body_color":"#A85232","accent_color":"#FFE066"}"##;
         let a: AvatarConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(a.attachment, Attachment::None);
-        assert_eq!(a.pattern, Pattern::None);
-        assert!(a.secondary_color.is_empty(), "无纹理时次色为空串");
+        let AvatarConfig::Parametric(p) = a else {
+            panic!("旧参数配置必须匹配 Parametric 变体");
+        };
+        assert_eq!(p.attachment, Attachment::None);
+        assert_eq!(p.pattern, Pattern::None);
+        assert!(p.secondary_color.is_empty(), "无纹理时次色为空串");
+    }
+
+    #[test]
+    fn mc形象配置往返序列化() {
+        let a = AvatarConfig::Minecraft(McAvatarConfig {
+            form: McFormConfig::Cat,
+            skin_id: "builtin:default".into(),
+        });
+        let v = serde_json::to_value(&a).unwrap();
+        // untagged 序列化内联：无 kind 标记，字段名 snake_case
+        assert_eq!(v["form"], "cat");
+        assert_eq!(v["skin_id"], "builtin:default");
+        let back: AvatarConfig = serde_json::from_value(v).unwrap();
+        assert_eq!(back, a);
+    }
+
+    #[test]
+    fn untagged联合按必填字段三向匹配() {
+        // 旧参数 JSON（无 kind、无 form）→ Parametric
+        let old = r##"{"shape":"round","eye_style":"big","brow_style":"flat","action_style":"calm","body_color":"#A85232","accent_color":"#FFE066"}"##;
+        assert!(matches!(
+            serde_json::from_str::<AvatarConfig>(old).unwrap(),
+            AvatarConfig::Parametric(_)
+        ));
+        // MC JSON（缺 shape 等必填）→ Minecraft
+        let mc = r#"{"form":"dog","skin_id":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}"#;
+        assert!(matches!(
+            serde_json::from_str::<AvatarConfig>(mc).unwrap(),
+            AvatarConfig::Minecraft(McAvatarConfig {
+                form: McFormConfig::Dog,
+                ..
+            })
+        ));
+        // 形态枚举小写与前端 McForm 对齐
+        assert_eq!(serde_json::to_string(&McFormConfig::Player).unwrap(), "\"player\"");
+        assert_eq!(serde_json::to_string(&McFormConfig::Cat).unwrap(), "\"cat\"");
+        assert_eq!(serde_json::to_string(&McFormConfig::Dog).unwrap(), "\"dog\"");
     }
 
     #[test]
