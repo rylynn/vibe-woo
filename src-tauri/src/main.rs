@@ -131,9 +131,6 @@ fn main() {
             // 先注册逃生快捷键，再显示窗口 —— 顺序很重要：
             // 万一窗口逻辑有问题，用户至少已经能退出了。
             app.global_shortcut().register(shortcut::kill_switch())?;
-            // MC 形态开发切换（M1 PoC 验证）：debug 构建独有，生产不注册
-            #[cfg(debug_assertions)]
-            app.global_shortcut().register(shortcut::mc_dev_toggle())?;
             // 速记 / 提醒 / 插件面板的快捷键由配置决定，必须在配置载入之后注册
             let cfg = configcmd::init(app.handle());
             shortcut::apply_from_config(app.handle());

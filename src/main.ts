@@ -36,10 +36,15 @@ import { describe as describeState } from "./appearance";
 import { getConfig, updateConfig, type ConfigView } from "./config";
 import { prettyShortcut } from "./shortcut";
 import { AvatarPicker } from "./overlay/avatar-picker";
-import { avatarFromView, avatarToView } from "./avatar/types";
+import {
+  avatarFromView,
+  avatarToView,
+  isMcAvatar,
+  type AvatarConfigView,
+} from "./avatar/types";
 import { analyzeImageFile } from "./avatar/from-image";
-import defaultSkinUrl from "./mc/assets/default-skin.png";
-import { installMcDevToggle } from "./mc/dev-toggle";
+import { builtinSkinId, ensureBuiltinSkins } from "./mc/builtins";
+import { ensureSkinLoaded } from "./mc/skinlib";
 import { PluginHubPanel } from "./plugins/hub";
 import { pomodoroFrontend } from "./plugins/cards/pomodoro";
 import { wordFrontend } from "./plugins/cards/word";
@@ -61,20 +66,13 @@ const ctx2d: CanvasRenderingContext2D = ctx;
 
 const pet = new Pet(canvas, ctx2d);
 
-// 开发期 MC 形态硬切入口（Ctrl+Alt+M）：只在 dev 构建装配，绝不持久化
-if (import.meta.env.DEV) {
-  void installMcDevToggle(pet, async () =>
-    new Uint8Array(await (await fetch(defaultSkinUrl)).arrayBuffer()),
-  );
-}
-
 // 预建时间下拉建议：通知卡片上的「改时间」输入也要用它
 refreshTimeDatalist();
 
 function applyConfig(c: ConfigView): void {
   pet.setSizeIndex(c.size_index);
   pet.setScope(c.roam_scope);
-  if (c.avatar) pet.setAvatar(avatarFromView(c.avatar));
+  if (c.avatar) void applyAvatarAsync(c.avatar);
   // 访客比主宠物小一圈：一眼能分清谁是自己家的
   const side = Math.max(32, Math.round((pet.body.w * 0.7) / 8) * 8);
   const changed = guests.setSide(side);
@@ -88,6 +86,29 @@ function applyConfig(c: ConfigView): void {
   menu.setLabel(2, `插件面板  (${prettyShortcut(c.shortcut_hub)})`);
   // 取词面板的翻译方向/引擎跟随配置
   textTools.setConfig(c);
+}
+
+/**
+ * 启动/配置更新的形象装配链（规格 §4）：参数形象 → 原逻辑；
+ * MC 形象 → 先确保内置皮肤注册（必成功才谈得上回退），再加载皮肤库
+ * 皮肤（失败回退该形态内置皮肤）。完成/回退后才 setAvatar——加载期间
+ * 保持上一形象，不留空白帧。
+ */
+async function applyAvatarAsync(v: AvatarConfigView): Promise<void> {
+  const a = avatarFromView(v);
+  if (!isMcAvatar(a)) {
+    pet.setAvatar(a);
+    return;
+  }
+  await ensureBuiltinSkins();
+  if (!(await ensureSkinLoaded(a.skinId))) {
+    // 库皮肤缺失（手删文件等）：回退内置皮肤。日志只记阶段与 id
+    // （hex / builtin 名，不含皮肤内容——隐私红线）。
+    console.warn(`[mc] 皮肤加载失败，回退内置皮肤: ${a.skinId}`);
+    pet.setAvatar({ ...a, skinId: builtinSkinId(a.form) });
+    return;
+  }
+  pet.setAvatar(a);
 }
 
 // 首次安装领养流程：确认后持久化并立即换装
