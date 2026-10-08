@@ -11,6 +11,7 @@
  */
 import type { Motion } from "../anim/behavior";
 import type { EyeFrame } from "../anim/expression";
+import type { McForm } from "./model";
 
 /** 状态色调（与 Appearance.tint / applyTint 的取值一致）。 */
 export type McTint = "normal" | "focused" | "dim";
@@ -37,6 +38,10 @@ export interface McPose {
   tint: McTint;
   /** 深夜疲惫（眼部画黑眼圈）。 */
   tired: boolean;
+  /** 尾摆相位 0..7（玩家恒 0；睡眠归零）。 */
+  tailPhase: number;
+  /** 尾巴下垂（四足 held；玩家无意义恒 false）。 */
+  tailDroop: boolean;
 }
 
 /** 姿态驱动输入（pet.draw 与形象预览各自组装）。 */
@@ -54,6 +59,8 @@ export interface McPoseInput {
   gazeY: number;
   tint: McTint;
   tired: boolean;
+  /** 形态：分派四足/玩家动作语义（尾摆、hop/bow 解释）。 */
+  form: McForm;
 }
 
 /** 静态站立（M1 兼容默认 / 证件照 / 未传姿态时的兜底）。 */
@@ -69,6 +76,8 @@ export function mcRestPose(): McPose {
     mirrored: false,
     tint: "normal",
     tired: false,
+    tailPhase: 0,
+    tailDroop: false,
   };
 }
 
@@ -76,6 +85,13 @@ export function mcRestPose(): McPose {
 export function breathStep(nowMs: number, periodMs: number): number {
   const s = Math.sin((nowMs / periodMs) * Math.PI * 2);
   return s > 0.33 ? 1 : s < -0.33 ? -1 : 0;
+}
+
+/** 尾摆相位：cat 600ms/档、dog 400ms/档、player 恒 0（无尾）。纯时间函数。 */
+export function tailStep(nowMs: number, form: McForm): number {
+  if (form === "cat") return Math.floor(nowMs / 600) % 8;
+  if (form === "dog") return Math.floor(nowMs / 400) % 8;
+  return 0;
 }
 
 function clamp(v: number, lo: number, hi: number): number {
@@ -97,16 +113,22 @@ export function mcPose(inp: McPoseInput): McPose {
   let limbPhase = 0;
   let armsUp = false;
   let armsSpread = false;
+  let tailPhase = tailStep(inp.nowMs, inp.form);
+  let tailDroop = false;
+  const quadruped = inp.form !== "player";
   switch (inp.motion) {
     case "walk":
       limbPhase = Math.floor(inp.nowMs / 75) % 8;
       break;
     case "held":
-      // 被抱起时四肢慢速下垂摆动
+      // 被抱起时四肢慢速下垂摆动；四足尾巴下垂
       limbPhase = Math.floor(inp.nowMs / 250) % 8;
+      tailDroop = quadruped;
       break;
     case "hop":
       armsSpread = true;
+      // 四足小跳：尾竖最高档（SWING 峰值相位）
+      if (quadruped) tailPhase = 2;
       break;
     case "stretch":
       // 起手与收手各留 15% 缓冲，避免一闪而过
@@ -134,6 +156,8 @@ export function mcPose(inp: McPoseInput): McPose {
     mirrored,
     tint: inp.tint,
     tired: inp.tired,
+    tailPhase,
+    tailDroop,
   };
 }
 
@@ -144,6 +168,7 @@ export function mcPose(inp: McPoseInput): McPose {
  */
 export function mcFrameKey(
   pose: McPose,
+  form: McForm,
   skinId: string,
   eye: EyeFrame,
   ox: number,
@@ -152,6 +177,7 @@ export function mcFrameKey(
 ): string {
   return [
     skinId,
+    form,
     m,
     ox,
     oy,
@@ -164,6 +190,8 @@ export function mcFrameKey(
     pose.headYaw,
     pose.headPitch,
     pose.limbPhase,
+    pose.tailPhase,
+    pose.tailDroop ? 1 : 0,
     pose.breath,
     eye.shape,
     Math.round(eye.lid * 16),

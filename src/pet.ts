@@ -495,13 +495,14 @@ export class Pet {
         gazeY: this.eye.gazeY,
         tint: this.look.tint,
         tired: this.look.tired,
+        form: this.avatar.form,
       });
       // still 挂件档与参数形象同契约（上面 amp=0 的先例）：完全静止。
       // 呼吸档冻结为 0（含躺平），眨眼/眼神保留——只是眼睛局部像素。
       if (this.scope === "still") pose.breath = 0;
       // 特效是常驻逐帧动画，激活期间不跳帧
       if (this.effects.size === 0) {
-        const key = mcFrameKey(pose, this.avatar.skinId, this.eye, ox, oy, m);
+        const key = mcFrameKey(pose, this.avatar.form, this.avatar.skinId, this.eye, ox, oy, m);
         if (key === this.lastDrawKey) return;
         this.lastDrawKey = key;
       }

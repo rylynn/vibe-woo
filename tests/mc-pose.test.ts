@@ -1,6 +1,6 @@
 // tests/mc-pose.test.ts
 import { describe, expect, it } from "vitest";
-import { breathStep, mcFrameKey, mcPose, mcRestPose } from "../src/mc/pose";
+import { breathStep, mcFrameKey, mcPose, mcRestPose, tailStep } from "../src/mc/pose";
 import type { EyeFrame } from "../src/anim/expression";
 
 const REST_INPUT = {
@@ -14,6 +14,7 @@ const REST_INPUT = {
   gazeY: 0,
   tint: "normal" as const,
   tired: false,
+  form: "player" as const,
 };
 
 const EYE: EyeFrame = { shape: "round", lid: 0, gazeX: 0, gazeY: 0 };
@@ -24,6 +25,7 @@ describe("mcRestPose", () => {
       headYaw: 0, headPitch: 0, limbPhase: 0, breath: 0,
       armsUp: false, armsSpread: false, lying: false,
       mirrored: false, tint: "normal", tired: false,
+      tailPhase: 0, tailDroop: false,
     });
   });
 });
@@ -91,12 +93,65 @@ describe("mcFrameKey", () => {
     const a = mcPose({ ...REST_INPUT });
     const same = mcPose({ ...REST_INPUT, gazeX: 0.1 }); // round(0.1*3)=0，同档
     const diff = mcPose({ ...REST_INPUT, gazeX: 0.4 }); // 档位 +1
-    expect(mcFrameKey(a, "s", EYE, 10, 20, 1)).toBe(mcFrameKey(same, "s", EYE, 10, 20, 1));
-    expect(mcFrameKey(a, "s", EYE, 10, 20, 1)).not.toBe(mcFrameKey(diff, "s", EYE, 10, 20, 1));
-    expect(mcFrameKey(a, "s", EYE, 10, 20, 1)).not.toBe(mcFrameKey(a, "s", EYE, 11, 20, 1));
+    expect(mcFrameKey(a, "player", "s", EYE, 10, 20, 1)).toBe(mcFrameKey(same, "player", "s", EYE, 10, 20, 1));
+    expect(mcFrameKey(a, "player", "s", EYE, 10, 20, 1)).not.toBe(mcFrameKey(diff, "player", "s", EYE, 10, 20, 1));
+    expect(mcFrameKey(a, "player", "s", EYE, 10, 20, 1)).not.toBe(mcFrameKey(a, "player", "s", EYE, 11, 20, 1));
     const lids = { ...EYE, lid: 0.03 }; // round(0.03*16)=0，同档
     const lidDiff = { ...EYE, lid: 0.1 }; // round(0.1*16)=2
-    expect(mcFrameKey(a, "s", lids, 10, 20, 1)).toBe(mcFrameKey(a, "s", EYE, 10, 20, 1));
-    expect(mcFrameKey(a, "s", lidDiff, 10, 20, 1)).not.toBe(mcFrameKey(a, "s", EYE, 10, 20, 1));
+    expect(mcFrameKey(a, "player", "s", lids, 10, 20, 1)).toBe(mcFrameKey(a, "player", "s", EYE, 10, 20, 1));
+    expect(mcFrameKey(a, "player", "s", lidDiff, 10, 20, 1)).not.toBe(mcFrameKey(a, "player", "s", EYE, 10, 20, 1));
+  });
+});
+
+describe("tailStep 尾摆相位", () => {
+  it("cat 600ms/档、dog 400ms/档、player 恒 0", () => {
+    expect(tailStep(0, "cat")).toBe(0);
+    expect(tailStep(599, "cat")).toBe(0);
+    expect(tailStep(600, "cat")).toBe(1);
+    expect(tailStep(0, "dog")).toBe(0);
+    expect(tailStep(399, "dog")).toBe(0);
+    expect(tailStep(400, "dog")).toBe(1);
+    expect(tailStep(99999, "player")).toBe(0);
+  });
+});
+
+describe("四足姿态语义（form 分派）", () => {
+  const CAT = { ...REST_INPUT, form: "cat" as const };
+
+  it("idle 尾摆档随时间推进；玩家恒 0", () => {
+    expect(mcPose({ ...CAT, nowMs: 0 }).tailPhase).toBe(0);
+    expect(mcPose({ ...CAT, nowMs: 1300 }).tailPhase).toBe(2); // floor(1300/600)=2
+    expect(mcPose({ ...REST_INPUT, nowMs: 1300 }).tailPhase).toBe(0);
+  });
+
+  it("hop：尾竖最高档（tailPhase=2）；held：尾垂（tailDroop）", () => {
+    expect(mcPose({ ...CAT, nowMs: 1300, motion: "hop" }).tailPhase).toBe(2);
+    expect(mcPose({ ...CAT, motion: "held" }).tailDroop).toBe(true);
+    expect(mcPose({ ...REST_INPUT, motion: "held" }).tailDroop).toBe(false);
+  });
+
+  it("睡眠尾摆归零（侧蜷静止）", () => {
+    expect(mcPose({ ...CAT, nowMs: 1300, asleep: true }).tailPhase).toBe(0);
+    expect(mcPose({ ...CAT, nowMs: 1300, asleep: true }).tailDroop).toBe(false);
+  });
+
+  it("对角步相位与玩家同刻度（75ms/相位）", () => {
+    expect(mcPose({ ...CAT, motion: "walk", nowMs: 0 }).limbPhase).toBe(0);
+    expect(mcPose({ ...CAT, motion: "walk", nowMs: 75 }).limbPhase).toBe(1);
+    expect(mcPose({ ...CAT, motion: "held", nowMs: 250 }).limbPhase).toBe(1);
+  });
+});
+
+describe("mcFrameKey 对 form/尾摆敏感", () => {
+  it("form、tailPhase、tailDroop 任一变化则指纹变化", () => {
+    const cat = mcPose({ ...REST_INPUT, form: "cat", nowMs: 0 });
+    const catWag = mcPose({ ...REST_INPUT, form: "cat", nowMs: 600 });
+    const dog = mcPose({ ...REST_INPUT, form: "dog", nowMs: 0 });
+    const droop = { ...cat, tailDroop: true };
+    const k = (p: ReturnType<typeof mcPose>, f: string) =>
+      mcFrameKey(p, f as Parameters<typeof mcFrameKey>[1], "s", EYE, 10, 20, 1);
+    expect(k(cat, "cat")).not.toBe(k(catWag, "cat")); // tailPhase 0→1
+    expect(k(cat, "cat")).not.toBe(k(dog, "dog")); // form 变化
+    expect(k(cat, "cat")).not.toBe(k(droop, "cat")); // tailDroop 变化
   });
 });

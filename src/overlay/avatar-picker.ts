@@ -401,6 +401,7 @@ export class AvatarPicker {
           gazeY: eye.gazeY,
           tint: "normal",
           tired: false,
+          form: avatar.form,
         }),
       );
       return;
