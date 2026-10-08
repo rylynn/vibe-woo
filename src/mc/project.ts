@@ -15,13 +15,15 @@
  *   躺平   基变换 PT(x,y,z) = P(x, z+4, 32−y)（脸朝天、脚朝观察者），
  *          附锚点补偿 ox −= 16m、oy −= 13m（身体甩向右上方，拉回脚底）；
  *   举臂   臂盒 y+12、三面绕肩翻转 180°，顶面改装 bottom 贴图（手）。
+ *   四足   站立发射路径 + quadrupedOffsets（对角步/play bow/hop/尾摆）；
+ *          侧蜷（lying）也走站立发射——偏移表达，绝不触发 PT/锚点补偿。
  * 头部转向不做几何旋转：正面贴图窗口沿头部条带平移 headYaw 格
  * （窗口位移原则）。镜像在排序前整体 x 翻转（z 不变 ⇒ 排序次序
  * 与未镜像完全一致，两套面数组逐位平行）。
  * 排序：painter，面深度中点 z 升序；sort 稳定保插入序
  * （基础面先于 overlay、model.boxes 的四肢→躯干→头顺序）。
  */
-import type { McModel, McTexRect } from "./model";
+import type { McForm, McModel, McTexRect } from "./model";
 import type { McPose } from "./pose";
 
 /** 一个待绘制面：平行四边形 = o + u·s + v·s（s∈[0,sw]×[0,sh] 网格）。 */
@@ -68,7 +70,7 @@ interface BoxOffset {
 
 const ZERO: BoxOffset = { dx: 0, dy: 0, dz: 0, raise: false };
 
-function boxOffsets(pose: McPose): Record<string, BoxOffset> {
+function playerOffsets(pose: McPose): Record<string, BoxOffset> {
   return {
     // 步态：右臂/左腿同相，左臂/右腿反相（+4）；hop 张臂 ±2
     "right-arm": { dx: pose.armsSpread ? -2 : 0, dy: 0, dz: swing(pose.limbPhase), raise: pose.armsUp },
@@ -83,12 +85,64 @@ function boxOffsets(pose: McPose): Record<string, BoxOffset> {
   };
 }
 
+/** 四足（猫/狗）盒偏移：全部用 dy/dz 平移表达姿态，绝不旋转。
+ *  hop=armsSpread 四肢收拢；bow=armsUp 前伸后翘；对角小跑
+ *  右前+左后同相、左前+右后反相（+4）；侧蜷见 lying 分支。 */
+function quadrupedOffsets(pose: McPose): Record<string, BoxOffset> {
+  if (pose.lying) {
+    // 侧蜷：躯干贴地、头落地（正脸仍朝观察者）、四肢向躯干下方收拢、
+    // 尾贴地；呼吸只抬不沉（头 dz +2，负档会穿地）。
+    const head = { dx: 0, dy: -12, dz: pose.breath > 0 ? 2 : 0, raise: false };
+    const tail = { dx: 0, dy: -10, dz: 0, raise: false };
+    return {
+      "tail-1": tail,
+      "tail-2": tail,
+      "right-back-leg": { dx: 0, dy: 0, dz: 2, raise: false },
+      "left-back-leg": { dx: 0, dy: 0, dz: 2, raise: false },
+      body: { dx: 0, dy: -6, dz: 0, raise: false },
+      "right-front-leg": { dx: 0, dy: 0, dz: -2, raise: false },
+      "left-front-leg": { dx: 0, dy: 0, dz: -2, raise: false },
+      head,
+      "right-ear": head, // 耳随头
+      "left-ear": head,
+    };
+  }
+  // 站立：对角小跑 + 呼吸 + 尾摆 + hop/bow
+  const head = {
+    dx: 0,
+    dy: 2 * pose.breath + (pose.armsUp ? -2 : 0),
+    dz: 0,
+    raise: false,
+  };
+  const tail = { dx: swing(pose.tailPhase), dy: pose.tailDroop ? -2 : 0, dz: 0, raise: false };
+  const legDy = pose.armsSpread ? -2 : 0;
+  const frontDz = pose.armsUp ? 2 : 0;
+  const backDy = pose.armsUp ? 2 : 0;
+  return {
+    "tail-1": tail,
+    "tail-2": tail,
+    "right-back-leg": { dx: 0, dy: backDy, dz: swing(pose.limbPhase + 4), raise: false },
+    "left-back-leg": { dx: 0, dy: backDy, dz: swing(pose.limbPhase), raise: false },
+    body: ZERO,
+    "right-front-leg": { dx: 0, dy: legDy, dz: frontDz + swing(pose.limbPhase), raise: false },
+    "left-front-leg": { dx: 0, dy: legDy, dz: frontDz + swing(pose.limbPhase + 4), raise: false },
+    head,
+    "right-ear": head, // 耳随头（呼吸同幅）
+    "left-ear": head,
+  };
+}
+
+function boxOffsets(pose: McPose, form: McForm): Record<string, BoxOffset> {
+  return form === "player" ? playerOffsets(pose) : quadrupedOffsets(pose);
+}
+
 export function projectModel(model: McModel, pose: McPose, view: McView): McFace[] {
   const { m } = view;
-  // 躺平锚点补偿：PT 会把身体甩到锚点右上方，先拉回脚底中心
+  // 躺平基变换与锚点补偿只对玩家生效（四足侧蜷用站立发射 + 平移偏移）
+  const lyingFlat = pose.lying && model.form === "player";
   let ox = view.ox;
   let oy = view.oy;
-  if (pose.lying) {
+  if (lyingFlat) {
     ox -= 16 * m;
     oy -= 13 * m;
   }
@@ -106,7 +160,7 @@ export function projectModel(model: McModel, pose: McPose, view: McView): McFace
   const UZ_BACK = { x: -m, y: -m / 2 };
   const UX_BACK = { x: -(3 * m) / 2, y: 0 };
 
-  const offs = boxOffsets(pose);
+  const offs = boxOffsets(pose, model.form);
   const faces: McFace[] = [];
   const emit = (
     box: string,
@@ -136,7 +190,7 @@ export function projectModel(model: McModel, pose: McPose, view: McView): McFace
     const f = b.faces;
     const ov = f.overlay;
 
-    if (pose.lying) {
+    if (lyingFlat) {
       // 躺平：正面朝天（原 z 面 → 水平）、顶面朝脚方向、左面贴地侧
       emit(b.name, "front", f.front, PT(bx, yTop, zFront), UX, UZ, 32 - (yBot + yTop) / 2, yaw);
       emit(b.name, "top", f.top, PT(bx, yTop, bz), UX, UY_UP, 32 - yTop);
