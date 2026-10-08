@@ -1511,6 +1511,42 @@
         font-size: 11px;
       }
 
+      /* —— 形象弹窗页签与 MC 皮肤页（M3）—— */
+      .pet-avatar-tabs { display: flex; gap: 6px; margin: 8px 14px 2px; }
+      .pet-avatar-tab {
+        padding: 4px 12px; font-size: 12px; color: #9fb4c4;
+        background: rgba(18, 26, 34, 0.9); border: 1px solid #2b3d4a;
+        border-radius: 6px; cursor: pointer;
+      }
+      .pet-avatar-tab.active { color: #7fdcbe; border-color: #7fdcbe; }
+      .pet-mc-form-row { display: flex; gap: 6px; margin: 10px 14px 2px; }
+      .pet-mc-form-btn {
+        padding: 4px 14px; font-size: 12px; color: #9fb4c4;
+        background: rgba(18, 26, 34, 0.9); border: 1px solid #2b3d4a;
+        border-radius: 6px; cursor: pointer;
+      }
+      .pet-mc-form-btn.active { color: #7fdcbe; border-color: #7fdcbe; }
+      .pet-mc-preview { width: 96px; height: 96px; image-rendering: pixelated; margin: 8px 14px; }
+      .pet-skin-grid { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 14px 8px; max-width: 320px; }
+      .pet-skin-tile {
+        position: relative; width: 52px; height: 52px; box-sizing: border-box;
+        border: 1px solid #2b3d4a; border-radius: 6px; cursor: pointer;
+        background: rgba(18, 26, 34, 0.9);
+        display: flex; align-items: center; justify-content: center;
+      }
+      .pet-skin-tile.selected { border-color: #7fdcbe; }
+      .pet-skin-tile canvas { width: 48px; height: 48px; image-rendering: pixelated; }
+      .pet-skin-import { font-size: 20px; color: #9fb4c4; }
+      .pet-skin-del {
+        position: absolute; top: -7px; right: -7px; width: 18px; height: 18px;
+        font-size: 10px; line-height: 1; color: #ff9c8a; padding: 0;
+        background: rgba(18, 26, 34, 0.95); border: 1px solid #ff9c8a;
+        border-radius: 9px; cursor: pointer;
+      }
+      .pet-skin-del:disabled { opacity: 0.4; cursor: not-allowed; }
+      .pet-skin-note { margin: 8px 14px; font-size: 11px; color: #9fb4c4; }
+      .pet-skin-error { margin: 4px 14px; font-size: 11px; color: #ff9c8a; }
+
       /* 设置面板的当前形象小预览 */
       .pet-settings-avatar {
         flex: 0 0 48px;

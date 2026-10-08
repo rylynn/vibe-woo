@@ -7,11 +7,25 @@ import { drawEyes, EYE_COLOR } from "../render/eyes";
 import { drawAttachments, splitBodyBox } from "../render/attachments";
 import { drawSpots } from "../render/patterns";
 import { generateCandidates } from "../avatar/generator";
-import { isMcAvatar, type PetAvatar } from "../avatar/types";
+import { isMcAvatar, type McAvatar, type PetAvatar } from "../avatar/types";
 import type { Box } from "../interact/hit-test";
 import { drawMcFigure } from "../mc/figure";
+import type { McForm } from "../mc/model";
 import { mcPose, type McPose } from "../mc/pose";
 import { getMcSkinResources } from "../mc/skin-registry";
+import {
+  BUILTIN_SKIN_IDS,
+  builtinSkinId,
+  ensureBuiltinSkins,
+} from "../mc/builtins";
+import {
+  ensureSkinLoaded,
+  importSkin,
+  listSkins,
+  deleteSkin,
+  skinErrorText,
+  type SkinMetaView,
+} from "../mc/skinlib";
 import { panelChrome } from "./chrome";
 
 /** 预览画布的 CSS 像素边长。 */
@@ -186,6 +200,18 @@ export class AvatarPicker {
   private previews: PreviewSlot[] = [];
   private confirmBtn: HTMLButtonElement | null = null;
   private rafId = 0;
+  /** 当前页签。 */
+  private tab: "parametric" | "mc" = "parametric";
+  private mcForm: McForm = "player";
+  private mcSkinId = BUILTIN_SKIN_IDS.player;
+  private mcSkins: SkinMetaView[] = [];
+  private mcError = "";
+  /** 删除二次确认：「再点一次」模式（不抢焦点，绝不用 window.confirm）。 */
+  private pendingDelete: string | null = null;
+  /** 打开弹窗时的当前形象（MC 时直接落在 MC 页并选中）。 */
+  private currentMcAvatar: McAvatar | null = null;
+  /** MC 页动画预览槽。 */
+  private mcPreview: PreviewSlot | null = null;
   private readonly startMs = performance.now();
 
   constructor(private readonly opts: AvatarPickerOptions) {
@@ -210,11 +236,26 @@ export class AvatarPicker {
     return !!b && x >= b.x && x < b.x + b.w && y >= b.y && y < b.y + b.h;
   }
 
-  /** 打开并生成一批候选。initial 非空时直接展示（设置面板换形象场景）。 */
-  show(initial?: PetAvatar[]): void {
+  /** 打开并生成一批候选。current 为 MC 形象时直接落在 MC 页并选中。 */
+  show(initial?: PetAvatar[], current?: PetAvatar): void {
     this.el.style.display = "block";
     this.open = true;
-    this.regenerate(initial ?? generateCandidates(Math.random));
+    this.currentMcAvatar = current && isMcAvatar(current) ? current : null;
+    this.tab = this.currentMcAvatar ? "mc" : "parametric";
+    if (this.currentMcAvatar) {
+      this.mcForm = this.currentMcAvatar.form;
+      this.mcSkinId = this.currentMcAvatar.skinId;
+    } else {
+      this.mcForm = "player";
+      this.mcSkinId = BUILTIN_SKIN_IDS.player;
+    }
+    this.pendingDelete = null;
+    this.mcError = "";
+    this.candidates = initial ?? generateCandidates(Math.random);
+    this.selected = -1;
+    void this.refreshMcSkins();
+    this.render();
+    this.startLoop();
   }
 
   hide(): void {
@@ -234,6 +275,7 @@ export class AvatarPicker {
   private render(): void {
     this.stopLoop();
     this.previews = [];
+    this.mcPreview = null;
     this.el.replaceChildren();
 
     // —— 标题栏（panelChrome 统一构建：拖拽 + ×）——
@@ -243,6 +285,62 @@ export class AvatarPicker {
     });
     this.el.appendChild(head);
 
+    // —— 顶部页签：参数形象 | MC 形态 ——
+    const tabs = document.createElement("div");
+    tabs.className = "pet-avatar-tabs";
+    for (const [t, label] of [
+      ["parametric", "参数形象"],
+      ["mc", "MC 形态"],
+    ] as const) {
+      const tab = document.createElement("button");
+      tab.className = "pet-avatar-tab";
+      tab.textContent = label;
+      tab.classList.toggle("active", this.tab === t);
+      tab.addEventListener("click", () => {
+        if (this.tab === t) return;
+        this.tab = t;
+        this.pendingDelete = null;
+        this.render();
+        this.startLoop();
+      });
+      tabs.appendChild(tab);
+    }
+    this.el.appendChild(tabs);
+
+    if (this.tab === "mc") {
+      this.renderMcPage();
+    } else {
+      this.renderParametricPage();
+    }
+
+    // —— 确认区（两页共用）——
+    const foot = document.createElement("div");
+    foot.className = "pet-avatar-picker-foot";
+    const confirm = document.createElement("button");
+    confirm.className = "pet-avatar-confirm";
+    confirm.textContent = "就是它了";
+    // MC 页随时可确认——形态+皮肤总有合法值；参数页维持选中后才启用
+    confirm.disabled = this.tab === "mc" ? false : true;
+    confirm.addEventListener("click", () => {
+      if (this.tab === "mc") {
+        this.opts.onConfirm(this.mcPreviewAvatar());
+        this.hide();
+        return;
+      }
+      if (this.selected < 0) return;
+      this.opts.onConfirm(this.candidates[this.selected]);
+      this.hide();
+    });
+    this.confirmBtn = confirm;
+    const hint = document.createElement("div");
+    hint.className = "pet-avatar-picker-hint";
+    hint.textContent = "之后可在设置里随时换";
+    foot.append(confirm, hint);
+    this.el.appendChild(foot);
+  }
+
+  /** 参数形象页：3 候选实时预览 + 换一换/从图片生成（页签专属）。 */
+  private renderParametricPage(): void {
     // —— 3 个预览 ——
     const row = document.createElement("div");
     row.className = "pet-avatar-picker-row";
@@ -312,25 +410,6 @@ export class AvatarPicker {
       actions.append(fromImage, fileInput);
     }
     this.el.appendChild(actions);
-
-    // —— 确认区 ——
-    const foot = document.createElement("div");
-    foot.className = "pet-avatar-picker-foot";
-    const confirm = document.createElement("button");
-    confirm.className = "pet-avatar-confirm";
-    confirm.textContent = "就是它了";
-    confirm.disabled = true;
-    confirm.addEventListener("click", () => {
-      if (this.selected < 0) return;
-      this.opts.onConfirm(this.candidates[this.selected]);
-      this.hide();
-    });
-    this.confirmBtn = confirm;
-    const hint = document.createElement("div");
-    hint.className = "pet-avatar-picker-hint";
-    hint.textContent = "之后可在设置里随时换";
-    foot.append(confirm, hint);
-    this.el.appendChild(foot);
   }
 
   private select(i: number): void {
@@ -348,6 +427,7 @@ export class AvatarPicker {
       for (let i = 0; i < this.previews.length; i++) {
         this.drawPreview(this.previews[i], this.candidates[i], now);
       }
+      if (this.mcPreview) this.drawPreview(this.mcPreview, this.mcPreviewAvatar(), now);
       this.rafId = requestAnimationFrame(tick);
     };
     this.rafId = requestAnimationFrame(tick);
@@ -356,6 +436,194 @@ export class AvatarPicker {
   private stopLoop(): void {
     if (this.rafId) cancelAnimationFrame(this.rafId);
     this.rafId = 0;
+  }
+
+  /** MC 页当前选中形象（猫/狗强制各自内置皮肤）。 */
+  private mcPreviewAvatar(): McAvatar {
+    return {
+      kind: "minecraft",
+      form: this.mcForm,
+      skinId:
+        this.mcForm === "player" ? this.mcSkinId : builtinSkinId(this.mcForm),
+    };
+  }
+
+  /** 拉皮肤列表 + 确保皮肤全部进注册表（幂等），然后重渲染 MC 页。 */
+  private async refreshMcSkins(): Promise<void> {
+    try {
+      await ensureBuiltinSkins();
+      this.mcSkins = await listSkins();
+      // 格子的 48px 静态预览走注册表画布——列表皮肤全部加载一遍
+      // （ensureSkinLoaded 对已注册的直接返回 true，开销可忽略）
+      for (const s of this.mcSkins) {
+        await ensureSkinLoaded(s.id);
+      }
+    } catch {
+      this.mcSkins = [];
+    }
+    if (this.open && this.tab === "mc") {
+      // render 顶部会 stopLoop，重渲染后必须重启动画循环，否则预览冻结
+      this.render();
+      this.startLoop();
+    }
+  }
+
+  /** MC 页：形态行 + 动画预览 + 皮肤格子（玩家）或说明（猫/狗）。 */
+  private renderMcPage(): void {
+    const formRow = document.createElement("div");
+    formRow.className = "pet-mc-form-row";
+    for (const [form, label] of [
+      ["player", "玩家"],
+      ["cat", "猫"],
+      ["dog", "狗"],
+    ] as const) {
+      const btn = document.createElement("button");
+      btn.className = "pet-mc-form-btn";
+      btn.textContent = label;
+      btn.classList.toggle("active", this.mcForm === form);
+      btn.addEventListener("click", () => {
+        this.mcForm = form;
+        this.render();
+      });
+      formRow.appendChild(btn);
+    }
+    this.el.appendChild(formRow);
+
+    const preview = document.createElement("canvas");
+    preview.className = "pet-mc-preview";
+    preview.width = PREVIEW_SIDE;
+    preview.height = PREVIEW_SIDE;
+    const pctx = preview.getContext("2d");
+    this.el.appendChild(preview);
+    if (pctx) {
+      pctx.imageSmoothingEnabled = false;
+      this.mcPreview = {
+        canvas: preview,
+        ctx: pctx,
+        driver: new PreviewDriver(Math.random, this.startMs),
+        expr: new MicroExpression(),
+        phaseOffset: 0,
+      };
+    }
+
+    if (this.mcForm === "player") {
+      const grid = document.createElement("div");
+      grid.className = "pet-skin-grid";
+      grid.appendChild(this.skinTile(BUILTIN_SKIN_IDS.player, "默认皮肤", false));
+      for (const s of this.mcSkins) {
+        grid.appendChild(this.skinTile(s.id, s.name, true));
+      }
+      // 导入格（隐藏 file input，与「从图片生成」同先例）
+      const importTile = document.createElement("div");
+      importTile.className = "pet-skin-tile pet-skin-import";
+      importTile.textContent = "+";
+      importTile.title = "导入 PNG 皮肤（64×64 / 64×32，≤64KB）";
+      const fileInput = document.createElement("input");
+      fileInput.type = "file";
+      fileInput.accept = "image/png";
+      fileInput.style.display = "none";
+      importTile.addEventListener("click", () => fileInput.click());
+      fileInput.addEventListener("change", () => {
+        const file = fileInput.files?.[0];
+        fileInput.value = "";
+        if (file) void this.importSkinFile(file);
+      });
+      grid.append(importTile, fileInput);
+      this.el.appendChild(grid);
+    } else {
+      const note = document.createElement("div");
+      note.className = "pet-skin-note";
+      note.textContent = "猫/狗使用内置形象，皮肤仅对玩家形态生效";
+      this.el.appendChild(note);
+    }
+
+    if (this.mcError) {
+      const err = document.createElement("div");
+      err.className = "pet-skin-error";
+      err.textContent = this.mcError;
+      this.el.appendChild(err);
+    }
+  }
+
+  /** 皮肤格子：48px 静态预览 + 删除 ×（两击确认；使用中/内置禁用）。 */
+  private skinTile(
+    id: string,
+    name: string,
+    deletable: boolean,
+  ): HTMLDivElement {
+    const tile = document.createElement("div");
+    tile.className = "pet-skin-tile";
+    tile.title = name;
+    tile.classList.toggle(
+      "selected",
+      this.mcForm === "player" && id === this.mcSkinId,
+    );
+
+    const canvas = document.createElement("canvas");
+    canvas.width = 48;
+    canvas.height = 48;
+    drawAvatarStill(canvas, { kind: "minecraft", form: "player", skinId: id });
+    tile.appendChild(canvas);
+
+    tile.addEventListener("click", () => {
+      this.pendingDelete = null;
+      this.mcSkinId = id;
+      this.render();
+    });
+
+    if (deletable) {
+      const del = document.createElement("button");
+      del.className = "pet-skin-del";
+      const inUse = this.currentMcAvatar?.skinId === id;
+      del.disabled = inUse;
+      del.textContent = this.pendingDelete === id ? "确认" : "×";
+      del.title = inUse
+        ? "使用中，不能删除"
+        : this.pendingDelete === id
+          ? "再点一次确认删除"
+          : "删除";
+      del.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        if (this.pendingDelete === id) {
+          void this.removeSkin(id);
+        } else {
+          this.pendingDelete = id;
+          this.render();
+        }
+      });
+      tile.appendChild(del);
+    }
+    return tile;
+  }
+
+  private async importSkinFile(file: File): Promise<void> {
+    this.mcError = "";
+    this.pendingDelete = null;
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const name = file.name.replace(/\.png$/i, "") || "皮肤";
+      const meta = await importSkin(name, bytes);
+      if (!(await ensureSkinLoaded(meta.id))) {
+        this.mcError = "皮肤载入失败，请重试";
+      } else {
+        this.mcSkinId = meta.id;
+      }
+    } catch (e) {
+      this.mcError = skinErrorText(e);
+    }
+    await this.refreshMcSkins();
+  }
+
+  private async removeSkin(id: string): Promise<void> {
+    this.pendingDelete = null;
+    this.mcError = "";
+    try {
+      await deleteSkin(id);
+      if (this.mcSkinId === id) this.mcSkinId = BUILTIN_SKIN_IDS.player;
+    } catch (e) {
+      this.mcError = skinErrorText(e);
+    }
+    await this.refreshMcSkins();
   }
 
   private drawPreview(slot: PreviewSlot, avatar: PetAvatar, now: number): void {

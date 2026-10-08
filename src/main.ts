@@ -36,7 +36,7 @@ import { describe as describeState } from "./appearance";
 import { getConfig, updateConfig, type ConfigView } from "./config";
 import { prettyShortcut } from "./shortcut";
 import { AvatarPicker } from "./overlay/avatar-picker";
-import { asParametric, avatarFromView, avatarToView } from "./avatar/types";
+import { avatarFromView, avatarToView } from "./avatar/types";
 import { analyzeImageFile } from "./avatar/from-image";
 import defaultSkinUrl from "./mc/assets/default-skin.png";
 import { installMcDevToggle } from "./mc/dev-toggle";
@@ -94,7 +94,7 @@ function applyConfig(c: ConfigView): void {
 const avatarPicker = new AvatarPicker({
   onConfirm: (a) => {
     pet.setAvatar(a);
-    void updateConfig({ avatar: avatarToView(asParametric(a)) });
+    void updateConfig({ avatar: avatarToView(a) });
   },
   analyzeImage: analyzeImageFile,
 });
@@ -107,7 +107,7 @@ const settings = new SettingsPanel(
     openPicker: (initial) => {
       // 弹窗与设置面板不叠放：先关设置，选定后改动已由 picker 持久化
       settings.hide();
-      avatarPicker.show(initial);
+      avatarPicker.show(initial, pet.currentAvatar);
     },
     analyzeImage: analyzeImageFile,
   },
