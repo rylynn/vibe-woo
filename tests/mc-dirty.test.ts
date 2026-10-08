@@ -1,6 +1,8 @@
 // tests/mc-dirty.test.ts
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Pet } from "../src/pet";
+import { mcDirtyBounds } from "../src/mc/figure";
+import { mcRestPose } from "../src/mc/pose";
 
 interface Cleared {
   x: number;
@@ -56,6 +58,20 @@ function makePet() {
   pet.setActivity("active");
   return { pet, cleared, startRecording: () => { recording = true; } };
 }
+
+/** 猫版：同参数（m=2、ox=248、oy=296），返回静止档身位盒黄金值。 */
+function makeCatPet() {
+  const made = makePet();
+  made.pet.setAvatar({ kind: "minecraft", form: "cat", skinId: "t" });
+  return made;
+}
+
+/** 猫静止（breath=0、尾 phase 0）在 m=2/ox=248/oy=296 的身位盒：
+ * minX 218（右后腿 left 面角点）、maxX 284（头正面）、minY 238（耳顶）、
+ * maxY 302（前腿底）；留 1px 余量 → x 217 / y 237 / w 68 / h 66。
+ * 若尾摆未冻结，tailPhase 走到 5（dx −2）时会在 nowMs 3000 落定 x=215 的盒子，
+ * 3600 相位 6 换帧使该盒被清除进记录——检测由此成立。 */
+const CAT_STILL_SHAPE = { x: 217, y: 237, w: 68, h: 66 };
 
 describe("MC 形态 Pet 级脏矩形选形", () => {
   afterEach(() => {
@@ -138,5 +154,42 @@ describe("MC 形态 Pet 级脏矩形选形", () => {
         expect(c).not.toEqual(s);
       }
     }
+  });
+
+  it("still 挂件档（猫）：尾摆冻结，重绘形状恒为静止身位盒", () => {
+    vi.spyOn(Math, "random").mockReturnValue(1);
+    const { pet, cleared, startRecording } = makeCatPet();
+    pet.setScope("still");
+    pet.tick(1000); // 首帧整屏清
+    startRecording();
+    // 穿过 3600ms（nowMs 1000+2600）：若尾摆未冻结，tailPhase 会经历 1→6，
+    // phase 5（dx −2）在 nowMs 3000 把身位盒推到 x=215 并落进 this.dirty，
+    // phase 6 在 3600 触发帧指纹变化使该盒被清除——断言由此抓住未冻结的尾摆
+    for (let t = 40; t <= 2600; t += 40) pet.tick(1000 + t);
+
+    const frames = partial(cleared);
+    expect(frames.length).toBeGreaterThan(0); // 防记录中断导致静默通过
+    expect(frames.length).toBeLessThanOrEqual(24);
+    for (const c of frames) {
+      expect(c).toEqual(CAT_STILL_SHAPE);
+    }
+  });
+});
+
+describe("mcDirtyBounds 按 form", () => {
+  it("猫：尾摆 phase 5 扩脏矩形（裸角点 minX 85→84，外接盒留 1px 余量 → 84/83）", () => {
+    const b0 = mcDirtyBounds(100, 200, 1, mcRestPose(), "cat");
+    const b5 = mcDirtyBounds(100, 200, 1, { ...mcRestPose(), tailPhase: 5 }, "cat");
+    expect(b0.x).toBe(84);
+    expect(b5.x).toBe(83);
+    expect(b5.w).toBe(b0.w + 1);
+  });
+
+  it("猫/狗外接盒矮于玩家（体型差异回归锚，规格 §3.1）", () => {
+    const cat = mcDirtyBounds(100, 200, 1, mcRestPose(), "cat");
+    const dog = mcDirtyBounds(100, 200, 1, mcRestPose(), "dog");
+    const player = mcDirtyBounds(100, 200, 1, mcRestPose(), "player");
+    expect(cat.h).toBeLessThan(player.h);
+    expect(dog.h).toBeLessThan(player.h);
   });
 });

@@ -497,9 +497,12 @@ export class Pet {
         tired: this.look.tired,
         form: this.avatar.form,
       });
-      // still 挂件档与参数形象同契约（上面 amp=0 的先例）：完全静止。
-      // 呼吸档冻结为 0（含躺平），眨眼/眼神保留——只是眼睛局部像素。
-      if (this.scope === "still") pose.breath = 0;
+      // still 挂件档与参数形象同契约：完全静止。呼吸档与尾摆档都冻结为 0
+      // （含躺平），眨眼/眼神保留——只是眼睛局部像素。
+      if (this.scope === "still") {
+        pose.breath = 0;
+        pose.tailPhase = 0;
+      }
       // 特效是常驻逐帧动画，激活期间不跳帧
       if (this.effects.size === 0) {
         const key = mcFrameKey(pose, this.avatar.form, this.avatar.skinId, this.eye, ox, oy, m);
@@ -527,7 +530,7 @@ export class Pet {
       // glowBounds——它已含特效外扩逻辑，覆盖范围 ⊇ MC 身位。
       this.dirty = this.effects.size > 0
         ? this.glowBounds(px, py, w, h)
-        : mcDirtyBounds(ox, oy, m, pose);
+        : mcDirtyBounds(ox, oy, m, pose, this.avatar.form);
       return;
     }
 
