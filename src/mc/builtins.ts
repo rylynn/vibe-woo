@@ -23,7 +23,7 @@ export function builtinSkinId(form: McForm): string {
 
 /**
  * 注册全部内置皮肤（幂等：已注册跳过）。任一失败返回 false，绝不抛出
- * ——启动引导链据此回退参数形象（Task 10）。
+ * ——调用方（弹窗/启动链）据此走各自回退。
  */
 export async function ensureBuiltinSkins(): Promise<boolean> {
   const pairs: [string, string][] = [

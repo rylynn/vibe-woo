@@ -182,3 +182,16 @@ describe("modelForForm 三路", () => {
     expect(modelForForm("dog")).toBe(DOG_MODEL);
   });
 });
+
+describe("盒名契约（project.ts 偏移表按名查，全集锁定）", () => {
+  it("猫 10 盒/狗 7 盒的盒名恰为偏移表认识的键", () => {
+    expect(CAT_MODEL.boxes.map((b) => b.name).sort()).toEqual([
+      "body", "head", "left-back-leg", "left-ear", "left-front-leg",
+      "right-back-leg", "right-ear", "right-front-leg", "tail-1", "tail-2",
+    ]);
+    expect(DOG_MODEL.boxes.map((b) => b.name).sort()).toEqual([
+      "body", "head", "left-back-leg", "left-front-leg",
+      "right-back-leg", "right-front-leg", "tail-1",
+    ]);
+  });
+});

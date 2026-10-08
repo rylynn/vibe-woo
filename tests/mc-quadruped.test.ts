@@ -45,10 +45,16 @@ describe("猫站立与动作", () => {
     expect(faceOf(CAT_MODEL, p, "right-back-leg", "front").o).toEqual({ x: 87, y: 186 });
   });
 
-  it("hop（armsSpread）：四肢收拢，右前腿 (97,197)", () => {
-    expect(faceOf(CAT_MODEL, pose({ armsSpread: true }), "right-front-leg", "front").o).toEqual({
+  it("hop（armsSpread）：四肢同收，右前腿 (97,197)、右后腿 (87,192)", () => {
+    const p = pose({ armsSpread: true });
+    expect(faceOf(CAT_MODEL, p, "right-front-leg", "front").o).toEqual({
       x: 97,
       y: 197,
+    });
+    // 后腿同收：站立 (87,189)，dy −2 抬升 3px
+    expect(faceOf(CAT_MODEL, p, "right-back-leg", "front").o).toEqual({
+      x: 87,
+      y: 192,
     });
   });
 

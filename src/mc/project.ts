@@ -121,8 +121,8 @@ function quadrupedOffsets(pose: McPose): Record<string, BoxOffset> {
   return {
     "tail-1": tail,
     "tail-2": tail,
-    "right-back-leg": { dx: 0, dy: backDy, dz: swing(pose.limbPhase + 4), raise: false },
-    "left-back-leg": { dx: 0, dy: backDy, dz: swing(pose.limbPhase), raise: false },
+    "right-back-leg": { dx: 0, dy: backDy + legDy, dz: swing(pose.limbPhase + 4), raise: false },
+    "left-back-leg": { dx: 0, dy: backDy + legDy, dz: swing(pose.limbPhase), raise: false },
     body: ZERO,
     "right-front-leg": { dx: 0, dy: legDy, dz: frontDz + swing(pose.limbPhase), raise: false },
     "left-front-leg": { dx: 0, dy: legDy, dz: frontDz + swing(pose.limbPhase + 4), raise: false },

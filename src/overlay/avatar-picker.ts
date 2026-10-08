@@ -483,7 +483,9 @@ export class AvatarPicker {
       btn.classList.toggle("active", this.mcForm === form);
       btn.addEventListener("click", () => {
         this.mcForm = form;
+        this.pendingDelete = null; // Minor 1：形态切换同样取消「待删除」态（清单 §4「点其他处取消」）
         this.render();
+        this.startLoop(); // render 顶部 stopLoop，重渲染后必须重启动画循环，否则预览空白
       });
       formRow.appendChild(btn);
     }
@@ -569,6 +571,7 @@ export class AvatarPicker {
       this.pendingDelete = null;
       this.mcSkinId = id;
       this.render();
+      this.startLoop(); // render 顶部 stopLoop，重渲染后必须重启动画循环，否则预览空白
     });
 
     if (deletable) {
@@ -589,6 +592,7 @@ export class AvatarPicker {
         } else {
           this.pendingDelete = id;
           this.render();
+          this.startLoop(); // render 顶部 stopLoop，重渲染后必须重启动画循环，否则预览空白
         }
       });
       tile.appendChild(del);

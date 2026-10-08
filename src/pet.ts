@@ -955,7 +955,7 @@ export class Pet {
     this.lastDrawKey = null;
   }
 
-  /** 当前形象（开发切换入口需要读取/恢复）。 */
+  /** 当前形象（形象弹窗打开时回显当前选择）。 */
   get currentAvatar(): PetAvatar {
     return this.avatar;
   }
