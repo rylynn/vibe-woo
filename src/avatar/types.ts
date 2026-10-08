@@ -113,10 +113,11 @@ export const BROW_STYLES: BrowStyle[] = ["none", "flat", "slanted", "arched", "b
 export const ACTION_STYLES: ActionStyle[] = ["calm", "bouncy", "curious"];
 
 /**
- * IPC 传输形态：与 Rust 端 AvatarConfig 的 serde 输出对齐（snake_case）。
- * 渲染层统一用 PetAvatar（camelCase），边界处用下面两个函数转换。
+ * IPC 传输形态：与 Rust 端 AvatarConfig（untagged 枚举）的 serde 输出对齐
+ * （snake_case、无判别字段——untagged 序列化内联变体）。渲染层统一用
+ * PetAvatar（camelCase），边界处用下面两个函数转换。
  */
-export interface AvatarConfigView {
+export interface ParametricConfigView {
   shape: BodyShape;
   eye_style: EyeStyle;
   brow_style: BrowStyle;
@@ -128,7 +129,21 @@ export interface AvatarConfigView {
   secondary_color: string;
 }
 
-export function avatarToView(a: ParametricAvatar): AvatarConfigView {
+/** MC 形态的传输形态（Rust McAvatarConfig 内联输出）。 */
+export interface McConfigView {
+  form: McForm;
+  skin_id: string;
+}
+
+export type AvatarConfigView = ParametricConfigView | McConfigView;
+
+/** Rust 不发判别字段，结构判别：MC 变体必带 skin_id。 */
+export function isMcConfigView(v: AvatarConfigView): v is McConfigView {
+  return "skin_id" in v;
+}
+
+export function avatarToView(a: PetAvatar): AvatarConfigView {
+  if (isMcAvatar(a)) return { form: a.form, skin_id: a.skinId };
   return {
     shape: a.shape,
     eye_style: a.eyeStyle,
@@ -142,7 +157,10 @@ export function avatarToView(a: ParametricAvatar): AvatarConfigView {
   };
 }
 
-export function avatarFromView(v: AvatarConfigView): ParametricAvatar {
+export function avatarFromView(v: AvatarConfigView): PetAvatar {
+  if (isMcConfigView(v)) {
+    return { kind: "minecraft", form: v.form, skinId: v.skin_id };
+  }
   return {
     shape: v.shape,
     eyeStyle: v.eye_style,

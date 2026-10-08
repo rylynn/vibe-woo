@@ -2,6 +2,7 @@ import { describe as d, expect, it } from "vitest";
 import {
   avatarFromView,
   avatarToView,
+  isMcConfigView,
   DEFAULT_AVATAR,
   type PetAvatar,
 } from "../src/avatar/types";
@@ -40,6 +41,8 @@ d("形象的 IPC 视图转换", () => {
 
   it("特征件与纹理的 kebab-case 取值与 Rust 枚举对齐", () => {
     const v = avatarToView({ ...AVATAR, attachment: "pointy-ears" });
+    // view 层联合化后需先收窄：参数形象不应被判别为 MC
+    if (isMcConfigView(v)) throw new Error("参数形象不应产出 MC 视图");
     expect(v.attachment).toBe("pointy-ears");
   });
 });
