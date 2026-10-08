@@ -10,8 +10,8 @@
  * （见 project.ts 头注）。boxes 顺序即 painter 排序的同深度平手序。
  */
 
-/** MC 形态种类。M1 只有玩家；cat/dog 在 M3 加入。 */
-export type McForm = "player";
+/** MC 形态种类：玩家（标准皮肤）或猫/狗（内置骨架与贴图）。 */
+export type McForm = "player" | "cat" | "dog";
 
 /** 皮肤贴图上的源矩形（64×64 坐标系）。 */
 export interface McTexRect {
@@ -150,8 +150,88 @@ export const PLAYER_MODEL: McModel = {
   ],
 };
 
-/** 按形态取模型；未知形态抛错（M3 前调用方类型上不可能传非 player）。 */
+/** 小尺寸三面组：2×2×2 盒（耳/尾节）。front/left/top 各 2×2。 */
+function smallFaces(sx: number, sy: number): McBoxFaceSet {
+  return {
+    front: { sx, sy, sw: 2, sh: 2 },
+    left: { sx: sx + 2, sy, sw: 2, sh: 2 },
+    top: { sx: sx + 4, sy, sw: 2, sh: 2 },
+  };
+}
+
+/** 腿盒三面组（2×6×2）：front/left 2×6，top 2×2。sx 取 36/40/44/48。 */
+function legFaces(sx: number): McBoxFaceSet {
+  return {
+    front: { sx, sy: 16, sw: 2, sh: 6 },
+    left: { sx: sx + 2, sy: 16, sw: 2, sh: 6 },
+    top: { sx, sy: 22, sw: 2, sh: 2 },
+  };
+}
+
+/** 盒构造简写（min/size 全偶数，见各模型约束测试）。 */
+function q(
+  name: string,
+  min: [number, number, number],
+  size: [number, number, number],
+  faces: McBoxFaceSet,
+): McBox {
+  return { name, min, size, faces };
+}
+
+/**
+ * 猫：10 盒（四足、双竖耳、两节尾）。头正面与玩家同窗 (8,8) 8×8
+ * ——程序化眼型零改动复用。腿区 x=36 起与身体 UV 不重叠（见 UV 表）。
+ * 耳 z=8（深度中点 9 > 头的 8）：painter 才会把耳画在头顶之上。
+ */
+export const CAT_MODEL: McModel = {
+  form: "cat",
+  boxes: [
+    q("tail-1", [-2, 12, -10], [2, 2, 2], smallFaces(16, 4)),
+    q("tail-2", [-2, 14, -10], [2, 2, 2], smallFaces(22, 4)),
+    q("right-back-leg", [-6, 0, -6], [2, 6, 2], legFaces(36)),
+    q("left-back-leg", [4, 0, -6], [2, 6, 2], legFaces(40)),
+    q("body", [-4, 6, -8], [8, 6, 16], {
+      front: { sx: 4, sy: 16, sw: 8, sh: 6 },
+      top: { sx: 4, sy: 22, sw: 8, sh: 16 },
+      left: { sx: 12, sy: 16, sw: 16, sh: 6 },
+    }),
+    q("right-front-leg", [-6, 0, 4], [2, 6, 2], legFaces(44)),
+    q("left-front-leg", [4, 0, 4], [2, 6, 2], legFaces(48)),
+    q("head", [-4, 12, 4], [8, 8, 8], {
+      front: { sx: 8, sy: 8, sw: 8, sh: 8 },
+      top: { sx: 8, sy: 0, sw: 8, sh: 8 },
+      left: { sx: 0, sy: 8, sw: 8, sh: 8 },
+    }),
+    q("right-ear", [-4, 20, 8], [2, 2, 2], smallFaces(16, 0)),
+    q("left-ear", [2, 20, 8], [2, 2, 2], smallFaces(22, 0)),
+  ],
+};
+
+/** 狗：7 盒（无耳盒——贴图表达；一节尾；躯干长 20）。 */
+export const DOG_MODEL: McModel = {
+  form: "dog",
+  boxes: [
+    q("tail-1", [-2, 12, -12], [2, 2, 2], smallFaces(16, 4)),
+    q("right-back-leg", [-6, 0, -8], [2, 6, 2], legFaces(36)),
+    q("left-back-leg", [4, 0, -8], [2, 6, 2], legFaces(40)),
+    q("body", [-4, 6, -10], [8, 6, 20], {
+      front: { sx: 4, sy: 16, sw: 8, sh: 6 },
+      top: { sx: 4, sy: 22, sw: 8, sh: 20 },
+      left: { sx: 12, sy: 16, sw: 20, sh: 6 },
+    }),
+    q("right-front-leg", [-6, 0, 6], [2, 6, 2], legFaces(44)),
+    q("left-front-leg", [4, 0, 6], [2, 6, 2], legFaces(48)),
+    q("head", [-4, 12, 6], [8, 8, 8], {
+      front: { sx: 8, sy: 8, sw: 8, sh: 8 },
+      top: { sx: 8, sy: 0, sw: 8, sh: 8 },
+      left: { sx: 0, sy: 8, sw: 8, sh: 8 },
+    }),
+  ],
+};
+
+/** 按形态取模型；未知形态抛错（调用方类型上不可能传错）。 */
 export function modelForForm(form: McForm): McModel {
   if (form === "player") return PLAYER_MODEL;
-  throw new Error(`未知 MC 形态: ${form}`);
+  if (form === "cat") return CAT_MODEL;
+  return DOG_MODEL;
 }
