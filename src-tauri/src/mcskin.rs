@@ -225,6 +225,60 @@ fn now_secs() -> u64 {
         .map(|d| d.as_secs())
         .unwrap_or(0)
 }
+
+// —— 命令层（薄壳：目录定位 + 脱敏错误映射；逻辑全在上方纯函数） ——
+
+use tauri::{AppHandle, Manager};
+
+/// 皮肤库目录：app_config_dir()/skins/（与 plugin/store 的 plugins/ 同惯例）。
+fn skins_dir(app: &AppHandle) -> Option<std::path::PathBuf> {
+    app.path().app_config_dir().ok().map(|d| d.join("skins"))
+}
+
+/// 导入皮肤：校验 → sha256 落盘 → 返回元数据。错误只回脱敏枚举，
+/// 日志只记错误类别（隐私红线：不记皮肤内容与用户命名）。
+#[tauri::command]
+pub fn mc_import_skin(app: AppHandle, name: String, bytes: Vec<u8>) -> Result<SkinMeta, String> {
+    let Some(dir) = skins_dir(&app) else {
+        return Err(SkinError::WriteFailed.as_str().to_string());
+    };
+    let r = import_skin(&dir, &name, &bytes);
+    if let Err(e) = &r {
+        eprintln!("[mcskin] 导入失败：{}", e.as_str());
+    }
+    r.map_err(|e| e.as_str().to_string())
+}
+
+/// 皮肤列表（index 缺失/损坏时纯函数层已兜底，命令不失败）。
+#[tauri::command]
+pub fn mc_list_skins(app: AppHandle) -> Vec<SkinMeta> {
+    match skins_dir(&app) {
+        Some(dir) => load_index(&dir).skins,
+        None => Vec::new(),
+    }
+}
+
+/// 删除皮肤。当前配置正用它时拒绝（in-use）。
+#[tauri::command]
+pub fn mc_delete_skin(app: AppHandle, id: String) -> Result<(), String> {
+    if skin_in_use(&crate::configcmd::current().avatar, &id) {
+        return Err(SkinError::InUse.as_str().to_string());
+    }
+    let Some(dir) = skins_dir(&app) else {
+        return Err(SkinError::NotFound.as_str().to_string());
+    };
+    delete_skin(&dir, &id).map_err(|e| e.as_str().to_string())
+}
+
+/// 读皮肤字节（前端 loadAndRegisterSkin 用）。
+#[tauri::command]
+pub fn mc_get_skin(app: AppHandle, id: String) -> Result<Vec<u8>, String> {
+    let Some(dir) = skins_dir(&app) else {
+        return Err(SkinError::NotFound.as_str().to_string());
+    };
+    read_skin(&dir, &id).map_err(|e| e.as_str().to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
