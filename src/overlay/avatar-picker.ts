@@ -13,19 +13,8 @@ import { drawMcFigure } from "../mc/figure";
 import type { McForm } from "../mc/model";
 import { mcPose, type McPose } from "../mc/pose";
 import { getMcSkinResources } from "../mc/skin-registry";
-import {
-  BUILTIN_SKIN_IDS,
-  builtinSkinId,
-  ensureBuiltinSkins,
-} from "../mc/builtins";
-import {
-  ensureSkinLoaded,
-  importSkin,
-  listSkins,
-  deleteSkin,
-  skinErrorText,
-  type SkinMetaView,
-} from "../mc/skinlib";
+import { BUILTIN_SKIN_IDS, builtinSkinId } from "../mc/builtins";
+import { SkinGrid } from "./skin-grid";
 import { panelChrome } from "./chrome";
 
 /** 预览画布的 CSS 像素边长。 */
@@ -204,14 +193,14 @@ export class AvatarPicker {
   private tab: "parametric" | "mc" = "parametric";
   private mcForm: McForm = "player";
   private mcSkinId = BUILTIN_SKIN_IDS.player;
-  private mcSkins: SkinMetaView[] = [];
-  private mcError = "";
-  /** 删除二次确认：「再点一次」模式（不抢焦点，绝不用 window.confirm）。 */
-  private pendingDelete: string | null = null;
+  /** 会话内上次玩家皮肤：猫/狗切回玩家时恢复（规格 2026-10-09 §4）。 */
+  private lastPlayerSkin = BUILTIN_SKIN_IDS.player;
   /** 打开弹窗时的当前形象（MC 时直接落在 MC 页并选中）。 */
   private currentMcAvatar: McAvatar | null = null;
   /** MC 页动画预览槽。 */
   private mcPreview: PreviewSlot | null = null;
+  /** 皮肤格组件：实例跨 render 复用（render 只重挂 el），列表/确认态不丢。 */
+  private mcGrid: SkinGrid | null = null;
   private readonly startMs = performance.now();
 
   constructor(private readonly opts: AvatarPickerOptions) {
@@ -244,16 +233,19 @@ export class AvatarPicker {
     this.tab = this.currentMcAvatar ? "mc" : "parametric";
     if (this.currentMcAvatar) {
       this.mcForm = this.currentMcAvatar.form;
-      this.mcSkinId = this.currentMcAvatar.skinId;
+      // 玩家形态记住 config 皮肤作为「上次玩家皮肤」；猫/狗切回玩家时恢复它
+      if (this.mcForm === "player") this.lastPlayerSkin = this.currentMcAvatar.skinId;
+      this.mcSkinId = this.mcForm === "player"
+        ? this.lastPlayerSkin
+        : BUILTIN_SKIN_IDS.player;
     } else {
       this.mcForm = "player";
       this.mcSkinId = BUILTIN_SKIN_IDS.player;
     }
-    this.pendingDelete = null;
-    this.mcError = "";
     this.candidates = initial ?? generateCandidates(Math.random);
     this.selected = -1;
-    void this.refreshMcSkins();
+    // 每次打开弹窗重拉一次皮肤列表：同步设置面板等其他入口的导入/删除
+    void this.mcGrid?.refresh();
     this.render();
     this.startLoop();
   }
@@ -299,7 +291,7 @@ export class AvatarPicker {
       tab.addEventListener("click", () => {
         if (this.tab === t) return;
         this.tab = t;
-        this.pendingDelete = null;
+        this.mcGrid?.cancelPendingDelete();
         this.render();
         this.startLoop();
       });
@@ -448,27 +440,7 @@ export class AvatarPicker {
     };
   }
 
-  /** 拉皮肤列表 + 确保皮肤全部进注册表（幂等），然后重渲染 MC 页。 */
-  private async refreshMcSkins(): Promise<void> {
-    try {
-      await ensureBuiltinSkins();
-      this.mcSkins = await listSkins();
-      // 格子的 48px 静态预览走注册表画布——列表皮肤全部加载一遍
-      // （ensureSkinLoaded 对已注册的直接返回 true，开销可忽略）
-      for (const s of this.mcSkins) {
-        await ensureSkinLoaded(s.id);
-      }
-    } catch {
-      this.mcSkins = [];
-    }
-    if (this.open && this.tab === "mc") {
-      // render 顶部会 stopLoop，重渲染后必须重启动画循环，否则预览冻结
-      this.render();
-      this.startLoop();
-    }
-  }
-
-  /** MC 页：形态行 + 动画预览 + 皮肤格子（玩家）或说明（猫/狗）。 */
+  /** MC 页：形态行 + 动画预览 + 皮肤格（玩家）或说明（猫/狗）。 */
   private renderMcPage(): void {
     const formRow = document.createElement("div");
     formRow.className = "pet-mc-form-row";
@@ -483,7 +455,10 @@ export class AvatarPicker {
       btn.classList.toggle("active", this.mcForm === form);
       btn.addEventListener("click", () => {
         this.mcForm = form;
-        this.pendingDelete = null; // Minor 1：形态切换同样取消「待删除」态（清单 §4「点其他处取消」）
+        // 归一化（规格 §4）：切回玩家恢复上次玩家皮肤——修复猫/狗皮肤
+        // id 残留到玩家形态（猫贴图套玩家骨架）的跨形态泄漏
+        if (form === "player") this.mcSkinId = this.lastPlayerSkin;
+        this.mcGrid?.cancelPendingDelete();
         this.render();
         this.startLoop(); // render 顶部 stopLoop，重渲染后必须重启动画循环，否则预览空白
       });
@@ -509,125 +484,36 @@ export class AvatarPicker {
     }
 
     if (this.mcForm === "player") {
-      const grid = document.createElement("div");
-      grid.className = "pet-skin-grid";
-      grid.appendChild(this.skinTile(BUILTIN_SKIN_IDS.player, "默认皮肤", false));
-      for (const s of this.mcSkins) {
-        grid.appendChild(this.skinTile(s.id, s.name, true));
+      if (!this.mcGrid) {
+        this.mcGrid = new SkinGrid({
+          currentId: () => this.mcSkinId,
+          inUseId: () => this.currentMcAvatar?.skinId ?? null,
+          onPick: (id) => {
+            this.mcSkinId = id;
+            this.lastPlayerSkin = id;
+            this.render();
+            this.startLoop(); // render 顶部 stopLoop，重渲染后必须重启动画循环
+          },
+          onRemoved: (id) => {
+            if (this.mcSkinId === id) {
+              this.mcSkinId = BUILTIN_SKIN_IDS.player;
+              this.lastPlayerSkin = BUILTIN_SKIN_IDS.player;
+            }
+            this.render();
+            this.startLoop();
+          },
+        });
+        void this.mcGrid.refresh();
       }
-      // 导入格（隐藏 file input，与「从图片生成」同先例）
-      const importTile = document.createElement("div");
-      importTile.className = "pet-skin-tile pet-skin-import";
-      importTile.textContent = "+";
-      importTile.title = "导入 PNG 皮肤（64×64 / 64×32，≤64KB）";
-      const fileInput = document.createElement("input");
-      fileInput.type = "file";
-      fileInput.accept = "image/png";
-      fileInput.style.display = "none";
-      importTile.addEventListener("click", () => fileInput.click());
-      fileInput.addEventListener("change", () => {
-        const file = fileInput.files?.[0];
-        fileInput.value = "";
-        if (file) void this.importSkinFile(file);
-      });
-      grid.append(importTile, fileInput);
-      this.el.appendChild(grid);
+      // render 的 replaceChildren 会把 el 摘下来——重挂即可，列表状态在组件里
+      this.el.appendChild(this.mcGrid.el);
+      this.mcGrid.syncTiles();
     } else {
       const note = document.createElement("div");
       note.className = "pet-skin-note";
       note.textContent = "猫/狗使用内置形象，皮肤仅对玩家形态生效";
       this.el.appendChild(note);
     }
-
-    if (this.mcError) {
-      const err = document.createElement("div");
-      err.className = "pet-skin-error";
-      err.textContent = this.mcError;
-      this.el.appendChild(err);
-    }
-  }
-
-  /** 皮肤格子：48px 静态预览 + 删除 ×（两击确认；使用中/内置禁用）。 */
-  private skinTile(
-    id: string,
-    name: string,
-    deletable: boolean,
-  ): HTMLDivElement {
-    const tile = document.createElement("div");
-    tile.className = "pet-skin-tile";
-    tile.title = name;
-    tile.classList.toggle(
-      "selected",
-      this.mcForm === "player" && id === this.mcSkinId,
-    );
-
-    const canvas = document.createElement("canvas");
-    canvas.width = 48;
-    canvas.height = 48;
-    drawAvatarStill(canvas, { kind: "minecraft", form: "player", skinId: id });
-    tile.appendChild(canvas);
-
-    tile.addEventListener("click", () => {
-      this.pendingDelete = null;
-      this.mcSkinId = id;
-      this.render();
-      this.startLoop(); // render 顶部 stopLoop，重渲染后必须重启动画循环，否则预览空白
-    });
-
-    if (deletable) {
-      const del = document.createElement("button");
-      del.className = "pet-skin-del";
-      const inUse = this.currentMcAvatar?.skinId === id;
-      del.disabled = inUse;
-      del.textContent = this.pendingDelete === id ? "确认" : "×";
-      del.title = inUse
-        ? "使用中，不能删除"
-        : this.pendingDelete === id
-          ? "再点一次确认删除"
-          : "删除";
-      del.addEventListener("click", (ev) => {
-        ev.stopPropagation();
-        if (this.pendingDelete === id) {
-          void this.removeSkin(id);
-        } else {
-          this.pendingDelete = id;
-          this.render();
-          this.startLoop(); // render 顶部 stopLoop，重渲染后必须重启动画循环，否则预览空白
-        }
-      });
-      tile.appendChild(del);
-    }
-    return tile;
-  }
-
-  private async importSkinFile(file: File): Promise<void> {
-    this.mcError = "";
-    this.pendingDelete = null;
-    try {
-      const bytes = new Uint8Array(await file.arrayBuffer());
-      const name = file.name.replace(/\.png$/i, "") || "皮肤";
-      const meta = await importSkin(name, bytes);
-      if (!(await ensureSkinLoaded(meta.id))) {
-        this.mcError = "皮肤载入失败，请重试";
-      } else {
-        this.mcSkinId = meta.id;
-      }
-    } catch (e) {
-      this.mcError = skinErrorText(e);
-    }
-    await this.refreshMcSkins();
-  }
-
-  private async removeSkin(id: string): Promise<void> {
-    this.pendingDelete = null;
-    this.mcError = "";
-    try {
-      await deleteSkin(id);
-      if (this.mcSkinId === id) this.mcSkinId = BUILTIN_SKIN_IDS.player;
-    } catch (e) {
-      this.mcError = skinErrorText(e);
-    }
-    await this.refreshMcSkins();
   }
 
   private drawPreview(slot: PreviewSlot, avatar: PetAvatar, now: number): void {
