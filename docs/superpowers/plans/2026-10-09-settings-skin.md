@@ -631,11 +631,11 @@ import type { McForm } from "../mc/model";
 
 - [ ] **Step 4: index.html 追加 CSS**
 
-`.pet-skin-error` 规则（约 1548 行）之后追加（对齐设置行内容左缘 74px 标签 + 10px 间距，其余复用弹窗既有类）：
+`.pet-skin-error` 规则（约 1548 行）之后追加（对齐设置行内容左缘（14px 行内边距 + 74px 标签 + 10px 间距），其余复用弹窗既有类）：
 
 ```css
       /* —— 设置面板形象区块的 MC 形态行/皮肤格（对齐行内容左缘）—— */
-      .pet-settings-avatar-mc { margin: 0 14px 8px 84px; }
+      .pet-settings-avatar-mc { margin: 0 14px 8px 98px; }
       .pet-settings-avatar-mc .pet-mc-form-row { margin: 0 0 4px; }
       .pet-settings-avatar-mc .pet-skin-grid { margin: 0; }
       .pet-settings-avatar-mc .pet-skin-note { margin: 0; }

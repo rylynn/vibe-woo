@@ -244,6 +244,8 @@ export class AvatarPicker {
     }
     this.candidates = initial ?? generateCandidates(Math.random);
     this.selected = -1;
+    // grid 实例跨开合复用，武装态会残留 —— 重开先清，保住两击确认语义
+    this.mcGrid?.cancelPendingDelete();
     // 每次打开弹窗重拉一次皮肤列表：同步设置面板等其他入口的导入/删除
     void this.mcGrid?.refresh();
     this.render();

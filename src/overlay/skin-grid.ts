@@ -151,9 +151,10 @@ export class SkinGrid {
       const name = file.name.replace(/\.png$/i, "") || "皮肤";
       const meta = await importSkin(name, bytes);
       if (!(await ensureSkinLoaded(meta.id))) {
-        // PNG 头合法但像素不可解码：留在库内不选中，行内提示（M3 行为）
+        // PNG 头合法但像素不可解码：importSkin 已把皮肤写入库 —— refresh 重建
+        // 格子，这条新库目才可见可删；refresh 不清 error，行内提示仍在
         this.error = "皮肤载入失败，请重试";
-        this.renderTiles();
+        await this.refresh();
         return;
       }
       await this.refresh();

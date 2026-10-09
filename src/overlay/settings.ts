@@ -121,12 +121,26 @@ export class SettingsPanel {
     this.el.style.display = "block";
     this.open = true;
     void invoke("begin_text_input").catch(() => {});
+    // 皮肤列表每次重开都重拉：弹窗侧的导入/删除要即时可见（与弹窗 show() 对称）
+    void this.skinGrid?.refresh();
     if (!this.cfg) {
       // 首次打开：显示加载骨架，数据到了再真正渲染
       this.renderLoading();
       this.cfg = await getConfig();
+      this.render();
+      return;
     }
     this.render();
+    // 形象弹窗确认走 main.ts 直接持久化，本面板的 cfg 副本不随之更新 ——
+    // 每次重开都后台重拉真源再重渲染；等待期间维持上一次渲染（乐观观感）。
+    // 只刷自己的视图副本，不调 onApply：宠物/主进程状态已经是正确的。
+    void getConfig()
+      .then((c) => {
+        if (!this.open) return; // 等待期间面板已关：丢弃，不在隐藏态白渲染
+        this.cfg = c;
+        this.render();
+      })
+      .catch(() => {});
   }
 
   private renderLoading(): void {
