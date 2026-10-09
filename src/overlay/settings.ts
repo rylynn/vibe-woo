@@ -21,8 +21,15 @@ import {
 } from "../text-tools";
 import { prettyShortcut, shortcutFromEvent, isValidShortcut } from "../shortcut";
 import { panelChrome } from "./chrome";
-import { avatarFromView, type PetAvatar } from "../avatar/types";
+import {
+  avatarFromView,
+  isMcConfigView,
+  type PetAvatar,
+} from "../avatar/types";
 import { drawAvatarStill } from "./avatar-picker";
+import { SkinGrid } from "./skin-grid";
+import { BUILTIN_SKIN_IDS, builtinSkinId } from "../mc/builtins";
+import type { McForm } from "../mc/model";
 import { PluginSettingsShell } from "../plugins/settings";
 
 /** 形象相关操作流（由 main.ts 装配，避免设置面板直接依赖弹窗与持久化）。 */
@@ -89,6 +96,10 @@ export class SettingsPanel {
     btn: HTMLButtonElement;
     handler: (e: KeyboardEvent) => void;
   } | null = null;
+  /** 会话内上次玩家皮肤：猫/狗切回玩家时恢复（规格 2026-10-09 §4）。 */
+  private lastPlayerSkin = BUILTIN_SKIN_IDS.player;
+  /** 皮肤格组件：实例跨 render 复用，render 只重挂 el（与弹窗同模式）。 */
+  private skinGrid: SkinGrid | null = null;
 
   constructor(
     private readonly onApply: (c: ConfigView) => void,
@@ -362,7 +373,7 @@ export class SettingsPanel {
     this.el.appendChild(this.footer());
   }
 
-  /** 形象区块：当前形象 48px 预览 + 换一批 / 从图片生成入口。 */
+  /** 形象区块：当前形象 48px 预览 + 换一批 / 从图片生成；MC 时再加形态行与皮肤格。 */
   private rowAvatar(c: ConfigView): HTMLElement {
     const r = this.row("形象");
 
@@ -405,7 +416,79 @@ export class SettingsPanel {
       });
       r.append(fromImage, input);
     }
-    return r;
+
+    // —— MC 形象：形态行 + 皮肤格/说明行（规格 2026-10-09 §2）——
+    // 参数形象/未领养不显示（参数形象用户零打扰），参数↔MC 往返仍走弹窗
+    const v = c.avatar;
+    if (!(v && isMcConfigView(v))) return r;
+    if (v.form === "player") this.lastPlayerSkin = v.skin_id;
+
+    const block = document.createElement("div");
+    block.className = "pet-settings-avatar-mc";
+    block.appendChild(this.mcFormRow(v.form));
+    if (v.form === "player") {
+      if (!this.skinGrid) {
+        this.skinGrid = new SkinGrid({
+          // 设置侧真源是 config 本身（点格即 patch，无本地选中态）
+          currentId: () => {
+            const a = this.cfg?.avatar;
+            return a && isMcConfigView(a) && a.form === "player" ? a.skin_id : "";
+          },
+          inUseId: () => {
+            const a = this.cfg?.avatar;
+            return a && isMcConfigView(a) ? a.skin_id : null;
+          },
+          onPick: (id) => {
+            void this.patch({ avatar: { form: "player", skin_id: id } });
+          },
+          // 在用守卫使 config 当前皮肤不可删，删除不会改变当前形象，无需回退
+          onRemoved: () => {},
+        });
+        void this.skinGrid.refresh();
+      }
+      // render 的 replaceChildren 会把 el 摘下来——重挂并按最新 config 刷高亮
+      this.skinGrid.cancelPendingDelete();
+      block.appendChild(this.skinGrid.el);
+      this.skinGrid.syncTiles();
+    } else {
+      const note = document.createElement("div");
+      note.className = "pet-skin-note";
+      note.textContent = "猫/狗使用内置形象，皮肤仅对玩家形态生效";
+      block.appendChild(note);
+    }
+
+    const wrap = document.createElement("div");
+    wrap.appendChild(r);
+    wrap.appendChild(block);
+    return wrap;
+  }
+
+  /** MC 形态行：玩家/猫/狗三按钮，点选即 patch（规格 §4 归一化）。 */
+  private mcFormRow(current: McForm): HTMLElement {
+    const row = document.createElement("div");
+    row.className = "pet-mc-form-row";
+    for (const [form, label] of [
+      ["player", "玩家"],
+      ["cat", "猫"],
+      ["dog", "狗"],
+    ] as const) {
+      const btn = document.createElement("button");
+      btn.className = "pet-mc-form-btn";
+      btn.textContent = label;
+      btn.classList.toggle("active", current === form);
+      btn.addEventListener("click", () => {
+        if (current === form) return;
+        this.skinGrid?.cancelPendingDelete();
+        void this.patch({
+          avatar:
+            form === "player"
+              ? { form: "player", skin_id: this.lastPlayerSkin }
+              : { form, skin_id: builtinSkinId(form) },
+        });
+      });
+      row.appendChild(btn);
+    }
+    return row;
   }
 
   /** 关于入口：面板最底部的一颗按钮，点开是独立的关于面板。 */
